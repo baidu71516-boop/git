@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     business_timezone: str = "Asia/Shanghai"
     api_prefix: str = "/api/v1"
 
+    session_cookie_name: str = "outreach_session"
+    csrf_cookie_name: str = "outreach_csrf"
+    session_default_hours: int = Field(default=12, ge=1)
+    session_remember_days: int = Field(default=30, ge=1)
+    login_max_failures: int = Field(default=5, ge=1)
+    login_lock_seconds: int = Field(default=300, ge=1)
+
     database_url: str = "postgresql+psycopg://outreach@localhost:5432/outreach"
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
@@ -34,6 +41,10 @@ class Settings(BaseSettings):
 
     import_data_dir: Path = Path("/data/imports")
     import_retention_days: int = Field(default=30, ge=1)
+
+    @property
+    def secure_cookies(self) -> bool:
+        return self.app_env == "production"
 
     @field_validator("business_timezone")
     @classmethod

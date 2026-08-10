@@ -45,3 +45,37 @@ body {
   margin-right: 8px;
   color: #16a34a;
 }
+
+.auth-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 48px 24px;
+  background:
+    radial-gradient(circle at 18% 16%, rgb(22 119 255 / 11%), transparent 36%),
+    #f4f7fb;
+}
+
+.auth-loading {
+  color: #475467;
+}
+
+.login-card {
+  width: min(440px, 100%);
+  border: 1px solid #e6ebf2;
+  box-shadow: 0 18px 56px rgb(25 42 70 / 12%);
+}
+
+.login-success-card {
+  width: min(680px, 100%);
+  border: 1px solid #e6ebf2;
+  box-shadow: 0 18px 56px rgb(25 42 70 / 10%);
+}
+
+.full-width {
+  width: 100%;
+}
+
+.modal-error {
+  margin-bottom: 16px;
+}

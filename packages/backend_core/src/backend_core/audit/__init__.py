@@ -1,1 +1,5 @@
-"""Audit domain placeholder; business audit persistence begins in Phase 1."""
+"""Security and business audit persistence."""
+
+from backend_core.audit.enums import AuditAction, AuditResult
+
+__all__ = ["AuditAction", "AuditResult"]

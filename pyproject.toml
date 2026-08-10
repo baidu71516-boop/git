@@ -6,8 +6,10 @@ dependencies = []
 
 [dependency-groups]
 dev = [
+  "aiosqlite>=0.20,<1",
   "black>=24.10,<26",
   "httpx>=0.27,<1",
+  "fakeredis>=2.26,<3",
   "mypy>=1.13,<2",
   "pytest>=8.3,<9",
   "pytest-cov>=6,<8",

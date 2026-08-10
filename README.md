@@ -97,7 +97,7 @@
 - Phase 4：CRM + Analytics + 操作日志
 - Phase 5：稳定性、权限、备份、压测、上线
 
-## 7. Phase 0 开发环境
+## 7. 开发环境
 
 ### 前置条件
 
@@ -119,6 +119,14 @@ make dev
 - `GET /health/live`：API 进程存活。
 - `GET /health/ready`：PostgreSQL 与 Redis 就绪。
 
+Phase 1A 认证接口：
+
+- `GET /api/v1/departments`：登录页可选的启用部门。
+- `POST /api/v1/auth/login`：部门密码登录。
+- `GET /api/v1/operators`：当前部门可选操作人。
+- `POST /api/v1/auth/select-operator`：选择审计归属，不改变 Session 权限。
+- `GET /api/v1/auth/me`、`POST /api/v1/auth/logout`：当前身份与退出。
+
 ### 常用命令
 
 ```bash
@@ -130,12 +138,27 @@ make compose-validate  # 校验 Compose 配置
 make down              # 停止服务，保留持久卷
 ```
 
+### 首个管理员
+
+数据库迁移完成后，通过容器内的一次性 CLI 创建首个管理部门和 Super Admin。
+命令不会提供默认账户或默认密码；未使用 `--password-stdin` 时会安全地交互读取并确认密码。
+
+```bash
+docker-compose exec api bootstrap-admin \
+  --department-name "管理部门" \
+  --operator-name "首位管理员"
+```
+
+创建成功后不可再次运行 bootstrap。部门密码使用 Argon2id，Session Cookie 为 HttpOnly，
+生产环境通过 `APP_ENV=production` 启用 Secure，并要求运行环境注入 `APP_MASTER_KEY`。
+
 ### 后端边界
 
 - `packages/backend_core` 是唯一共享 Python 后端核心包。
 - `apps/api` 只负责 HTTP。
 - `apps/worker` 只负责 Celery 任务入口。
-- Phase 0 不包含登录、达人、Campaign、真实 AI、真实邮件或 CRM 业务。
+- Phase 1A 业务规则只存在于 `backend_core.auth` 与 `backend_core.audit`。
+- 当前仍不包含导入、达人、Campaign、真实 AI、真实邮件或 CRM 业务。
 
 ### 数据与日志
 

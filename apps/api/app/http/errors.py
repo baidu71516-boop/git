@@ -2,6 +2,7 @@
 
 import logging
 
+from backend_core.auth import AuthError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -34,12 +35,31 @@ def register_exception_handlers(app: FastAPI) -> None:
             ),
         )
 
+    @app.exception_handler(AuthError)
+    async def auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=envelope(
+                request,
+                error={"code": exc.code, "message": exc.message, "details": None},
+            ),
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
-        details = list(exc.errors())
+        # Pydantic errors can contain the rejected input. Return only structural
+        # diagnostics so passwords and other request values never echo back.
+        details = [
+            {
+                "type": error.get("type"),
+                "loc": error.get("loc"),
+                "msg": error.get("msg"),
+            }
+            for error in exc.errors()
+        ]
         return JSONResponse(
             status_code=422,
             content=envelope(

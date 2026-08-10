@@ -2,6 +2,31 @@
 
 本文档记录达人智能触达系统的可交付变更。
 
+## [Unreleased] - Phase 1A
+
+### Added
+
+- 新增 Department、部门级权限、Operator、Session 与 Audit Log 数据模型及 `0002_phase1a_auth` migration。
+- 新增部门密码登录、操作人选择、当前身份、退出和管理员重置部门密码 API。
+- 新增一次性 `bootstrap-admin` CLI，不包含默认账户或默认密码。
+- 新增登录、操作人选择与最小登录成功 Web UI。
+- 新增 Argon2id 密码、Redis 部门/IP 锁定、Session/CSRF Token 哈希与双提交 CSRF 防护。
+
+### Security
+
+- Session Token 只以 SHA-256 hash 保存；Session Cookie 为 HttpOnly、SameSite=Lax，生产环境启用 Secure。
+- 选择 Operator 只改变 Audit 归属；权限始终取自 Department，无法通过高角色 Operator 提权。
+- 登录连续五次失败锁定五分钟；成功登录清除对应 Department + IP 失败状态。
+- 密码重置在同一事务中撤销目标 Department 的所有 Session，并记录 Audit。
+- Nginx 覆盖不可信 `X-Forwarded-For`，防止客户端伪造 IP 绕过登录锁定。
+- API 校验错误不回显原始输入，避免无效密码出现在响应或诊断内容中。
+
+### Verification
+
+- Phase 1A 核心、HTTP 与 Web 自动化测试覆盖登录、锁定、Session、CSRF、权限不可提升和 Audit。
+- Docker 镜像构建通过，七服务健康；Alembic 首次及重复升级均保持 `0002_phase1a (head)`。
+- Docker buildx 缺失继续记录为正式部署前事项，不阻塞本阶段。
+
 ## [0.1.0] - 2026-08-10
 
 ### Added

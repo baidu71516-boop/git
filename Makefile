@@ -10,6 +10,7 @@ install:
 dev:
 	./infrastructure/scripts/ensure-env.sh
 	$(COMPOSE) up --build --detach
+	$(COMPOSE) up --detach --force-recreate --wait --wait-timeout 120 nginx
 
 down:
 	$(COMPOSE) down

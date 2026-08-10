@@ -1,5 +1,5 @@
-import { PhaseZeroStatus } from "@/components/phase-zero-status";
+import { AuthShell } from "@/components/auth-shell";
 
 export default function Home() {
-  return <PhaseZeroStatus />;
+  return <AuthShell />;
 }
