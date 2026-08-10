@@ -1,0 +1,166 @@
+name: influencer-outreach
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-outreach}
+      POSTGRES_USER: ${POSTGRES_USER:-outreach}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/python.Dockerfile
+    command:
+      - uvicorn
+      - app.main:app
+      - --app-dir
+      - /workspace/apps/api
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    env_file: .env
+    volumes:
+      - import_data:/data/imports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/python.Dockerfile
+    command:
+      - celery
+      - --workdir
+      - /workspace/apps/worker
+      - -A
+      - app.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --queues=default,import,ai,email,analytics
+      - --hostname=worker@%h
+    env_file: .env
+    volumes:
+      - import_data:/data/imports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "celery --workdir /workspace/apps/worker -A app.celery_app:celery_app inspect ping -d worker@$$HOSTNAME --timeout 5 | grep -q pong"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/python.Dockerfile
+    command:
+      - celery
+      - --workdir
+      - /workspace/apps/worker
+      - -A
+      - app.celery_app:celery_app
+      - beat
+      - --loglevel=INFO
+      - --pidfile=/tmp/celerybeat.pid
+      - --schedule=/tmp/celerybeat-schedule
+    env_file: .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /tmp/celerybeat.pid && kill -0 $$(cat /tmp/celerybeat.pid)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [backend]
+
+  web:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/web.Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-/api/v1}
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [frontend]
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${APP_PORT:-8080}:80"
+    volumes:
+      - ./infrastructure/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [frontend, backend]
+
+networks:
+  frontend:
+  backend:
+    internal: true
+
+volumes:
+  postgres_data:
+  redis_data:
+  import_data:
+

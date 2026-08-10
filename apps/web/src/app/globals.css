@@ -1,0 +1,47 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: #f4f7fb;
+  color: #172033;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+.status-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 48px 24px;
+  background:
+    radial-gradient(circle at 20% 15%, rgb(22 119 255 / 10%), transparent 35%),
+    #f4f7fb;
+}
+
+.status-card {
+  width: min(680px, 100%);
+  border: 1px solid #e6ebf2;
+  box-shadow: 0 16px 48px rgb(25 42 70 / 10%);
+}
+
+.subtitle {
+  max-width: 520px;
+  color: #667085;
+  font-size: 16px;
+}
+
+.success-icon {
+  margin-right: 8px;
+  color: #16a34a;
+}

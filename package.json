@@ -1,0 +1,13 @@
+{
+  "name": "influencer-outreach-project",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.16.0",
+  "scripts": {
+    "lint": "pnpm --filter @influencer-outreach/web lint",
+    "typecheck": "pnpm --filter @influencer-outreach/web typecheck",
+    "test": "pnpm --filter @influencer-outreach/web test",
+    "build": "pnpm --filter @influencer-outreach/web build"
+  }
+}
+

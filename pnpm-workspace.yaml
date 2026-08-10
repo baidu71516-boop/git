@@ -1,0 +1,10 @@
+packages:
+  - apps/web
+  - packages/ui
+  - packages/types
+  - packages/shared
+allowBuilds:
+  # Native resolver is optional for this Phase 0 project; do not execute its install script.
+  unrs-resolver: false
+minimumReleaseAgeExclude:
+  - '@testing-library/jest-dom@7.0.1'
