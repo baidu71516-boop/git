@@ -65,8 +65,9 @@
 ### influencer_contacts
 
 - influencer_id、platform_account_id nullable、type、value、normalized_value、source、validation_status、is_current、possible_duplicate_contact。
-- first_seen_at、last_seen_at、source_updated_at、first/last_import_job_id。
+- first_seen_at、last_seen_at、source_updated_at、first/last_import_job_id 与 first/last_import_row_id。
 - 仅建立达人内部的合理唯一约束；不同达人允许相同 Email。manual Contact 永不被 Huitun Import 修改或删除。
+- 同源同 Contact 再次出现时不重复创建、业务动作保持 NO_CHANGE，只刷新 last_seen/last import 来源元数据；首次来源保持不变。
 
 ### influencer_current_metrics
 
@@ -76,7 +77,7 @@
 ### influencer_metric_snapshots
 
 - influencer_id、platform_account_id、source、source_updated_at、import_job_id/row_id、captured_at、metrics、metrics_hash。
-- 历史不可变；唯一(platform_account_id, source, source_updated_at, metrics_hash) 防止重复快照。
+- 历史不可变；稳定 snapshot_key 与 import_row_id 唯一约束共同防止空时间和重试产生重复快照。
 
 AuditAction 扩展 Import 上传、Mapping 更新、Preview 创建/重建、Confirm 请求、Preview Stale、完成、失败、取消。Audit after 只保存 job/revision/reason/count，不保存 Contact 原文。
 
@@ -85,7 +86,7 @@ AuditAction 扩展 Import 上传、Mapping 更新、Preview 创建/重建、Conf
 - StorageProtocol 与 LocalStorageAdapter 位于 backend_core；Local 实现使用 `/data/imports`、随机 key、原子落盘和流式 SHA-256。
 - 默认最大文件 25 MiB，可通过环境变量收紧；只允许 `.csv`/`.xlsx`。
 - 服务端同时检查扩展名、声明 MIME、magic/content 和实际 Parser；拒绝 `.xlsm`、OLE、脚本和伪装类型。
-- CSV 严格解析 UTF-8/UTF-8 BOM，并可安全探测 GB18030；记录编码和分隔符，拒绝空文件、重复 Header、异常行宽。
+- CSV 严格解析 UTF-8/UTF-8 BOM，并可安全探测 GB18030；记录编码和分隔符，拒绝空文件与重复 Header；异常行宽只拒绝该行并保存行级 Error，其余合法行继续。
 - XLSX 在解压前检查 entry 数、路径穿越、加密、宏/ActiveX/external link、总解压大小和压缩比。使用 openpyxl read-only；公式绝不执行，公式单元格忽略并产生 Warning。
 - Parser 产生 RawTabularRecord；Source Adapter 输出通用 CanonicalInfluencerRecord，其中身份结构为 platform_identity(platform, platform_account_id, account_handle, profile_url)，公开资料、Contact 和 Metrics 分区明确。HuitunCsvAdapter/HuitunExcelAdapter 的中文字段映射集中在单一 mapping 定义；GenericCsvAdapter 只使用 Canonical Header/显式 Mapping。通用 Planner 不读取灰豚中文列名，也不引用 xhs_profile_id 变量名。
 - `--`、空串、纯空白和大小写 NULL 标准化为 null，但 raw_data 不变。

@@ -3,6 +3,7 @@
 import logging
 
 from backend_core.auth import AuthError
+from backend_core.imports.errors import ImportDomainError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -42,6 +43,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             content=envelope(
                 request,
                 error={"code": exc.code, "message": exc.message, "details": None},
+            ),
+        )
+
+    @app.exception_handler(ImportDomainError)
+    async def import_error_handler(request: Request, exc: ImportDomainError) -> JSONResponse:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=envelope(
+                request,
+                error={
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                },
             ),
         )
 

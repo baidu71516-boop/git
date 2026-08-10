@@ -4,21 +4,21 @@
 
 本文件只保留无法从现有文档、安全规则或保守工程原则推导的外部事实。工程实现细节不作为产品阻塞问题。
 
-Phase 1A 收尾结论：以下五项均不阻塞 Phase 1A；Phase 1B 开始前需要处理 OPEN-001 与 OPEN-002。
+Phase 1B 收尾结论：真实灰豚样本与 Phase 1B 权限矩阵均已确认；当前 OPEN 项不阻塞 Phase 1B，也不阻塞进入后续独立验收。
 
 ## OPEN
 
 | ID | 需要的外部信息 | 最晚确认阶段 | 当前影响 |
 |---|---|---|---|
-| OPEN-001 | 实际灰豚导出样本，用于确认列名、别名与数据格式 | Phase 1B 前 | 不阻塞 Phase 1A |
-| OPEN-002 | 管理部门与普通部门的最终业务权限矩阵 | Phase 1B 前 | 不阻塞 Phase 1A；1A 仅建立部门级 RBAC 基础 |
-| OPEN-003 | 实际 AI Provider、模型和生产凭证注入信息 | Phase 2 前 | 不阻塞 Phase 0 |
-| OPEN-004 | Pilot Mailbox 的 SMTP/IMAP 参数及服务端能力 | Phase 3 前 | 不阻塞 Phase 0 |
-| OPEN-005 | 生产域名、证书、备份目标和告警接收渠道 | Phase 5 前 | 不阻塞 Phase 0 |
+| OPEN-003 | 实际 AI Provider、模型和生产凭证注入信息 | Phase 2 前 | 不阻塞 Phase 1B |
+| OPEN-004 | Pilot Mailbox 的 SMTP/IMAP 参数及服务端能力 | Phase 3 前 | 不阻塞 Phase 1B |
+| OPEN-005 | 生产 HTTPS 证书的签发与续期方案 | Phase 5 前 | 服务器与域名已具备；不阻塞 Phase 1B |
+| OPEN-006 | 生产备份存储目标、最终保留期和恢复责任人 | Phase 5 前 | 不阻塞 Phase 1B |
+| OPEN-007 | 生产告警渠道、接收人和响应责任 | Phase 5 前 | 不阻塞 Phase 1B |
 
 ## PRE-DEPLOYMENT
 
-- 当前本地 Docker Compose 使用 classic builder 完成验证；正式部署前安装并验证 Docker buildx。该项不阻塞 Phase 1A。
+- `PREDEPLOY-001`：当前本地 Docker Compose 使用 classic builder 完成验证；正式部署前安装并验证 Docker buildx。该项不阻塞 Phase 1B。
 
 ## RESOLVED
 
@@ -46,3 +46,6 @@ Phase 1A 收尾结论：以下五项均不阻塞 Phase 1A；Phase 1B 开始前�
 | RESOLVED-018 | `campaign_leads.stop_email` 默认 false；wechat_added=true 时默认 stop_email=true。 | Phase 3 |
 | RESOLVED-019 | APP_MASTER_KEY 从生产 Secret 注入，不进入数据库、Git 或日志；邮箱凭证加密存储。 | Phase 0、3 |
 | RESOLVED-020 | Analytics 指标、唯一 Lead 计数、A/B 正向回复及 Asia/Shanghai 事件日期归属按已确认口径执行。 | Phase 4 |
+| RESOLVED-021 | 已读取真实灰豚 CSV：UTF-8 BOM、逗号分隔、50 行、37 列且行宽一致；不存在 huitun_id，“灰豚指数”为 decimal；50 个 Profile URL 均可提取唯一平台 ID；9 个有效 Email、41 个缺失、0 个无效；样本内无硬重复或重复 Contact。真实文件保持在仓库外。 | Phase 1B |
+| RESOLVED-022 | Phase 1B 读取要求认证；Mutation 还要求已选择 Operator、CSRF 与非 Viewer 角色。Manager/Operator 限本部门，Super Admin 可跨部门；Operator 只改变 Audit 归属，Session 权限仍来自 Department。 | Phase 1B |
+| RESOLVED-023 | 生产服务器与生产域名已购买；仅证书、备份目标和告警渠道继续保持 OPEN。 | Phase 5 |

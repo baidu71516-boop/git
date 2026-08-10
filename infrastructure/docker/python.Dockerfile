@@ -14,6 +14,7 @@ WORKDIR /workspace
 COPY . .
 RUN uv sync --frozen --all-packages --no-dev \
     && mkdir -p /data/imports \
-    && chown -R app:app /workspace /data/imports
+    && chown -R app:app /workspace /data/imports \
+    && chmod 0700 /data/imports
 
 USER app

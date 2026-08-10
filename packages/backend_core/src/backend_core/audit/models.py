@@ -3,12 +3,13 @@
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import JSON, Enum, ForeignKey, Index, String
+from sqlalchemy import Enum, ForeignKey, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.db.base import Base
 from backend_core.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
+from backend_core.db.types import JSON_DOCUMENT
 
 
 def audit_enum_values(enum_type: type[AuditAction] | type[AuditResult]) -> list[str]:
@@ -41,7 +42,7 @@ class AuditLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     entity_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     entity_id: Mapped[UUID | None] = mapped_column(nullable=True)
-    before: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    after: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    before: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
+    after: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
     ip: Mapped[str] = mapped_column(String(64), nullable=False)
     user_agent: Mapped[str] = mapped_column(String(512), nullable=False)

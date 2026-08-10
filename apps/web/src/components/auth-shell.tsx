@@ -19,6 +19,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 
 import { ApiClientError, apiRequest } from "@/lib/api/client";
+import { ImportWorkspace } from "@/components/import-workspace";
 
 const { Paragraph, Text, Title } = Typography;
 
@@ -211,12 +212,17 @@ export function AuthShell() {
   }
 
   return (
-    <main className="auth-shell">
-      <Card className="login-success-card" bordered={false}>
+    <main className="auth-shell app-authenticated">
+      <Card className="identity-card" bordered={false}>
         <Space direction="vertical" size="large" className="full-width">
-          <div>
-            <Tag color="success">登录成功</Tag>
-            <Title level={2}>当前身份</Title>
+          <div className="workspace-heading">
+            <div>
+              <Tag color="success">登录成功</Tag>
+              <Title level={3}>当前身份</Title>
+            </div>
+            <Button onClick={() => void handleLogout()} loading={submitting}>
+              退出登录
+            </Button>
           </div>
           {error ? <Alert type="error" showIcon message={error} /> : null}
           <Descriptions bordered column={1}>
@@ -233,11 +239,10 @@ export function AuthShell() {
           <Text type="secondary">
             <UserOutlined /> 选择操作人仅改变操作归属，不会改变 Session 权限。
           </Text>
-          <Button onClick={() => void handleLogout()} loading={submitting}>
-            退出登录
-          </Button>
         </Space>
       </Card>
+
+      {auth.operator ? <ImportWorkspace role={auth.role} /> : null}
 
       <Modal
         title="选择当前操作人"

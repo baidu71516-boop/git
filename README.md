@@ -127,6 +127,18 @@ Phase 1A 认证接口：
 - `POST /api/v1/auth/select-operator`：选择审计归属，不改变 Session 权限。
 - `GET /api/v1/auth/me`、`POST /api/v1/auth/logout`：当前身份与退出。
 
+Phase 1B 采集与导入接口：
+
+- `POST /api/v1/collection-jobs`、`GET /api/v1/collection-jobs`、`GET /api/v1/collection-jobs/{id}`：创建和读取部门采集任务。
+- `POST /api/v1/import-jobs`：上传 CSV/XLSX，安全落盘后以 `202 Accepted` 排队解析。
+- `GET /api/v1/import-jobs/{id}`、`GET /api/v1/import-jobs/{id}/rows`：轮询 Job，并分页查看标准化数据、原始行、Warning 与 Error。
+- `PUT /api/v1/import-jobs/{id}/mapping`：保存字段 Mapping 并生成新的 Preview Revision。
+- `POST /api/v1/import-jobs/{id}/preview`：显式重建失效或需刷新的 Preview。
+- `POST /api/v1/import-jobs/{id}/confirm`：携带 `preview_revision` 异步确认；同一 Revision 严格幂等。
+- `POST /api/v1/import-jobs/{id}/cancel`：取消尚未正式写入的 Import。
+
+Preview Plan 持久化在 Import Row 中。Confirm 会重新运行相同 Planner 并校验 Plan Hash；相关数据发生变化时进入 `preview_stale`，必须由用户查看新 Preview 后再次确认。
+
 ### 常用命令
 
 ```bash
@@ -137,6 +149,8 @@ make migrate           # 执行 Alembic migration
 make compose-validate  # 校验 Compose 配置
 make down              # 停止服务，保留持久卷
 ```
+
+PostgreSQL 并发测试和真实灰豚附件测试是显式门控测试，分别要求安全的 `TEST_DATABASE_URL` 和仓库外的 `HUITUN_REAL_SAMPLE_PATH`；默认 `make test` 会跳过这两个外部依赖，不会读取真实文件。
 
 ### 首个管理员
 
@@ -157,12 +171,15 @@ docker-compose exec api bootstrap-admin \
 - `packages/backend_core` 是唯一共享 Python 后端核心包。
 - `apps/api` 只负责 HTTP。
 - `apps/worker` 只负责 Celery 任务入口。
-- Phase 1A 业务规则只存在于 `backend_core.auth` 与 `backend_core.audit`。
-- 当前仍不包含导入、达人、Campaign、真实 AI、真实邮件或 CRM 业务。
+- Phase 1A/1B 规则只存在于 `backend_core.auth`、`backend_core.audit`、`backend_core.imports` 与 `backend_core.influencers`。
+- Phase 1B 只建立导入所需的公司级 Influencer、PlatformAccount、Source State、Contact、Current Metrics 与 Metric Snapshot；不包含 Phase 1C 的完整达人库列表、详情或筛选。
+- 当前仍不包含 Campaign、真实 AI、真实邮件、Inbox、CRM、Analytics 或其他平台 Connector。
 
 ### 数据与日志
 
 - PostgreSQL、Redis 与 `/data/imports` 使用 Docker named volume。
 - PostgreSQL 与 Redis 不映射宿主机端口。
-- 导入文件的业务保留和清理逻辑从 Phase 1 开始实现。
+- 原始导入文件使用随机 Storage Key、`0700` 目录与 `0600` 文件权限，并保存 SHA-256；只接受经过扩展名、MIME、内容和 Parser 交叉校验的 CSV/XLSX，默认应用上限为 25 MiB。
+- 数据库为每个 Storage Object 保存默认 30 天 `expires_at`，相同 SHA-256 的新上传会延长到期时间。物理清理执行器需在正式部署的定时运维中接入；当前不会错误声称已自动删除到期文件。
+- Viewer 只能读取；Upload、Mapping、Preview、Confirm 与 Cancel 均由后端强制要求已选择 Operator、CSRF 和非 Viewer 部门权限。
 - 日志禁止包含密码、Token、Provider Key 或 `APP_MASTER_KEY`。

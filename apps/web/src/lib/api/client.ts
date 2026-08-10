@@ -43,16 +43,44 @@ export async function apiRequest<T>(
   const method = (init.method ?? "GET").toUpperCase();
   const csrfToken =
     method === "GET" || method === "HEAD" ? null : readCookie("outreach_csrf");
+  const headers = new Headers(init.headers);
+  if (csrfToken) {
+    headers.set("X-CSRF-Token", csrfToken);
+  }
+  if (
+    init.body !== undefined &&
+    !(typeof FormData !== "undefined" && init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
+    headers.set("Content-Type", "application/json");
+  }
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
-      ...init.headers,
-    },
+    headers,
   });
-  const payload = (await response.json()) as ApiEnvelope<T>;
+  const responseText = await response.text();
+  let payload: ApiEnvelope<T> | null = null;
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText) as ApiEnvelope<T>;
+    } catch {
+      payload = null;
+    }
+  }
+  if (payload === null) {
+    const message =
+      response.status === 413
+        ? "上传文件超过网关允许的大小"
+        : response.ok
+          ? "API 返回了无法识别的响应"
+          : `API 请求失败（HTTP ${response.status}）`;
+    throw new ApiClientError(
+      message,
+      response.status,
+      response.status === 413 ? "FILE_TOO_LARGE" : "INVALID_RESPONSE",
+    );
+  }
   if (!response.ok || !payload.success) {
     throw new ApiClientError(
       payload.error?.message ?? "API request failed",

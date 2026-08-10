@@ -61,6 +61,7 @@ class Operator(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "operators"
     __table_args__ = (
         UniqueConstraint("department_id", "name", name="uq_operators_department_name"),
+        UniqueConstraint("id", "department_id", name="uq_operators_id_department"),
         Index("ix_operators_department_status", "department_id", "status"),
     )
 

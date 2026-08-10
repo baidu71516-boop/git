@@ -12,7 +12,7 @@ celery_app = Celery(
     "influencer_outreach",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.health"],
+    include=["app.tasks.health", "app.tasks.imports"],
 )
 celery_app.conf.update(
     accept_content=["json"],
@@ -20,6 +20,10 @@ celery_app.conf.update(
     enable_utc=True,
     result_serializer="json",
     task_default_queue="default",
+    task_routes={
+        "imports.parse_import_job": {"queue": "import"},
+        "imports.confirm_import_job": {"queue": "import"},
+    },
     task_queues=(
         Queue("default"),
         Queue("import"),
@@ -29,5 +33,6 @@ celery_app.conf.update(
     ),
     task_serializer="json",
     timezone=settings.business_timezone,
+    worker_prefetch_multiplier=1,
     worker_hijack_root_logger=False,
 )

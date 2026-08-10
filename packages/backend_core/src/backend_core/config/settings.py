@@ -41,6 +41,15 @@ class Settings(BaseSettings):
 
     import_data_dir: Path = Path("/data/imports")
     import_retention_days: int = Field(default=30, ge=1)
+    import_max_file_bytes: int = Field(default=25 * 1024 * 1024, ge=1024)
+    import_max_xlsx_uncompressed_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
+    import_max_xlsx_entries: int = Field(default=10_000, ge=1)
+    import_max_xlsx_compression_ratio: int = Field(default=100, ge=1)
+    import_max_rows: int = Field(default=100_000, ge=1)
+    import_max_columns: int = Field(default=200, ge=1)
+    import_max_cells: int = Field(default=5_000_000, ge=1)
+    import_max_cell_chars: int = Field(default=100_000, ge=1)
+    import_max_warnings: int = Field(default=10_000, ge=1)
 
     @property
     def secure_cookies(self) -> bool:
