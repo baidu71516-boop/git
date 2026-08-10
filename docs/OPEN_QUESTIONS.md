@@ -8,11 +8,15 @@
 
 | ID | 需要的外部信息 | 最晚确认阶段 | 当前影响 |
 |---|---|---|---|
-| OPEN-001 | 实际灰豚导出样本，用于确认列名、别名与数据格式 | Phase 1 前 | 不阻塞 Phase 0 |
-| OPEN-002 | 管理部门与普通部门的最终权限矩阵 | Phase 1 前 | 不阻塞 Phase 0 |
+| OPEN-001 | 实际灰豚导出样本，用于确认列名、别名与数据格式 | Phase 1B 前 | 不阻塞 Phase 1A |
+| OPEN-002 | 管理部门与普通部门的最终业务权限矩阵 | Phase 1B 前 | 不阻塞 Phase 1A；1A 仅建立部门级 RBAC 基础 |
 | OPEN-003 | 实际 AI Provider、模型和生产凭证注入信息 | Phase 2 前 | 不阻塞 Phase 0 |
 | OPEN-004 | Pilot Mailbox 的 SMTP/IMAP 参数及服务端能力 | Phase 3 前 | 不阻塞 Phase 0 |
 | OPEN-005 | 生产域名、证书、备份目标和告警接收渠道 | Phase 5 前 | 不阻塞 Phase 0 |
+
+## PRE-DEPLOYMENT
+
+- 当前本地 Docker Compose 使用 classic builder 完成验证；正式部署前安装并验证 Docker buildx。该项不阻塞 Phase 1A。
 
 ## RESOLVED
 
@@ -40,4 +44,3 @@
 | RESOLVED-018 | `campaign_leads.stop_email` 默认 false；wechat_added=true 时默认 stop_email=true。 | Phase 3 |
 | RESOLVED-019 | APP_MASTER_KEY 从生产 Secret 注入，不进入数据库、Git 或日志；邮箱凭证加密存储。 | Phase 0、3 |
 | RESOLVED-020 | Analytics 指标、唯一 Lead 计数、A/B 正向回复及 Asia/Shanghai 事件日期归属按已确认口径执行。 | Phase 4 |
-
