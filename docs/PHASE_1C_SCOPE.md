@@ -349,7 +349,7 @@ Phase 1C 只支持下列五个单值筛选参数：
 
 | 参数 | 冻结语义 | 缺失/非法行为 |
 |---|---|---|
-| `tag` | 任一 active PlatformAccount 的当前 `source_tags` 中存在 trim 后原值完整精确匹配 | 无标签不命中；输入最大 160 字符，超长 422；不做 NFC、casefold、子串、同义词或 AI 匹配 |
+| `tag` | 输入先 trim，trim 后为空等同未传；非空值与任一 active PlatformAccount 当前 `source_tags` 的 trim 后原值完整精确匹配 | 无标签不命中；输入最大 160 字符，超长 422；不做 NFC、casefold、子串、同义词或 AI 匹配 |
 | `followers_min` | 任一 active PlatformAccount 的任一真实 CurrentMetrics `followers_count >= followers_min` | followers 缺失、null 或非法遗留值不命中；参数必须为非负十进制整数 |
 | `followers_max` | 任一 active PlatformAccount 的任一真实 CurrentMetrics `followers_count <= followers_max` | followers 缺失、null 或非法遗留值不命中；参数必须为非负十进制整数 |
 | `owner_operator_id` | `Influencer.owner_operator_id` UUID 精确匹配 | Owner 为 null 不命中；非法 UUID 返回 422 |
@@ -1012,7 +1012,7 @@ Phase 1C 没有 Schema migration 或新增写路径。回滚只需要撤销达�
 | DN-09 | `page=1`、`page_size=50`、最大 100，均为正整数；超页 HTTP 200、空 items、真实 total。 |
 | DN-10 | 列表默认 `created_at DESC, id DESC`；Snapshot 默认 `captured_at DESC, id DESC`；嵌套集合确定性排序。 |
 | DN-11 | 单值缺失为 null、集合缺失为 `[]`、UI 为 `—`；0/false 不是 unknown，普通筛选不匹配缺失，Owner null 显示“未分配”。 |
-| DN-12 | Source Tag 使用 trim 后原值完整精确匹配；无 NFC/casefold/规范化表/同义词；输入最大 160 字符，历史值不截断、不回写。 |
+| DN-12 | Source Tag 输入先 trim，trim 后为空等同未传；非空值使用 trim 后原值完整精确匹配；无 NFC/casefold/规范化表/同义词；输入最大 160 字符，历史值不截断、不回写。 |
 | DN-13 | 因 Phase 1C 完全只读，本阶段 N/A；不增加 Mutation 权限矩阵或 AuditAction。 |
 | DN-14 | 只返回 `status=active AND deleted_at IS NULL`；不提供 status 筛选、disabled 浏览、恢复或删除；disabled Owner 摘要仍准确显示。 |
 | DN-15 | Snapshot 使用独立分页 GET，按 `captured_at DESC, id DESC`；依靠无写 Service/API、现有 FK/RESTRICT 和回归保证不可变，不加 trigger。 |
