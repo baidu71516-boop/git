@@ -16,8 +16,10 @@ import {
   Tag,
   Typography,
 } from "antd";
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
+import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 import { ImportWorkspace } from "@/components/import-workspace";
 
@@ -59,13 +61,20 @@ const roleLabels: Record<Role, string> = {
   viewer: "Viewer",
 };
 
-export function AuthShell() {
+type AuthWorkspace = "imports" | "influencers";
+
+export function AuthShell({
+  workspace = "imports",
+}: {
+  workspace?: AuthWorkspace;
+}) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
   const [auth, setAuth] = useState<AuthMe | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const requiresOperator = workspace === "imports";
 
   const loadDepartments = useCallback(async () => {
     const response = await apiRequest<Department[]>("/departments");
@@ -82,7 +91,7 @@ export function AuthShell() {
       try {
         const response = await apiRequest<AuthMe>("/auth/me");
         setAuth(response.data);
-        if (!response.data?.operator) {
+        if (requiresOperator && !response.data?.operator) {
           await loadOperators();
         }
       } catch (caught) {
@@ -95,7 +104,7 @@ export function AuthShell() {
       }
     }
     void initialize();
-  }, [loadDepartments, loadOperators]);
+  }, [loadDepartments, loadOperators, requiresOperator]);
 
   async function handleLogin(values: LoginValues) {
     setSubmitting(true);
@@ -107,7 +116,9 @@ export function AuthShell() {
       });
       const meResponse = await apiRequest<AuthMe>("/auth/me");
       setAuth(meResponse.data);
-      await loadOperators();
+      if (requiresOperator && !meResponse.data?.operator) {
+        await loadOperators();
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "登录失败");
     } finally {
@@ -242,11 +253,32 @@ export function AuthShell() {
         </Space>
       </Card>
 
-      {auth.operator ? <ImportWorkspace role={auth.role} /> : null}
+      <nav className="workspace-nav" aria-label="工作区导航">
+        <Space>
+          <Link
+            href="/"
+            aria-current={workspace === "imports" ? "page" : undefined}
+          >
+            导入工作区
+          </Link>
+          <Link
+            href="/influencers"
+            aria-current={workspace === "influencers" ? "page" : undefined}
+          >
+            达人库
+          </Link>
+        </Space>
+      </nav>
+
+      {workspace === "influencers" ? (
+        <InfluencerWorkspace />
+      ) : auth.operator ? (
+        <ImportWorkspace role={auth.role} />
+      ) : null}
 
       <Modal
         title="选择当前操作人"
-        open={!auth.operator}
+        open={requiresOperator && !auth.operator}
         footer={null}
         closable={false}
       >

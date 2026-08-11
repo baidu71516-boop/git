@@ -78,7 +78,9 @@ body {
 }
 
 .identity-card,
-.import-workspace {
+.import-workspace,
+.influencer-workspace,
+.workspace-nav {
   width: min(1240px, 100%);
   margin: 0 auto;
 }
@@ -92,6 +94,67 @@ body {
   display: grid;
   gap: 18px;
   margin-top: 18px;
+}
+
+.workspace-nav {
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid #e6ebf2;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.workspace-nav a[aria-current="page"] {
+  color: #0958d9;
+  font-weight: 600;
+}
+
+.influencer-workspace {
+  display: grid;
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.influencer-heading-card,
+.influencer-filter-card,
+.influencer-list-card {
+  border: 1px solid #e6ebf2;
+  box-shadow: 0 10px 32px rgb(25 42 70 / 6%);
+}
+
+.influencer-heading-card h3 {
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.influencer-heading-card p {
+  margin-bottom: 0;
+}
+
+.influencer-list-state {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #475467;
+}
+
+.influencer-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.filter-option-ellipsis,
+.source-tag {
+  display: inline-block;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
 }
 
 .import-workspace > .ant-card {
@@ -179,6 +242,11 @@ body {
 
   .mapping-row {
     grid-template-columns: 1fr;
+  }
+
+  .influencer-pagination {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 
