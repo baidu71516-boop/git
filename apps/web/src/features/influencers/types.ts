@@ -69,3 +69,100 @@ export type InfluencerListQueryParams = {
   page?: string;
   page_size?: string;
 };
+
+export type JsonPrimitive = string | number | boolean | null;
+export type JsonValue =
+  JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+export type MetricsDocument = Record<string, JsonValue>;
+
+export type PlatformAccountDetail = PlatformAccountSummary & {
+  bio: string | null;
+  gender: string | null;
+  region_raw: string | null;
+  verification_info: string | null;
+  mcn_name: string | null;
+  creator_level: string | null;
+  is_brand_partner: boolean | null;
+};
+
+export type InfluencerContactDetail = {
+  id: string;
+  platform_account_id: string | null;
+  type: string;
+  display_value: string;
+  source: string;
+  validation_status: string;
+  is_current: boolean;
+  possible_duplicate_contact: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+  source_updated_at: string | null;
+  first_import_job_id: string | null;
+  first_import_row_id: string | null;
+  last_import_job_id: string | null;
+  last_import_row_id: string | null;
+};
+
+export type SourceStateDetail = {
+  platform_account_id: string;
+  source: string;
+  source_updated_at: string | null;
+  state_version: number;
+  creator_tags: string[];
+  last_import_job_id: string;
+  last_import_row_id: string;
+};
+
+export type SourceIdentityDetail = {
+  id: string;
+  platform_account_id: string;
+  platform: string;
+  source: string;
+  external_account_id: string;
+  first_import_job_id: string;
+  first_import_row_id: string;
+  last_import_job_id: string;
+  last_import_row_id: string;
+};
+
+export type CurrentMetricsDetail = {
+  platform_account_id: string;
+  source: string;
+  source_updated_at: string | null;
+  metrics: MetricsDocument;
+  last_import_job_id: string;
+  last_import_row_id: string;
+};
+
+export type InfluencerDetail = {
+  id: string;
+  display_name: string;
+  status: "active";
+  crm_stage: string;
+  owner: OwnerSummary | null;
+  created_at: string;
+  updated_at: string;
+  platform_accounts: PlatformAccountDetail[];
+  contacts: InfluencerContactDetail[];
+  source_states: SourceStateDetail[];
+  source_identities: SourceIdentityDetail[];
+  current_metrics: CurrentMetricsDetail[];
+};
+
+export type MetricSnapshotItem = {
+  id: string;
+  platform_account_id: string;
+  source: string;
+  source_updated_at: string | null;
+  captured_at: string;
+  metrics: MetricsDocument;
+  import_job_id: string;
+  import_row_id: string;
+};
+
+export type MetricSnapshotPage = {
+  items: MetricSnapshotItem[];
+  page: number;
+  page_size: number;
+  total: number;
+};

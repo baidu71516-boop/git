@@ -20,6 +20,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
+import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 import { ImportWorkspace } from "@/components/import-workspace";
 
@@ -65,8 +66,10 @@ type AuthWorkspace = "imports" | "influencers";
 
 export function AuthShell({
   workspace = "imports",
+  influencerId,
 }: {
   workspace?: AuthWorkspace;
+  influencerId?: string;
 }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -271,7 +274,11 @@ export function AuthShell({
       </nav>
 
       {workspace === "influencers" ? (
-        <InfluencerWorkspace />
+        influencerId ? (
+          <InfluencerDetailWorkspace influencerId={influencerId} />
+        ) : (
+          <InfluencerWorkspace />
+        )
       ) : auth.operator ? (
         <ImportWorkspace role={auth.role} />
       ) : null}

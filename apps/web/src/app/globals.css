@@ -117,7 +117,9 @@ body {
 
 .influencer-heading-card,
 .influencer-filter-card,
-.influencer-list-card {
+.influencer-list-card,
+.influencer-detail-card,
+.influencer-detail-actions {
   border: 1px solid #e6ebf2;
   box-shadow: 0 10px 32px rgb(25 42 70 / 6%);
 }
@@ -145,6 +147,53 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+}
+
+.influencer-detail-actions {
+  padding: 0;
+}
+
+.influencer-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(360px, 100%), 1fr));
+  gap: 16px;
+}
+
+.influencer-detail-card h4 {
+  margin-top: 0;
+}
+
+.detail-bio {
+  margin-top: 12px;
+  white-space: pre-wrap;
+}
+
+.detail-tag-row {
+  margin-bottom: 12px;
+}
+
+.metric-value-list,
+.metric-value-object,
+.snapshot-metrics {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.metric-value-object > div,
+.snapshot-metrics > div {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.6fr) minmax(120px, 1fr);
+  gap: 10px;
+}
+
+.metric-value-object dt,
+.snapshot-metrics dt {
+  color: #667085;
+}
+
+.metric-value-object dd,
+.snapshot-metrics dd {
+  margin: 0;
 }
 
 .filter-option-ellipsis,

@@ -1,9 +1,11 @@
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
 import type {
+  InfluencerDetail,
   InfluencerFilterOptions,
   InfluencerListPage,
   InfluencerListQueryParams,
+  MetricSnapshotPage,
 } from "./types";
 
 export const INFLUENCER_QUERY_PARAMETERS = [
@@ -65,6 +67,36 @@ export async function fetchInfluencerFilterOptions(): Promise<InfluencerFilterOp
   );
   if (response.data === null) {
     throw new ApiClientError("筛选选项响应缺少数据", 200, "INVALID_RESPONSE");
+  }
+  return response.data;
+}
+
+export async function fetchInfluencerDetail(
+  influencerId: string,
+): Promise<InfluencerDetail> {
+  const response = await apiRequest<InfluencerDetail>(
+    `/influencers/${encodeURIComponent(influencerId)}`,
+  );
+  if (response.data === null) {
+    throw new ApiClientError("达人详情响应缺少数据", 200, "INVALID_RESPONSE");
+  }
+  return response.data;
+}
+
+export async function fetchMetricSnapshots(
+  influencerId: string,
+  page: number,
+  pageSize: number,
+): Promise<MetricSnapshotPage> {
+  const search = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize),
+  });
+  const response = await apiRequest<MetricSnapshotPage>(
+    `/influencers/${encodeURIComponent(influencerId)}/metric-snapshots?${search.toString()}`,
+  );
+  if (response.data === null) {
+    throw new ApiClientError("指标历史响应缺少数据", 200, "INVALID_RESPONSE");
   }
   return response.data;
 }

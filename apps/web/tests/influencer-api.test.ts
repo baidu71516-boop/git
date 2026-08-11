@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildInfluencerListPath,
+  fetchInfluencerDetail,
   fetchInfluencerList,
+  fetchMetricSnapshots,
   influencerListQueryKey,
 } from "../src/features/influencers/api";
 
@@ -65,6 +67,74 @@ describe("influencer list API", () => {
     );
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
       credentials: "include",
+    });
+  });
+});
+
+describe("influencer detail API", () => {
+  it("requests detail and independently paginated snapshots with the Session cookie", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { id: "influencer-1" },
+            error: null,
+            request_id: "request-detail",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            success: true,
+            data: { items: [], page: 2, page_size: 50, total: 0 },
+            error: null,
+            request_id: "request-snapshots",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+
+    await fetchInfluencerDetail("influencer-1");
+    await fetchMetricSnapshots("influencer-1", 2, 50);
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/v1/influencers/influencer-1",
+    );
+    expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
+      "/api/v1/influencers/influencer-1/metric-snapshots?page=2&page_size=50",
+    );
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      credentials: "include",
+    });
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      credentials: "include",
+    });
+  });
+
+  it("converts the detail 404 envelope without treating it as empty data", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          success: false,
+          data: null,
+          error: {
+            code: "INFLUENCER_NOT_FOUND",
+            message: "Influencer not found",
+            details: null,
+          },
+          request_id: "request-not-found",
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await expect(fetchInfluencerDetail("missing-id")).rejects.toMatchObject({
+      status: 404,
+      code: "INFLUENCER_NOT_FOUND",
     });
   });
 });

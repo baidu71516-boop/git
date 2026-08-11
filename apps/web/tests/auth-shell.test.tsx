@@ -26,13 +26,16 @@ function response(data: unknown) {
   );
 }
 
-function renderAuthenticatedShell(workspace: "imports" | "influencers") {
+function renderAuthenticatedShell(
+  workspace: "imports" | "influencers",
+  influencerId?: string,
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <AuthShell workspace={workspace} />
+      <AuthShell workspace={workspace} influencerId={influencerId} />
     </QueryClientProvider>,
   );
 }
@@ -203,5 +206,56 @@ describe("AuthShell", () => {
     expect(screen.getByText("Viewer")).toBeInTheDocument();
     expect(screen.queryByText("Campaign")).not.toBeInTheDocument();
     expect(screen.queryByText("Inbox")).not.toBeInTheDocument();
+  });
+
+  it("lets a Viewer without an Operator open influencer detail", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "只读部",
+              status: "active",
+            },
+            operator: null,
+            role: "viewer",
+            expires_at: "2026-08-12T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/influencers/influencer-1")) {
+          return response({
+            id: "influencer-1",
+            display_name: "详情达人",
+            status: "active",
+            crm_stage: "待开发",
+            owner: null,
+            created_at: "2026-08-11T00:00:00Z",
+            updated_at: "2026-08-11T00:00:00Z",
+            platform_accounts: [],
+            contacts: [],
+            source_states: [],
+            source_identities: [],
+            current_metrics: [],
+          });
+        }
+        if (url.includes("/metric-snapshots")) {
+          return response({ items: [], page: 1, page_size: 50, total: 0 });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("influencers", "influencer-1");
+
+    expect(await screen.findByText("详情达人")).toBeInTheDocument();
+    expect(screen.getByText("待选择")).toBeInTheDocument();
+    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/operators"),
+      ),
+    ).toBe(false);
   });
 });
