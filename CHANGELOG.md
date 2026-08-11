@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### Phase 1C
+
+#### Added
+
+- 在唯一业务核心 `packages/backend_core` 中新增达人库只读 Schema、Repository 和 Service，复用 Phase 1B 的 Influencer、PlatformAccount、Source、Contact、Current Metrics 与不可变 Metric Snapshot 数据模型。
+- 新增四个只读接口：达人列表、筛选选项、达人详情和指标历史；支持一行一个 Influencer 的稳定分页、昵称搜索，以及赛道、粉丝范围、负责人和 CRM Stage 筛选。
+- 新增 Web 达人列表 `/influencers` 与详情 `/influencers/{id}`，展示平台账号、完整来源追溯、真实当前指标、联系方式和分页历史快照，不创建 AI、触达或 CRM 占位模块。
+
+#### Security and Boundaries
+
+- 达人库为公司级共享；四个 GET 只要求有效 Session，不按 Owner 或 Import Department 分片，也不要求已选择 Operator。权限仍取自 `DepartmentPermission`，所选 Operator 不会提升 Session 权限。
+- `super_admin`、`manager`、`operator` 可读取完整 current Contact；`viewer` 仅收到固定脱敏值 `***`。Contact 原文和 `normalized_value` 不进入日志、console、埋点、错误响应或 Audit。
+- 列表和详情只返回 active 且未软删除的 Influencer；Phase 1C 没有 Influencer Mutation、CSRF 写流程、新 AuditAction、Schema 变更或 `0004` migration，CRM Stage 仅展示和筛选。
+
+#### Verification
+
+- `make lint` 全部通过：Ruff、Black（103 个文件）、backend_core/API/Worker mypy、ESLint、TypeScript 与 Prettier 均通过。
+- `make test` 全部通过：backend_core/integration/smoke 为 133 passed、3 个外部门控按设计跳过；API 9 passed；Worker 5 passed；Web 28 passed。3 个外部门控已分别显式执行：PostgreSQL 16 Repository/Import 9 passed，仓库外真实灰豚附件 1 passed。
+- PostgreSQL 16 验证了 JSONB Followers 安全类型处理、同一指标行范围语义、fan-out 去重、Tag、ILIKE wildcard、稳定排序和 Snapshot 历史；现有 `0001` 至 `0003_phase1b` 通过 fresh、repeat、downgrade/re-upgrade、完整 base 循环、metadata 与 `alembic check`，且未创建 `0004`。
+- classic Docker builder 完成最新镜像构建；默认栈与独立隔离栈的七服务均健康，Celery 仍只注册既有 Import 与 Phase 0 任务，PostgreSQL/Redis 无宿主公开端口。
+- 真实 Nginx/API/浏览器 E2E 通过导入、Preview、Confirm、列表、全部冻结筛选、详情、Viewer 无 Operator 读取与 Contact 脱敏；后续 Newer/Same/Older/Unknown 导入证明 Current Metrics、人工 Owner/Contact 和不可变 Snapshot 的非破坏性规则保持正确。
+- PostgreSQL 数据与 Import Storage Object 在七服务重启后保持相同计数和 SHA-256。Docker buildx 缺失继续作为正式部署前事项，不阻塞 Phase 1C。
+
 ### Phase 1B
 
 #### Added

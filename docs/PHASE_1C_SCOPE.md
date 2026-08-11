@@ -1,12 +1,14 @@
 # Phase 1C 需求冻结与技术设计
 
-- 文档状态：`DESIGN FROZEN — Phase 1C Task 0`
+- 文档状态：`IMPLEMENTED — pending final human acceptance`
 - 编制日期：2026-08-10
-- 代码基线：`da2c3a3`（`phase-1b-complete`）
+- 最终门禁日期：2026-08-11
+- 设计基线：`da2c3a3`（`phase-1b-complete`）
+- 实现基线：`0ee22a7`（Phase 1C Task 1F）
 - 目标分支：`phase-1c-influencer-library`
-- 本文用途：Phase 1C 第 0 个任务的最终需求与技术设计基线。
-- 状态含义：需求、API、数据读取语义、权限、测试和实施边界已经冻结；这不代表任何 Phase 1C 代码已经实现，也不授权本任务开始实现。
-- 实施门禁：后续实现必须逐项遵守本文，不得重新引入第 35 节已经关闭的备选方案。
+- 本文用途：Phase 1C 的冻结需求、技术设计与最终实现门禁记录。
+- 状态含义：需求、API、数据读取语义、权限、测试和实施边界仍保持冻结；对应代码与运行门禁已经完成，但人工最终验收尚未完成。
+- 阶段门禁：不得重新引入第 35 节已经关闭的备选方案，也不得在未获明确指令前进入 Phase 2。
 
 ## 0. 依据、优先级与冲突裁决
 
@@ -80,7 +82,7 @@ Phase 1C 不包含：
 - 对缺失指标进行推算、抓取、补造、AI 猜测或跨时间窗口换算；例如不得把真实“近 60 天”指标伪装成“近 7 天”。
 - Contact 导出；如后续增加导出，必须另行冻结权限、字段白名单和 Audit。
 
-## 3. 当前代码基线与可复用能力
+## 3. 实现基线与可复用能力
 
 ### 3.1 已有领域模型
 
@@ -122,13 +124,13 @@ Influencer（公司级主体）
 - Web API client 使用同源 Cookie；非 GET/HEAD 自动发送 CSRF header；FormData 不覆盖 multipart boundary。
 - Web 已有登录、Session 恢复、Operator 选择、React Query Provider 和 Vitest/Testing Library 基础。
 
-### 3.4 当前缺失
+### 3.4 Phase 1C 已实现能力
 
-- `backend_core/influencers` 目前只有 enum 和 model，没有 Repository、Service、Schema 或查询实现。
-- FastAPI 没有 `/api/v1/influencers` Router。
-- Web 没有达人列表与详情路由。
-- 当前没有 Phase 1C 查询所需的只读 Repository、Service、Schema、Router 和 UI；这正是本阶段的实现范围。
-- 本阶段不需要新增人工标签模型、AuditAction、表、字段、约束或强制性能索引。
+- `backend_core/influencers` 已包含 API 无关的 Schema、只读 Repository 和只读 Service；业务查询、公司级可见性和 Contact 字段裁剪只实现一次。
+- FastAPI 已装配冻结的四个 `/api/v1/influencers` GET，并继续使用统一 envelope、request ID 和 Session 认证。
+- Web 已实现 `/influencers` 列表与 `/influencers/{id}` 详情，并以最小调整复用既有 AuthShell；达人库读取不要求 Operator，Import 流程仍要求 Operator。
+- PostgreSQL、真实 Compose/API/浏览器与 Phase 1A/1B 回归门禁已完成；第 33 节记录最终通过项。
+- Phase 1C 没有新增人工标签模型、AuditAction、表、字段、约束、性能索引或 migration。
 
 ## 4. 达人列表的准确字段
 
@@ -718,20 +720,20 @@ apps/api/app/http/influencers.py
 - Web：消费 API，不重新实现权限、去重、来源新鲜度或指标合并。
 - Worker：Phase 1C 不新增业务 Worker；Phase 1B Import Worker 继续调用同一 `backend_core`。
 
-## 24. 当前 Schema 结论与查询缺口
+## 24. Schema 结论与已落地查询层
 
-现有 Phase 1B Schema 足以实现本次冻结的只读达人库，没有 Phase 1C 持久化 Schema blocker。当前缺的是只读查询层，而不是新数据结构：
+现有 Phase 1B Schema 已足以实现冻结的只读达人库，Phase 1C 没有持久化 Schema blocker，也没有新增数据结构：
 
-1. 需要新增 Repository、Service、Schema 和 Router 代码来实现列表、filter-options、详情和 Snapshot 查询。
-2. Followers 继续以 CurrentMetrics JSONB 为唯一真相源。Repository 必须用安全类型谓词和安全 cast 处理数值、0、null、缺失键与遗留非法值；非法或缺失值不命中筛选。
+1. Repository、Service、Schema 和 Router 已实现列表、filter-options、详情和 Snapshot 查询。
+2. Followers 继续以 CurrentMetrics JSONB 为唯一真相源。Repository 使用安全类型谓词和安全 cast 处理数值、0、null、缺失键与遗留非法值；非法或缺失值不命中筛选。
 3. 赛道继续以 active PlatformAccount 的当前 `source_tags` JSONB 投影为查询真相源，使用 trim 后原值完整精确匹配。
 4. `Influencer.display_name` 与来源 `account_name` 是两个有意不同的事实；搜索同时覆盖主体名和 active 账号名，不修改任何数据。
-5. 没有 Primary PlatformAccount、Primary Metric、Primary Contact、Manual Tag 和 Snapshot trigger 是本次已经接受的设计，不是 Schema 缺口。
-6. 查询必须在没有新增索引的前提下先满足正确性，并通过真实 PostgreSQL 测试验证。
+5. 没有 Primary PlatformAccount、Primary Metric、Primary Contact、Manual Tag 和 Snapshot trigger 是已经接受并保持的设计，不是 Schema 缺口。
+6. 查询在没有新增索引的前提下通过了真实 PostgreSQL 16 正确性门禁；性能优化仍必须以未来真实证据为前提。
 
-## 25. 需要新增的表、字段、约束和索引
+## 25. 实际新增的表、字段、约束和索引
 
-Phase 1C 初始实现新增数量固定为：
+Phase 1C 实际新增数量为：
 
 - 新表：0
 - 新字段：0
@@ -744,11 +746,11 @@ Phase 1C 初始实现新增数量固定为：
 
 非阻塞未来优化：若真实 PostgreSQL 测试、`EXPLAIN` 和实际数据量证明需要性能优化，可另行设计 additive migration，例如活跃列表组合索引、Contact/CurrentMetrics/Snapshot 读取索引、Source Tag GIN、Followers 安全表达式索引或搜索索引。该未来工作不属于 Phase 1C 当前实施要求，不得先于证据落地。
 
-## 26. Migration 计划
+## 26. Migration 结果
 
-Phase 1C 初始实现不创建 `0004` migration，也不为了阶段编号创建空 migration。现有 Alembic head 保持 `0003_phase1b`。
+Phase 1C 实现未创建 `0004` migration，也没有为了阶段编号创建空 migration。现有 Alembic head 保持 `0003_phase1b`。
 
-验收仍需回归：
+最终实现门禁已完成以下回归：
 
 1. 现有 `0001` 至 `0003_phase1b` 空库全链 upgrade。
 2. 重复 `upgrade head`。
@@ -764,11 +766,14 @@ Phase 1C 不修改、不回填、不重写 SourceState、ImportRow、Contact pro
 - `/influencers`：达人列表。
 - `/influencers/[id]`：达人详情。
 
-计划组件边界：
+已实现组件边界：
 
 ```text
 apps/web/src/features/influencers/
 ├── api.ts
+├── formatters.tsx
+├── influencer-detail-workspace.tsx
+├── influencer-workspace.tsx
 ├── types.ts
 ├── queries.ts
 └── components/
@@ -779,7 +784,8 @@ apps/web/src/features/influencers/
     ├── platform-account-section.tsx
     ├── contact-section.tsx
     ├── current-metrics-section.tsx
-    └── metric-snapshot-list.tsx
+    ├── metric-snapshot-list.tsx
+    └── source-provenance-section.tsx
 ```
 
 边界规则：
@@ -877,7 +883,7 @@ SQLite 不能替代以下真实 PostgreSQL 门禁：
 
 ## 31. Phase 1B 回归要求
 
-Phase 1C 完成时必须重新通过全部现有 Phase 1A/1B 测试，并特别覆盖：
+最终实现门禁已重新通过全部现有 Phase 1A/1B 测试，并特别覆盖：
 
 - CSV/XLSX 安全解析和 37 列 Mapping。
 - Preview 不写业务表。
@@ -893,16 +899,18 @@ Phase 1C 完成时必须重新通过全部现有 Phase 1A/1B 测试，并特别�
 - 仓库内脱敏 Fixture；仓库外真实样本门禁保持可运行但不得复制真实文件。
 - 登录、Session、Operator 不提权、RBAC、CSRF 和 Audit 基线。
 
-## 32. 分阶段实施切片及每个切片的完成条件
+## 32. 已完成的实施切片及每个切片的完成条件
 
-### 1C-00 需求冻结（当前任务）
+以下切片均已完成；完成状态不等于人工最终验收已经签署。
+
+### 1C-00 需求冻结（已完成）
 
 - 完成本文 35 项覆盖。
 - 19 项人工决策全部正式写回正文和第 35 节。
 - 文档状态变为 `DESIGN FROZEN — Phase 1C Task 0`，无阻塞性待决事项。
 - 不修改代码或数据库。
 
-### 1C-01 backend_core 查询契约与只读能力
+### 1C-01 backend_core 查询契约与只读能力（已完成）
 
 - 最终 List/Detail/Filter/Snapshot Schema 可生成确定 OpenAPI。
 - Repository/Service/Schema 边界落地。
@@ -910,25 +918,25 @@ Phase 1C 完成时必须重新通过全部现有 Phase 1A/1B 测试，并特别�
 - 无业务规则进入 API Router。
 - Followers 使用 JSONB 安全谓词/cast；不创建 migration、投影或新索引。
 
-### 1C-02 FastAPI 只读接口
+### 1C-02 FastAPI 只读接口（已完成）
 
 - 四个冻结 GET 全部使用统一 envelope，并且没有 Influencer 写 endpoint。
 - 401/404/422、公司级可见性和 OpenAPI 验证通过。
 - HTTP 与核心鉴权边界清晰。
 
-### 1C-03 Web 列表
+### 1C-03 Web 列表（已完成）
 
 - 路由、筛选、搜索、稳定分页、URL 状态、loading/error/empty 完成。
 - 优先复用现有 AuthShell；只允许新路由所需的最小调整。
 - 不破坏 Phase 1B ImportWorkspace。
 
-### 1C-04 Web 详情
+### 1C-04 Web 详情（已完成）
 
 - 仅实现第 5 节区块。
 - CurrentMetrics 与 Snapshot 语义清晰。
 - Contact 权限和空值规则符合冻结协议。
 
-### 1C-05 集成、回归与验收
+### 1C-05 集成、回归与验收（已完成，等待人工最终验收）
 
 - 后端、HTTP、PostgreSQL、Web、E2E 测试完成。
 - Phase 1A/1B 全量回归通过。
@@ -937,44 +945,46 @@ Phase 1C 完成时必须重新通过全部现有 Phase 1A/1B 测试，并特别�
 
 ## 33. 最终验收清单
 
+以下勾选表示工程自检与运行门禁已经通过，不代表人工最终验收已经签署。
+
 ### 功能
 
-- [ ] 一行一个 Influencer 的稳定分页。
-- [ ] 昵称搜索仅覆盖主体名和 active 账号名，转义 wildcard，最大 160 字符。
-- [ ] `tag` 仅精确匹配 active 账号当前 `source_tags` 原值。
-- [ ] Followers 闭区间按任一 active 账号任一真实来源命中，不聚合、不择优、不推算。
-- [ ] Owner 精确筛选和 null“未分配”展示正确。
-- [ ] CRM Stage 只读展示与筛选。
-- [ ] `filter-options` 只返回实际 Owner 最小摘要、实际 Source Tag 和 CRM enum。
-- [ ] 三个非 Viewer 角色读取完整 current Contact，Viewer 只读脱敏值；Email 仅疑似重复。
-- [ ] 详情仅含主体、账号、来源、Contact、真实指标、历史快照和标签。
-- [ ] CurrentMetrics 与 Snapshot 明确区分。
-- [ ] 新导入不错误覆盖人工数据或历史。
-- [ ] 列表和详情只返回 active 且未软删除 Influencer，disabled Owner 状态仍准确。
+- [x] 一行一个 Influencer 的稳定分页。
+- [x] 昵称搜索仅覆盖主体名和 active 账号名，转义 wildcard，最大 160 字符。
+- [x] `tag` 仅精确匹配 active 账号当前 `source_tags` 原值。
+- [x] Followers 闭区间按任一 active 账号任一真实来源命中，不聚合、不择优、不推算。
+- [x] Owner 精确筛选和 null“未分配”展示正确。
+- [x] CRM Stage 只读展示与筛选。
+- [x] `filter-options` 只返回实际 Owner 最小摘要、实际 Source Tag 和 CRM enum。
+- [x] 三个非 Viewer 角色读取完整 current Contact，Viewer 只读脱敏值；Email 仅疑似重复。
+- [x] 详情仅含主体、账号、来源、Contact、真实指标、历史快照和标签。
+- [x] CurrentMetrics 与 Snapshot 明确区分。
+- [x] 新导入不错误覆盖人工数据或历史。
+- [x] 列表和详情只返回 active 且未软删除 Influencer，disabled Owner 状态仍准确。
 
 ### 架构与安全
 
-- [ ] 业务规则只在 `packages/backend_core`。
-- [ ] Router 只做 HTTP 适配。
-- [ ] 后端执行 RBAC；Operator 不提权。
-- [ ] 仅存在四个冻结 GET，不存在 Influencer POST/PUT/PATCH/DELETE。
-- [ ] 普通 GET 不产生业务 Audit，Phase 1C 不新增 AuditAction。
-- [ ] Contact、Token、Secret 不进入日志、console、埋点、错误消息或 Audit。
-- [ ] 无物理删除、无来源追溯破坏、无 Snapshot 修改入口。
-- [ ] 没有 AI/Campaign/邮件/CRM/Analytics/多平台 Connector 越界。
+- [x] 业务规则只在 `packages/backend_core`。
+- [x] Router 只做 HTTP 适配。
+- [x] 后端执行 RBAC；Operator 不提权。
+- [x] 仅存在四个冻结 GET，不存在 Influencer POST/PUT/PATCH/DELETE。
+- [x] 普通 GET 不产生业务 Audit，Phase 1C 不新增 AuditAction。
+- [x] Contact、Token、Secret 不进入日志、console、埋点、错误消息或 Audit。
+- [x] 无物理删除、无来源追溯破坏、无 Snapshot 修改入口。
+- [x] 没有 AI/Campaign/邮件/CRM/Analytics/多平台 Connector 越界。
 
 ### 测试与运行门禁
 
-- [ ] `make lint`
-- [ ] `make test`
-- [ ] `make health`
-- [ ] `make compose-validate`
-- [ ] Docker 镜像重建及七服务健康。
-- [ ] 现有 `0001` 至 `0003_phase1b` Alembic fresh/repeat/check；未创建 0004 或空 migration。
-- [ ] PostgreSQL 专项集成测试。
-- [ ] 复用现有方式完成真实浏览器 + Compose E2E；不强制引入新 E2E framework。
-- [ ] Phase 1A/1B 全量回归。
-- [ ] 实际结果、文件清单、已知问题、CHANGELOG 和验收自检已更新；不虚构测试数量。
+- [x] `make lint`
+- [x] `make test`
+- [x] `make health`
+- [x] `make compose-validate`
+- [x] Docker 镜像重建及七服务健康。
+- [x] 现有 `0001` 至 `0003_phase1b` Alembic fresh/repeat/check；未创建 0004 或空 migration。
+- [x] PostgreSQL 专项集成测试。
+- [x] 复用现有方式完成真实浏览器 + Compose E2E；未引入新 E2E framework。
+- [x] Phase 1A/1B 全量回归。
+- [x] 实际结果、文件清单、已知问题、CHANGELOG 和验收自检已更新；未虚构测试数量。
 
 ## 34. 风险与回滚策略
 
@@ -1070,4 +1080,4 @@ Phase 1C 没有 Schema migration 或新增写路径。回滚只需要撤销达�
 | 34 风险/回滚 | §34 | 已覆盖 |
 | 35 所有原待决问题 | §35 | 19 项全部关闭并记录 |
 
-自检结论：全文不存在阻塞性待决事项。本文代表 Phase 1C Task 0 的需求和技术设计已经冻结，不代表代码已经实现；未获得新的明确指令前，不开始 Phase 1C 实现。
+自检结论：全文不存在阻塞性待决事项。Phase 1C 的冻结设计、代码实现与工程门禁均已完成，状态为等待人工最终验收；这不代表生产上线，也不授权开始 Phase 2。
