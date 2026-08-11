@@ -9,6 +9,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InfluencerDetailWorkspace } from "../src/features/influencers/influencer-detail-workspace";
+import {
+  displayValue,
+  renderJsonValue,
+} from "../src/features/influencers/formatters";
 
 const navigation = vi.hoisted(() => ({ back: vi.fn() }));
 
@@ -216,6 +220,21 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("influencer value formatters", () => {
+  it("preserves frozen null, empty string, zero, and false semantics", () => {
+    expect(displayValue(null)).toBe("—");
+    expect(displayValue("")).toBe("");
+    expect(displayValue(0)).toBe("0");
+    expect(displayValue(false)).toBe("false");
+
+    expect(renderJsonValue(null)).toBe("—");
+    expect(renderJsonValue("")).toBe("");
+    expect(renderJsonValue(0)).toBe("0");
+    expect(renderJsonValue(false)).toBe("false");
+    expect(renderJsonValue("98.123456789")).toBe("98.123456789");
+  });
 });
 
 describe("InfluencerDetailWorkspace", () => {

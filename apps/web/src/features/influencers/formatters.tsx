@@ -14,7 +14,7 @@ const shanghaiDateTime = new Intl.DateTimeFormat("zh-CN", {
 });
 
 export function displayValue(value: string | number | boolean | null): string {
-  if (value === null || value === "") return "—";
+  if (value === null) return "—";
   if (typeof value === "boolean") return value ? "true" : "false";
   return String(value);
 }
