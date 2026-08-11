@@ -16,12 +16,14 @@ from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
-from backend_core.imports.models import CollectionJob, ImportJob, StoredImportFile
+from backend_core.imports.models import CollectionJob, ImportJob, ImportJobFile, StoredImportFile
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
@@ -193,6 +195,24 @@ async def _seed_preview_ready_jobs(
         for index in range(job_count)
     ]
     session.add_all(jobs)
+    await session.flush()
+    session.add_all(
+        [
+            ImportJobFile(
+                import_job_id=job.id,
+                stored_file_id=stored_file.id,
+                position=1,
+                client_file_id=f"legacy:{job.id}",
+                original_filename=job.original_filename or "sanitized-concurrency.csv",
+                declared_mime=job.mime_type,
+                status=ImportJobFileStatus.UPLOADED,
+                source_acquired_at=None,
+                source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+                parse_task_id=job.parse_task_id,
+            )
+            for job in jobs
+        ]
+    )
     await session.commit()
 
     for job in jobs:

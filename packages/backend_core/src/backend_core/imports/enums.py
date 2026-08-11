@@ -16,6 +16,7 @@ class ImportSourceType(StrEnum):
 
 
 class ImportJobStatus(StrEnum):
+    DRAFT = "draft"
     UPLOADED = "uploaded"
     PARSING = "parsing"
     MAPPING_REQUIRED = "mapping_required"
@@ -27,6 +28,26 @@ class ImportJobStatus(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class ImportJobFailedStage(StrEnum):
+    PREVIEW = "preview"
+    CONFIRM = "confirm"
+
+
+class ImportJobFileStatus(StrEnum):
+    UPLOADED = "uploaded"
+    PARSING = "parsing"
+    MAPPING_REQUIRED = "mapping_required"
+    READY = "ready"
+    FAILED = "failed"
+    EXCLUDED = "excluded"
+
+
+class SourceAcquiredAtOrigin(StrEnum):
+    SERVER_DEFAULT = "server_default"
+    USER_CONFIRMED = "user_confirmed"
+    LEGACY_UNKNOWN = "legacy_unknown"
 
 
 class ImportRowAction(StrEnum):

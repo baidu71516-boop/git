@@ -22,14 +22,18 @@ from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
+    ImportJobFailedStage,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
+    SourceAcquiredAtOrigin,
 )
-from backend_core.imports.models import ImportJob, ImportRow
+from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
 from backend_core.imports.storage import LocalStorageAdapter
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 
@@ -182,6 +186,19 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
 
                             job = await session.get(ImportJob, job_id)
                             assert job is not None
+                            occurrence = await session.scalar(
+                                select(ImportJobFile).where(ImportJobFile.import_job_id == job_id)
+                            )
+                            assert occurrence is not None
+                            assert occurrence.position == 1
+                            assert occurrence.client_file_id == f"legacy:{job_id}"
+                            assert occurrence.stored_file_id == job.stored_file_id
+                            assert occurrence.status is ImportJobFileStatus.UPLOADED
+                            assert occurrence.source_acquired_at is None
+                            assert (
+                                occurrence.source_acquired_at_origin
+                                is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
+                            )
                             job.status = ImportJobStatus.MAPPING_REQUIRED
                             job.detected_fields = ["name", "id"]
                             await session.commit()
@@ -203,6 +220,7 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             job.preview_summary = {"total_rows": 1, "created_rows": 1}
                             row = ImportRow(
                                 import_job_id=job.id,
+                                import_job_file_id=occurrence.id,
                                 row_number=2,
                                 raw_data={"name": "脱敏"},
                                 normalized_data={"display_name": "脱敏"},
@@ -247,6 +265,7 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             failed_job = await session.get(ImportJob, dispatcher.parse_calls[-1][0])
                             assert failed_job is not None
                             assert failed_job.status == ImportJobStatus.FAILED
+                            assert failed_job.failed_stage is ImportJobFailedStage.PREVIEW
                             dispatcher.fail_parse = False
 
                             async def viewer_auth() -> AuthContext:

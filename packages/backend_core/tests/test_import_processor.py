@@ -18,14 +18,23 @@ from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFailedStage,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
-from backend_core.imports.models import CollectionJob, ImportJob, ImportRow, StoredImportFile
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
@@ -37,6 +46,7 @@ from backend_core.influencers.models import (
     InfluencerPlatformAccount,
     PlatformAccountSourceIdentity,
 )
+from openpyxl import Workbook
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -68,16 +78,38 @@ def huitun_csv(rows: list[dict[str, str]]) -> bytes:
     return stream.getvalue().encode("utf-8-sig")
 
 
+def huitun_xlsx(rows: list[dict[str, str]]) -> bytes:
+    stream = io.BytesIO()
+    workbook = Workbook()
+    try:
+        worksheet = workbook.active
+        worksheet.append(list(HUITUN_FIELD_MAPPING))
+        for overrides in rows:
+            row = {header: "--" for header in HUITUN_FIELD_MAPPING}
+            row.update(overrides)
+            worksheet.append([row[header] for header in HUITUN_FIELD_MAPPING])
+        workbook.save(stream)
+    finally:
+        workbook.close()
+    return stream.getvalue()
+
+
 async def seed_import_job(
     session: AsyncSession,
     storage: LocalStorageAdapter,
     content: bytes,
     *,
     filename: str = "sanitized-fixture.csv",
+    detected_type: StoredFileType = StoredFileType.CSV,
+    mime_type: str = "text/csv",
     source_type: ImportSourceType = ImportSourceType.MANUAL_HUITUN_EXPORT,
     field_mapping: dict[str, str] | None = None,
 ) -> ImportJob:
-    stored = await storage.store(one_chunk(content), suffix=".csv", max_bytes=25 * 1024 * 1024)
+    stored = await storage.store(
+        one_chunk(content),
+        suffix=Path(filename).suffix,
+        max_bytes=25 * 1024 * 1024,
+    )
     department = Department(
         name=f"Processor fixture {stored.sha256[:8]}",
         password_hash="not-used-by-worker",
@@ -110,8 +142,8 @@ async def seed_import_job(
         sha256=stored.sha256,
         storage_key=stored.storage_key,
         size=stored.size,
-        detected_type=StoredFileType.CSV,
-        detected_mime="text/csv",
+        detected_type=detected_type,
+        detected_mime=mime_type,
         expires_at=datetime.now(UTC) + timedelta(days=30),
     )
     session.add(stored_file)
@@ -122,7 +154,7 @@ async def seed_import_job(
         operator_id=operator.id,
         stored_file_id=stored_file.id,
         original_filename=filename,
-        mime_type="text/csv",
+        mime_type=mime_type,
         file_size=stored.size,
         sha256=stored.sha256,
         source_type=source_type,
@@ -132,6 +164,22 @@ async def seed_import_job(
         parse_task_id="parse-fixture",
     )
     session.add(job)
+    await session.flush()
+    session.add(
+        ImportJobFile(
+            import_job_id=job.id,
+            stored_file_id=stored_file.id,
+            position=1,
+            client_file_id=f"legacy:{job.id}",
+            original_filename=filename,
+            declared_mime=mime_type,
+            status=ImportJobFileStatus.UPLOADED,
+            source_acquired_at=None,
+            source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+            field_mapping=field_mapping,
+            parse_task_id="parse-fixture",
+        )
+    )
     await session.commit()
     return job
 
@@ -194,6 +242,16 @@ def test_preview_then_confirm_is_atomic_audited_and_idempotent() -> None:
                     .order_by(ImportRow.row_number)
                 )
             )
+            occurrence = await session.scalar(
+                select(ImportJobFile).where(ImportJobFile.import_job_id == job_id)
+            )
+            assert occurrence is not None
+            assert occurrence.position == 1
+            assert occurrence.client_file_id == f"legacy:{job_id}"
+            assert occurrence.source_acquired_at is None
+            assert occurrence.source_acquired_at_origin is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
+            assert occurrence.status is ImportJobFileStatus.READY
+            assert {row.import_job_file_id for row in import_rows} == {occurrence.id}
             assert [row.action for row in import_rows] == [
                 ImportRowAction.CREATE,
                 ImportRowAction.CREATE,
@@ -236,6 +294,42 @@ def test_preview_then_confirm_is_atomic_audited_and_idempotent() -> None:
                 AuditAction.IMPORT_CONFIRMED,
                 AuditAction.IMPORT_COMPLETED,
             } <= audit_actions
+
+    asyncio.run(scenario())
+
+
+def test_xlsx_preview_and_confirm_keep_the_single_file_compatibility_bridge() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            content = huitun_xlsx([valid_row("xlsx-compat", followers="4321")])
+            job = await seed_import_job(
+                session,
+                storage,
+                content,
+                filename="sanitized-fixture.xlsx",
+                detected_type=StoredFileType.XLSX,
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+
+            preview = await processor.parse_and_preview(job.id)
+            assert preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            assert preview["preview_revision"] == 1
+            occurrence = await session.scalar(
+                select(ImportJobFile).where(ImportJobFile.import_job_id == job.id)
+            )
+            assert occurrence is not None
+            assert occurrence.status is ImportJobFileStatus.READY
+            rows = list(
+                await session.scalars(select(ImportRow).where(ImportRow.import_job_id == job.id))
+            )
+            assert len(rows) == 1
+            assert rows[0].import_job_file_id == occurrence.id
+
+            await queue_confirm(session, job.id, 1)
+            result = await processor.confirm(job.id, 1)
+            assert result["created_rows"] == 1
+            assert await session.scalar(select(func.count()).select_from(Influencer)) == 1
 
     asyncio.run(scenario())
 
@@ -312,6 +406,7 @@ def test_confirm_rolls_back_all_business_writes_when_one_row_fails() -> None:
             refreshed = await session.get(ImportJob, job.id)
             assert refreshed is not None and refreshed.status == ImportJobStatus.FAILED
             assert refreshed.error_code == "IMPORT_PROCESSING_FAILED"
+            assert refreshed.failed_stage is ImportJobFailedStage.CONFIRM
 
     asyncio.run(scenario())
 

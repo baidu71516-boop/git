@@ -5,6 +5,7 @@ from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.models import ImportJob
 
 ALLOWED_TRANSITIONS: dict[ImportJobStatus, frozenset[ImportJobStatus]] = {
+    ImportJobStatus.DRAFT: frozenset({ImportJobStatus.PREVIEWING, ImportJobStatus.CANCELLED}),
     ImportJobStatus.UPLOADED: frozenset(
         {ImportJobStatus.PARSING, ImportJobStatus.FAILED, ImportJobStatus.CANCELLED}
     ),

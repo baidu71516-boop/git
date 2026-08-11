@@ -17,19 +17,26 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend_core.db.base import Base
 from backend_core.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from backend_core.db.types import JSON_DOCUMENT
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFailedStage,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
+
+
+def default_screening_rules() -> dict[str, Any]:
+    return {"schema_version": 1, "platforms": [], "source_tags_exact_any": []}
 
 
 def enum_values(enum_type: type[Any]) -> list[str]:
@@ -53,6 +60,9 @@ class StoredImportFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     encoding: Mapped[str | None] = mapped_column(String(40), nullable=True)
     parse_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    import_job_files: Mapped[list["ImportJobFile"]] = relationship(
+        back_populates="stored_file", lazy="raise"
+    )
 
 
 class CollectionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -77,6 +87,10 @@ class CollectionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint(
             "follower_min IS NULL OR follower_max IS NULL OR follower_min <= follower_max",
             name="ck_collection_job_follower_range",
+        ),
+        CheckConstraint(
+            "screening_rules_revision >= 1",
+            name="ck_collection_job_screening_rules_revision",
         ),
         Index("ix_collection_jobs_department_status", "department_id", "status"),
     )
@@ -103,6 +117,15 @@ class CollectionJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         default=CollectionJobStatus.DRAFT,
     )
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    screening_rules: Mapped[dict[str, Any]] = mapped_column(
+        JSON_DOCUMENT,
+        nullable=False,
+        default=default_screening_rules,
+        server_default='{"schema_version":1,"platforms":[],"source_tags_exact_any":[]}',
+    )
+    screening_rules_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
 
 
 class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -118,7 +141,7 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_import_job_collection_department",
             ondelete="RESTRICT",
         ),
-        CheckConstraint("file_size > 0", name="ck_import_job_file_size"),
+        CheckConstraint("file_size IS NULL OR file_size > 0", name="ck_import_job_file_size"),
         CheckConstraint("preview_revision >= 0", name="ck_import_job_preview_revision"),
         CheckConstraint(
             "confirmed_revision IS NULL OR confirmed_revision <= preview_revision",
@@ -139,13 +162,13 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     operator_id: Mapped[UUID] = mapped_column(
         ForeignKey("operators.id", ondelete="RESTRICT"), nullable=False
     )
-    stored_file_id: Mapped[UUID] = mapped_column(
-        ForeignKey("stored_import_files.id", ondelete="RESTRICT"), nullable=False
+    stored_file_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("stored_import_files.id", ondelete="RESTRICT"), nullable=True
     )
-    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
-    mime_type: Mapped[str] = mapped_column(String(160), nullable=False)
-    file_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mime_type: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_type: Mapped[ImportSourceType] = mapped_column(
         Enum(ImportSourceType, name="import_source_type", values_callable=enum_values),
         nullable=False,
@@ -176,13 +199,97 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failed_stage: Mapped[ImportJobFailedStage | None] = mapped_column(
+        Enum(ImportJobFailedStage, name="import_job_failed_stage", values_callable=enum_values),
+        nullable=True,
+    )
+    files: Mapped[list["ImportJobFile"]] = relationship(
+        back_populates="import_job", lazy="raise", order_by="ImportJobFile.position"
+    )
+
+
+class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "import_job_files"
+    __table_args__ = (
+        UniqueConstraint("import_job_id", "position", name="uq_import_job_file_position"),
+        UniqueConstraint("import_job_id", "client_file_id", name="uq_import_job_file_client_id"),
+        UniqueConstraint("import_job_id", "stored_file_id", name="uq_import_job_file_stored_file"),
+        UniqueConstraint("id", "import_job_id", name="uq_import_job_file_job_pair"),
+        CheckConstraint("position >= 1", name="ck_import_job_file_position"),
+        CheckConstraint(
+            "raw_rows >= 0 AND warning_rows >= 0 AND error_rows >= 0 " "AND parse_attempts >= 0",
+            name="ck_import_job_file_counts_nonnegative",
+        ),
+        CheckConstraint(
+            "(source_acquired_at_origin = 'legacy_unknown' AND source_acquired_at IS NULL) "
+            "OR (source_acquired_at_origin IN ('server_default', 'user_confirmed') "
+            "AND source_acquired_at IS NOT NULL)",
+            name="ck_import_job_file_acquisition_origin",
+        ),
+    )
+
+    import_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    stored_file_id: Mapped[UUID] = mapped_column(
+        ForeignKey("stored_import_files.id", ondelete="RESTRICT"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    client_file_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    declared_mime: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    status: Mapped[ImportJobFileStatus] = mapped_column(
+        Enum(ImportJobFileStatus, name="import_job_file_status", values_callable=enum_values),
+        nullable=False,
+        default=ImportJobFileStatus.UPLOADED,
+    )
+    source_acquired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    source_acquired_at_origin: Mapped[SourceAcquiredAtOrigin] = mapped_column(
+        Enum(
+            SourceAcquiredAtOrigin,
+            name="source_acquired_at_origin",
+            values_callable=enum_values,
+        ),
+        nullable=False,
+    )
+    detected_fields: Mapped[list[str] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
+    field_mapping: Mapped[dict[str, str] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
+    mapping_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    raw_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    warning_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_rows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parse_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    parse_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    parse_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    parse_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    excluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    import_job: Mapped[ImportJob] = relationship(back_populates="files", lazy="raise")
+    stored_file: Mapped[StoredImportFile] = relationship(
+        back_populates="import_job_files", lazy="raise"
+    )
+    rows: Mapped[list["ImportRow"]] = relationship(back_populates="import_job_file", lazy="raise")
 
 
 class ImportRow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "import_rows"
     __table_args__ = (
-        UniqueConstraint("import_job_id", "row_number", name="uq_import_rows_job_number"),
+        UniqueConstraint("import_job_file_id", "row_number", name="uq_import_rows_file_number"),
         UniqueConstraint("id", "import_job_id", name="uq_import_row_job_pair"),
+        ForeignKeyConstraint(
+            ["import_job_file_id", "import_job_id"],
+            ["import_job_files.id", "import_job_files.import_job_id"],
+            name="fk_import_row_file_job",
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["matched_platform_account_id", "matched_influencer_id"],
             ["influencer_platform_accounts.id", "influencer_platform_accounts.influencer_id"],
@@ -200,6 +307,7 @@ class ImportRow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     import_job_id: Mapped[UUID] = mapped_column(
         ForeignKey("import_jobs.id", ondelete="RESTRICT"), nullable=False
     )
+    import_job_file_id: Mapped[UUID] = mapped_column(nullable=False)
     row_number: Mapped[int] = mapped_column(Integer, nullable=False)
     raw_data: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)
     normalized_data: Mapped[dict[str, Any] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
@@ -229,3 +337,12 @@ class ImportRow(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Enum(ImportRowAction, name="import_row_action", values_callable=enum_values), nullable=True
     )
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    import_job_file: Mapped[ImportJobFile] = relationship(back_populates="rows", lazy="raise")
+
+
+Index(
+    "ix_import_rows_account_committed_job",
+    ImportRow.matched_platform_account_id,
+    ImportRow.committed_at.desc(),
+    ImportRow.import_job_id,
+)

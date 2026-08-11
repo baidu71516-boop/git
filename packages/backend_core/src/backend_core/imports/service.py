@@ -17,14 +17,23 @@ from backend_core.auth.enums import Role
 from backend_core.auth.service import AuthContext
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFailedStage,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.hashing import hash_document
 from backend_core.imports.mappings import validate_mapping
-from backend_core.imports.models import CollectionJob, ImportJob, ImportRow, StoredImportFile
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.imports.parsers import ParserLimits, validate_upload_type
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.schemas import CollectionJobCreate
@@ -236,6 +245,21 @@ class ImportService:
             )
             self.session.add(import_job)
             await self.session.flush()
+            self.session.add(
+                ImportJobFile(
+                    import_job_id=import_job.id,
+                    stored_file_id=stored_file.id,
+                    position=1,
+                    client_file_id=f"legacy:{import_job.id}",
+                    original_filename=import_job.original_filename or "upload",
+                    declared_mime=import_job.mime_type,
+                    status=ImportJobFileStatus.UPLOADED,
+                    source_acquired_at=None,
+                    source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+                    parse_task_id=parse_task_id,
+                )
+            )
+            await self.session.flush()
             self.audit.add(
                 action=AuditAction.IMPORT_FILE_UPLOADED,
                 result=AuditResult.SUCCESS,
@@ -303,6 +327,7 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
         if job.detected_fields is None:
             raise ImportDomainError(
                 "MAPPING_UNAVAILABLE", "File fields have not been detected", status_code=409
@@ -325,6 +350,13 @@ class ImportService:
         job.preview_summary = None
         job.error_code = None
         job.error_message = None
+        occurrence.detected_fields = list(job.detected_fields)
+        occurrence.field_mapping = validated
+        occurrence.mapping_hash = job.mapping_hash
+        occurrence.status = ImportJobFileStatus.PARSING
+        occurrence.parse_task_id = task_id
+        occurrence.error_code = None
+        occurrence.error_message = None
         self.audit.add(
             action=AuditAction.IMPORT_MAPPING_UPDATED,
             result=AuditResult.SUCCESS,
@@ -350,6 +382,7 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
         if not job.field_mapping or not job.mapping_hash:
             raise ImportDomainError(
                 "MAPPING_REQUIRED", "A valid mapping is required", status_code=409
@@ -369,6 +402,12 @@ class ImportService:
         job.preview_summary = None
         job.error_code = None
         job.error_message = None
+        occurrence.field_mapping = dict(job.field_mapping)
+        occurrence.mapping_hash = job.mapping_hash
+        occurrence.status = ImportJobFileStatus.PARSING
+        occurrence.parse_task_id = task_id
+        occurrence.error_code = None
+        occurrence.error_message = None
         await self.session.commit()
         return QueueDecision(job=job, should_dispatch=True)
 
@@ -462,7 +501,9 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
         transition_import_job(job, ImportJobStatus.CANCELLED)
+        occurrence.status = ImportJobFileStatus.EXCLUDED
         self.audit.add(
             action=AuditAction.IMPORT_CANCELLED,
             result=AuditResult.SUCCESS,
@@ -499,6 +540,14 @@ class ImportService:
         }:
             await self.session.rollback()
             return
+        if task_id == job.parse_task_id:
+            occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
+            occurrence.status = ImportJobFileStatus.FAILED
+            occurrence.error_code = "TASK_DISPATCH_FAILED"
+            occurrence.error_message = "Background task could not be queued"
+            job.failed_stage = ImportJobFailedStage.PREVIEW
+        else:
+            job.failed_stage = ImportJobFailedStage.CONFIRM
         transition_import_job(job, ImportJobStatus.FAILED)
         job.error_code = "TASK_DISPATCH_FAILED"
         job.error_message = "Background task could not be queued"

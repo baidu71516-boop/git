@@ -17,6 +17,8 @@ from backend_core.imports.adapters import (
 )
 from backend_core.imports.contracts import AdaptedRow, CanonicalInfluencerRecord, SourceAdapter
 from backend_core.imports.enums import (
+    ImportJobFailedStage,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
     ImportSourceType,
@@ -106,7 +108,12 @@ class ImportProcessor:
                 }
                 await self.session.rollback()
                 return result
-            stored_file = await self.repository.get_stored_file(job.stored_file_id)
+            occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
+            occurrence.status = ImportJobFileStatus.PARSING
+            occurrence.parse_task_id = job.parse_task_id
+            occurrence.error_code = None
+            occurrence.error_message = None
+            stored_file = await self.repository.get_stored_file(occurrence.stored_file_id)
             if stored_file is None:
                 raise ImportDomainError("FILE_NOT_FOUND", "Stored import file not found")
             await self.session.commit()
@@ -119,10 +126,10 @@ class ImportProcessor:
             table = parse_table(
                 content,
                 file_type=stored_file.detected_type,
-                declared_mime=job.mime_type,
+                declared_mime=occurrence.declared_mime or job.mime_type or "",
                 limits=self.parser_limits,
             )
-            mapping = dict(job.field_mapping or {})
+            mapping = dict(occurrence.field_mapping or job.field_mapping or {})
             adapter: SourceAdapter | None = None
             if mapping:
                 adapter = self._adapter(job.source_type, table.file_type, mapping)
@@ -142,7 +149,7 @@ class ImportProcessor:
                     }
 
             if adapter is None:
-                await self._mark_mapping_required(job.id, stored_file.id, table, mapping)
+                await self._mark_mapping_required(job.id, occurrence.id, table, mapping)
                 return {
                     "import_job_id": str(job.id),
                     "status": ImportJobStatus.MAPPING_REQUIRED.value,
@@ -151,7 +158,7 @@ class ImportProcessor:
             adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
             return await self._persist_preview(
                 job.id,
-                stored_file.id,
+                occurrence.id,
                 table,
                 mapping,
                 adapted_rows,
@@ -160,7 +167,7 @@ class ImportProcessor:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             await self.session.rollback()
-            await self._mark_failed(import_job_id, exc)
+            await self._mark_failed(import_job_id, exc, mark_file_failed=True)
             if isinstance(exc, ImportDomainError):
                 raise
             raise ImportDomainError(
@@ -192,14 +199,17 @@ class ImportProcessor:
     async def _mark_mapping_required(
         self,
         job_id: UUID,
-        stored_file_id: UUID,
+        import_job_file_id: UUID,
         table: ParsedTable,
         mapping: dict[str, str],
     ) -> None:
         job = await self.repository.get_import_job(job_id, for_update=True)
-        stored_file = await self.repository.get_stored_file(stored_file_id)
-        if job is None or stored_file is None:
+        occurrence = await self.repository.get_import_job_file(import_job_file_id, for_update=True)
+        if job is None or occurrence is None or occurrence.import_job_id != job.id:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found")
+        stored_file = await self.repository.get_stored_file(occurrence.stored_file_id)
+        if stored_file is None:
+            raise ImportDomainError("FILE_NOT_FOUND", "Stored import file not found")
         if job.status == ImportJobStatus.CANCELLED:
             await self.session.rollback()
             return
@@ -213,6 +223,13 @@ class ImportProcessor:
         job.detected_fields = table.headers
         job.field_mapping = mapping or None
         job.mapping_hash = hash_document(mapping) if mapping else None
+        occurrence.detected_fields = list(table.headers)
+        occurrence.field_mapping = mapping or None
+        occurrence.mapping_hash = job.mapping_hash
+        occurrence.raw_rows = len(table.rows)
+        occurrence.warning_rows = int(bool(table.warnings))
+        occurrence.error_rows = 0
+        occurrence.status = ImportJobFileStatus.MAPPING_REQUIRED
         stored_file.encoding = table.encoding
         stored_file.parse_metadata = {
             "delimiter": table.delimiter,
@@ -224,15 +241,18 @@ class ImportProcessor:
     async def _persist_preview(
         self,
         job_id: UUID,
-        stored_file_id: UUID,
+        import_job_file_id: UUID,
         table: ParsedTable,
         mapping: dict[str, str],
         adapted_rows: list[AdaptedRow],
     ) -> dict[str, Any]:
         job = await self.repository.get_import_job(job_id, for_update=True)
-        stored_file = await self.repository.get_stored_file(stored_file_id)
-        if job is None or stored_file is None:
+        occurrence = await self.repository.get_import_job_file(import_job_file_id, for_update=True)
+        if job is None or occurrence is None or occurrence.import_job_id != job.id:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found")
+        stored_file = await self.repository.get_stored_file(occurrence.stored_file_id)
+        if stored_file is None:
+            raise ImportDomainError("FILE_NOT_FOUND", "Stored import file not found")
         if job.status == ImportJobStatus.CANCELLED:
             await self.session.rollback()
             return {"import_job_id": str(job_id), "status": job.status.value}
@@ -288,8 +308,17 @@ class ImportProcessor:
             plans.append((adapted, plan))
             row = existing_rows.get(adapted.row_number)
             if row is None:
-                row = ImportRow(import_job_id=job.id, row_number=adapted.row_number)
+                row = ImportRow(
+                    import_job_id=job.id,
+                    import_job_file_id=occurrence.id,
+                    row_number=adapted.row_number,
+                )
                 self.session.add(row)
+            elif row.import_job_file_id != occurrence.id:
+                raise ImportDomainError(
+                    "IMPORT_ROW_FILE_MISMATCH",
+                    "Import row belongs to a different file occurrence",
+                )
             row.raw_data = adapted.raw_data
             row.normalized_data = adapted.normalized_data()
             row.matched_influencer_id = plan.matched_influencer_id
@@ -313,6 +342,16 @@ class ImportProcessor:
         self._set_counts(job, summary)
         job.error_code = None
         job.error_message = None
+        job.failed_stage = None
+        occurrence.detected_fields = list(table.headers)
+        occurrence.field_mapping = dict(mapping)
+        occurrence.mapping_hash = mapping_hash
+        occurrence.raw_rows = int(summary["total_rows"])
+        occurrence.warning_rows = int(summary["warning_rows"])
+        occurrence.error_rows = int(summary["error_rows"])
+        occurrence.status = ImportJobFileStatus.READY
+        occurrence.error_code = None
+        occurrence.error_message = None
         stored_file.encoding = table.encoding
         stored_file.parse_metadata = {
             "delimiter": table.delimiter,
@@ -425,7 +464,7 @@ class ImportProcessor:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             await self.session.rollback()
-            await self._mark_failed(import_job_id, exc)
+            await self._mark_failed(import_job_id, exc, mark_file_failed=False)
             if isinstance(exc, ImportDomainError):
                 raise
             raise ImportDomainError(
@@ -549,6 +588,7 @@ class ImportProcessor:
         job.completed_at = now
         job.error_code = None
         job.error_message = None
+        job.failed_stage = None
         transition_import_job(job, ImportJobStatus.COMPLETED)
         self.audit.add(
             action=AuditAction.IMPORT_CONFIRMED,
@@ -800,7 +840,9 @@ class ImportProcessor:
         else:
             await self.session.rollback()
 
-    async def _mark_failed(self, import_job_id: UUID, exc: BaseException) -> None:
+    async def _mark_failed(
+        self, import_job_id: UUID, exc: BaseException, *, mark_file_failed: bool
+    ) -> None:
         job = await self.repository.get_import_job(import_job_id, for_update=True)
         if job is None:
             await self.session.rollback()
@@ -816,6 +858,16 @@ class ImportProcessor:
         code = exc.code if isinstance(exc, ImportDomainError) else "IMPORT_PROCESSING_FAILED"
         message = (
             exc.message if isinstance(exc, ImportDomainError) else "Import processing failed safely"
+        )
+        if mark_file_failed:
+            occurrences = await self.repository.list_import_job_files(job.id, for_update=True)
+            if len(occurrences) == 1:
+                occurrence = occurrences[0]
+                occurrence.status = ImportJobFileStatus.FAILED
+                occurrence.error_code = code[:80]
+                occurrence.error_message = message
+        job.failed_stage = (
+            ImportJobFailedStage.PREVIEW if mark_file_failed else ImportJobFailedStage.CONFIRM
         )
         transition_import_job(job, ImportJobStatus.FAILED)
         job.error_code = code[:80]

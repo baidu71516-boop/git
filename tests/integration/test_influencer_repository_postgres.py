@@ -15,13 +15,21 @@ from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
-from backend_core.imports.models import CollectionJob, ImportJob, ImportRow, StoredImportFile
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.influencers.enums import (
     ContactType,
     ContactValidationStatus,
@@ -103,6 +111,7 @@ async def _isolated_postgres() -> AsyncIterator[async_sessionmaker[AsyncSession]
 class _Provenance:
     operator: Operator
     job: ImportJob
+    job_file: ImportJobFile
     next_row_number: int = 2
 
 
@@ -164,7 +173,20 @@ async def _seed_provenance(session: AsyncSession) -> _Provenance:
     )
     session.add(job)
     await session.flush()
-    return _Provenance(operator=operator, job=job)
+    job_file = ImportJobFile(
+        import_job_id=job.id,
+        stored_file_id=stored_file.id,
+        position=1,
+        client_file_id=f"legacy:{job.id}",
+        original_filename="repository-fixture.csv",
+        declared_mime="text/csv",
+        status=ImportJobFileStatus.READY,
+        source_acquired_at=None,
+        source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+    )
+    session.add(job_file)
+    await session.flush()
+    return _Provenance(operator=operator, job=job, job_file=job_file)
 
 
 async def _new_import_row(session: AsyncSession, provenance: _Provenance) -> ImportRow:
@@ -172,6 +194,7 @@ async def _new_import_row(session: AsyncSession, provenance: _Provenance) -> Imp
     provenance.next_row_number += 1
     row = ImportRow(
         import_job_id=provenance.job.id,
+        import_job_file_id=provenance.job_file.id,
         row_number=row_number,
         raw_data={"fixture_row": row_number},
         normalized_data={"fixture_row": row_number},

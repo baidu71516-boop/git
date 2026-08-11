@@ -15,12 +15,20 @@ from backend_core.db.base import Base
 from backend_core.imports.adapters import HuitunCsvAdapter
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
     StoredFileType,
 )
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
-from backend_core.imports.models import CollectionJob, ImportJob, StoredImportFile
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.imports.parsers import ParserLimits, parse_csv
 from backend_core.imports.planner import build_preview_context
 from backend_core.imports.processor import ImportProcessor
@@ -146,6 +154,20 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                         parse_task_id="real-sample-preview",
                     )
                     session.add(job)
+                    await session.flush()
+                    occurrence = ImportJobFile(
+                        import_job_id=job.id,
+                        stored_file_id=stored_file.id,
+                        position=1,
+                        client_file_id=f"legacy:{job.id}",
+                        original_filename=SAMPLE_PATH.name,
+                        declared_mime="text/csv",
+                        status=ImportJobFileStatus.UPLOADED,
+                        source_acquired_at=None,
+                        source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+                        parse_task_id="real-sample-preview",
+                    )
+                    session.add(occurrence)
                     await session.commit()
 
                     processor = ImportProcessor(session, storage, parser_limits=ParserLimits())
@@ -175,6 +197,20 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                         "missing_email_rows": 41,
                         "possible_duplicate_contact_rows": 0,
                     }
+                    rows = list(
+                        await session.scalars(
+                            select(ImportRow).where(ImportRow.import_job_id == job.id)
+                        )
+                    )
+                    assert len(rows) == 50
+                    assert {row.import_job_file_id for row in rows} == {occurrence.id}
+                    await session.refresh(occurrence)
+                    assert occurrence.status is ImportJobFileStatus.READY
+                    assert occurrence.source_acquired_at is None
+                    assert (
+                        occurrence.source_acquired_at_origin
+                        is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
+                    )
                     assert await session.scalar(select(func.count()).select_from(Influencer)) == 0
 
                     refreshed.status = ImportJobStatus.CONFIRM_QUEUED

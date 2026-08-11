@@ -7,9 +7,16 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend_core.imports.enums import ImportRowAction
+from backend_core.imports.enums import ImportRowAction, SourceAcquiredAtOrigin
+from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.hashing import advisory_lock_key
-from backend_core.imports.models import CollectionJob, ImportJob, ImportRow, StoredImportFile
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.influencers.enums import ContactType, DataSource, Platform
 from backend_core.influencers.models import (
     InfluencerContact,
@@ -66,6 +73,50 @@ class ImportRepository:
             ),
         )
 
+    async def get_import_job_file(
+        self, import_job_file_id: UUID, *, for_update: bool = False
+    ) -> ImportJobFile | None:
+        statement = select(ImportJobFile).where(ImportJobFile.id == import_job_file_id)
+        if for_update:
+            statement = statement.with_for_update()
+        return cast(ImportJobFile | None, await self.session.scalar(statement))
+
+    async def list_import_job_files(
+        self, import_job_id: UUID, *, for_update: bool = False
+    ) -> list[ImportJobFile]:
+        statement = (
+            select(ImportJobFile)
+            .where(ImportJobFile.import_job_id == import_job_id)
+            .order_by(ImportJobFile.position, ImportJobFile.id)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return list(await self.session.scalars(statement))
+
+    async def get_legacy_import_job_file(
+        self, job: ImportJob, *, for_update: bool = False
+    ) -> ImportJobFile:
+        files = await self.list_import_job_files(job.id, for_update=for_update)
+        if len(files) != 1:
+            raise ImportDomainError(
+                "IMPORT_FILE_OCCURRENCE_INVALID",
+                "Legacy import job must have exactly one file occurrence",
+            )
+        occurrence = files[0]
+        if (
+            job.stored_file_id is None
+            or occurrence.stored_file_id != job.stored_file_id
+            or occurrence.position != 1
+            or occurrence.client_file_id != f"legacy:{job.id}"
+            or occurrence.source_acquired_at is not None
+            or occurrence.source_acquired_at_origin is not SourceAcquiredAtOrigin.LEGACY_UNKNOWN
+        ):
+            raise ImportDomainError(
+                "IMPORT_FILE_OCCURRENCE_INVALID",
+                "Legacy import file occurrence does not match the import job",
+            )
+        return occurrence
+
     async def list_import_rows(
         self,
         import_job_id: UUID,
@@ -82,8 +133,12 @@ class ImportRepository:
         )
         result = await self.session.scalars(
             select(ImportRow)
+            .join(
+                ImportJobFile,
+                ImportJobFile.id == ImportRow.import_job_file_id,
+            )
             .where(*criteria)
-            .order_by(ImportRow.row_number)
+            .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
             .offset(offset)
             .limit(limit)
         )
@@ -92,8 +147,12 @@ class ImportRepository:
     async def all_import_rows(self, import_job_id: UUID) -> list[ImportRow]:
         result = await self.session.scalars(
             select(ImportRow)
+            .join(
+                ImportJobFile,
+                ImportJobFile.id == ImportRow.import_job_file_id,
+            )
             .where(ImportRow.import_job_id == import_job_id)
-            .order_by(ImportRow.row_number)
+            .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
         )
         return list(result)
 

@@ -85,7 +85,7 @@ async def _seed_auth_session(
         csrf_token_hash=hash_token(f"csrf-{role.value}"),
         ip="192.0.2.20",
         user_agent="influencer-http-test",
-        expires_at=NOW + timedelta(hours=12),
+        expires_at=datetime.now(UTC) + timedelta(hours=12),
         revoked_at=None,
     )
     session.add_all(
