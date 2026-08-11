@@ -23,7 +23,9 @@ Phase 1：
 部门登录 → 操作人 → 导入 → 去重 → 达人库。
 
 Phase 2：
-Playbook → AI Adapter → 达人分析 → 个性化 → Campaign → 邮件预览。
+多文件 Bulk Import → 确定性 Screening → Freshness → Refresh Priority / Queue → 人工回流。
+
+旧的“Phase 2 = Playbook + AI + Campaign”和 Browser Automation 方案已经人工废弃。Playbook、AI、Campaign 需要在未来阶段重新冻结，不得从旧排期推导当前实现授权。当前 Phase 2 禁止灰豚登录托管、Playwright 灰豚采集、AI semantic matching 和 Auto Confirm，唯一实施契约为 `docs/PHASE_2_SCOPE.md`。
 
 Phase 3：
 Mailbox → Send Queue → Follow-up → Reply Sync → Inbox → AI Reply Classifier。

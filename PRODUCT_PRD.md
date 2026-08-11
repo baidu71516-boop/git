@@ -14,6 +14,21 @@
 - CRM 管理长期达人资源
 - 统计赛道、模板、员工、Campaign 表现
 
+### Phase 2 冻结补充（2026-08-11）
+
+当前 Phase 2 已由人工重新定义为“Huitun Bulk Acquisition & Freshness Management”，唯一权威实施契约为 `docs/PHASE_2_SCOPE.md`。旧的 Browser Automation 和“SOP/Campaign/AI 作为 Phase 2”排期已经废弃；后者属于未来待重新冻结范围。
+
+当前 Phase 2 固定为：
+
+- 一个 ImportJob 承载多个灰豚 CSV/XLSX。
+- 多文件统一 Parse、Normalize、Hard Dedup、Preview 与人工 Confirm。
+- 使用结构化、确定性的 platform/source_tags/followers Screening；不从行业描述、目的或备注做模糊/AI 推断。
+- 建立 per-file `source_acquired_at`、Freshness、Refresh Priority 和 Department-owned Refresh Queue。
+- Refresh 回流继续经过现有 Preview/Confirm/Merge。
+- Email 永远不是 hard merge 依据，只标记疑似重复。
+
+本补充覆盖本文中与当前 Phase 2 相冲突的旧排期、单文件直接写入或 Email 自动去重描述，但不授权实现 AI、Campaign、邮件、Inbox 或 CRM。
+
 ---
 
 ## 2. 登录方式
@@ -128,10 +143,9 @@ SOP / 话术
 - 备注
 
 系统输出：
-- 灰豚筛选建议
-- 搜索关键词建议
-- 达人优先级
-- 推荐 SOP
+- 结构化 Screening Rules
+- MATCH / NOT_MATCH / UNKNOWN 与证据
+- 导入后的 Refresh Priority Reasons
 
 ### 数据来源 V1
 - 灰豚 Excel
@@ -146,19 +160,23 @@ SOP / 话术
 ## 7. 导入流程
 
 ```text
-上传文件
+创建多文件 ImportJob
 ↓
-识别列
+逐文件上传、识别列
 ↓
-字段映射
+逐文件字段映射
 ↓
 标准化
 ↓
-去重
+文件内 / 跨文件 / 数据库去重
 ↓
 联系方式提取
 ↓
-写入达人库
+统一 Preview
+↓
+人工 Confirm
+↓
+非破坏性 Merge
 ↓
 生成导入结果
 ```
@@ -181,13 +199,14 @@ SOP / 话术
 1. 小红书平台 ID
 2. 灰豚 ID
 3. 主页 URL
-4. 邮箱
+
+邮箱只用于疑似重复标记，不得自动合并达人。
 
 匹配到已有达人：
 - 默认不重复创建
 - 更新允许更新的公开指标
 - 保留原负责人和历史记录
-- 用户可选择“仅补充数据”
+- 严格遵守 Preview 中的非破坏性 Merge Plan
 
 ---
 

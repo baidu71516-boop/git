@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 0 — Design Freeze
+
+#### Documentation
+
+- 冻结新的 Phase 2 方向：多文件 Bulk Import、versioned structured screening、账号/来源级 Freshness、Department-owned Refresh Queue 与人工回流；旧 Browser Automation 方案正式废弃。
+- 冻结一个 `ImportJob = 一个 Bulk Batch`，通过 `ImportJobFile` 保存多文件 occurrence 与行级 lineage；明确不新增 `ImportBatch`、`BatchRow`、FreshnessPolicy 或 DailyQuotaPlan。
+- 冻结同 Job 相同 SHA 幂等、跨 Job 重新 Parse/Preview、坏文件保持 Draft、统一 Preview Revision、人工 Confirm、Phase 1B Matcher/Merge/Metric Snapshot 复用和 Email 仅疑似重复规则。
+- 冻结 `source_acquired_at`、7/30/90 天 Freshness Settings、NO_CHANGE Queue 核销条件、被 lineage 引用的 Raw File 不得物理删除，以及灰豚批量定位能力的唯一 Remaining UNKNOWN。
+- 冻结 Migration 拆分为 `0004_phase2_bulk_import` 与 `0005_phase2_refresh_queue`，Worker concurrency=2、Heavy Import 同时最多 1 个，以及 2000/5000/10000 行分级门禁。
+- 同步 Product、Architecture、Database、API、Development Plan、Acceptance Criteria、Open Questions 与工程边界文档，明确 AI、Playbook、Campaign、邮件、CRM、其他平台 Connector 和视觉重构均不属于当前 MVP。
+
+#### Boundaries
+
+- 本提交仅包含 Markdown 设计文档；没有业务代码、ORM Model、API/Worker/Web 实现、Docker 配置或 Migration 变更。
+- `0004`/`0005` 只是冻结的后续命名，本 Task 不创建 Migration，也不开始 Task 1。
+
 ### Phase 1C
 
 #### Added

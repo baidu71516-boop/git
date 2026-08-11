@@ -1,25 +1,35 @@
 # 技术架构
 
-## 1. V1 架构
+## 0. 权威边界
+
+- Phase 1A–1C 的实际实现以 `packages/backend_core`、FastAPI/Worker 薄入口、`0001`–`0003_phase1b` migrations 和已通过测试为准。
+- Phase 2 的冻结目标以 `docs/PHASE_2_SCOPE.md` 为唯一详细设计；本文件只记录系统级架构边界。
+- 旧的 Browser Automation 方案已废弃。当前 Phase 2 不包含灰豚登录、页面自动化或自动采集器。
+- 唯一共享 Python 业务核心是 `packages/backend_core`。`apps/api` 只负责 HTTP，`apps/worker` 只负责异步任务入口；禁止 API 内 Service、根目录 `services/` 或第二套 Matcher/Merge。
+
+---
+
+## 1. 当前七服务架构
 
 ```text
 Browser
   ↓
 Nginx
   ├─ Next.js Web
-  └─ FastAPI
-       ├─ PostgreSQL
-       ├─ Redis
-       ├─ Celery Worker
-       ├─ AI Provider Adapter
-       └─ Email Provider Adapter
+  └─ FastAPI HTTP Layer
+        ↓
+packages/backend_core
+  ├─ PostgreSQL
+  ├─ Redis
+  ├─ /data/imports
+  └─ Provider Adapters
+
+Celery Worker / Scheduler
+        ↓
+packages/backend_core
 ```
 
----
-
-## 2. 部署
-
-Docker Compose：
+Docker Compose 服务保持不变：
 
 ```text
 nginx
@@ -31,162 +41,176 @@ postgres
 redis
 ```
 
-建议：
-- 开发环境可共机
-- 正式环境 V1 可单服务器
-- 定期备份数据库
+Phase 2 不增加新服务。PostgreSQL 与 Redis 继续只在 Docker 内部网络可见。
 
 ---
 
-## 3. 模块边界
+## 2. Phase 2 Bulk Import 数据流
+
+```mermaid
+flowchart LR
+    U["User uploads files"] --> J["ImportJob = Bulk Batch"]
+    J --> F["ImportJobFile occurrences"]
+    F --> S["StoredImportFile blobs"]
+    F --> P["Per-file parse and mapping"]
+    P --> R["ImportRows with file lineage"]
+    R --> A["Existing Source Adapters"]
+    A --> C["Canonical records"]
+    C --> M["One existing ImportPlanner and Matcher"]
+    M --> V["Unified persisted Preview Revision"]
+    V --> H["Human Confirm"]
+    H --> T["One PostgreSQL transaction"]
+    T --> I["Influencer + PlatformAccount + Source + Contact + Metrics"]
+```
+
+核心不变量：
+
+- 一个 `ImportJob` 就是一个多文件 Bulk Batch；不新增 `ImportBatch` 或 `BatchRow`。
+- 每个文件通过 `ImportJobFile` 保留 occurrence、Mapping、SHA-256、`source_acquired_at` 与行级 lineage。
+- 同一 Batch 的所有文件经过同一个 Canonical Contract、Matcher、Planner、Preview Revision 和 Confirm Transaction。
+- Preview 不写达人业务表；MVP 没有 auto-confirm。
+- 文件内、跨文件和数据库三层去重都复用 Phase 1B 的硬身份规则；Email 只产生疑似重复。
+- Phase 1B 的新鲜度合并、人工数据保护、Contact 和不可变 Metric Snapshot 语义不变。
+
+---
+
+## 3. Phase 2 Freshness 与 Refresh 回流
+
+```mermaid
+flowchart LR
+    L["Company Influencer Library"] --> Q["Department-owned Refresh Queue"]
+    Q --> E["Export real stored identities"]
+    E --> X["External manual Huitun operation"]
+    X --> U["Bulk file upload"]
+    U --> B["ImportJob Bulk Batch"]
+    B --> O["source_acquired_at observation"]
+    O --> F["Freshness calculation"]
+    F --> Q
+```
+
+- Freshness 粒度为 `PlatformAccount + Source`，不以 Influencer 汇总掩盖 stale account。
+- `source_acquired_at` 表示文件实际从来源取得的大致时间；新 Bulk Draft 上传默认服务器接受时间，可在首次 Preview 前修改，之后冻结。Legacy 单文件兼容路径保持 unknown。
+- Legacy 数据没有可靠 acquisition time 时保持 unknown；`committed_at` 只能支持 `last_huitun_imported_at`，不能冒充 observed time。
+- Refresh Queue 由 Department 拥有，但候选来源是公司级 Influencer Library；Owner 与导入部门不是读取 ACL。
+- Queue CSV 只导出真实 Identity。在真实灰豚产品流程验证前，不承诺灰豚能直接批量消费这些 Identity。
+
+---
+
+## 4. 模块边界
 
 ### auth
-部门登录、Session、操作人。
+
+部门登录、Session、Department Permission 和 Operator Audit 归属。
 
 ### imports
-Excel/CSV 解析、字段映射、去重。
+
+文件存储、安全解析、Mapping、Canonical Adaptation、三层去重、统一 Preview、Confirm、来源 lineage 和 Bulk Batch。
 
 ### influencers
-达人主数据。
 
-### campaigns
-Campaign 与 Lead。
+公司级 Influencer、PlatformAccount、Source State/Identity、Contact、Current Metrics、Metric Snapshot 与只读资源库查询。
 
-### playbooks
-SOP、模板、版本。
+### imports / CollectionJob
 
-### ai
-AI Provider、Prompt、结构化输出。
+CollectionJob 继续位于现有 `backend_core.imports` 域，并增加 versioned structured screening rules。Phase 2 MVP 只做 platform、Source Tag exact 和 Followers 范围的确定性三态判断，不为它新建重复业务域。
 
-### email
-邮箱、发送、事件、Follow-up。
+### freshness / refresh
 
-### inbox
-回复同步、分类。
+Freshness 计算、Department-owned Refresh Queue、Queue Item、真实 Identity 导出与 Import 回流核销。实现位置仍在 `backend_core`，不建立独立服务。
 
-### crm
-阶段、跟进、备注、事件。
+### campaigns / playbooks / ai / email / inbox / crm / analytics
 
-### analytics
-指标聚合。
-
-### audit
-日志。
+保留为后续阶段模块边界。当前 Phase 2 不实现这些能力。
 
 ---
 
-## 4. 数据源适配器
+## 5. 数据源适配器
 
-统一接口：
+通用输入必须转换为平台无关 Canonical Contract：
 
 ```python
-class InfluencerSourceAdapter:
-    def parse(self, file_or_payload): ...
-    def normalize(self, raw_record): ...
-    def validate(self, record): ...
+class SourceAdapter:
+    def mapping_for_headers(self, headers): ...
+    def adapt(self, raw_record): ...
 ```
 
-V1：
-- HuitunExcelAdapter
-- GenericCsvAdapter
+已实现：
 
-未来：
-- XiaohongshuAdapter
-- OtherProviderAdapter
+- `HuitunCsvAdapter`
+- `HuitunExcelAdapter`
+- `GenericCsvAdapter`
 
----
-
-## 5. AI Provider
-
-```python
-class AIProvider:
-    async def generate_structured(
-        self,
-        task_type,
-        payload,
-        schema,
-        model_config
-    ): ...
-```
-
-不能在业务模块直接调用某厂商 SDK。
+Phase 2 Bulk Batch 逐文件选择 Adapter，但通用 Planner/Matcher/Repository 不得出现灰豚专用分支。抖音、视频号及其他 Connector 均不在 MVP 范围。
 
 ---
 
-## 6. Email Provider
+## 6. Worker、并发与恢复
 
-```python
-class EmailProvider:
-    async def send(...)
-    async def sync_replies(...)
-    async def get_delivery_events(...)
-```
-
-V1 支持：
-- SMTP
-- 可扩展 API provider
+- 仍使用现有 Celery Worker 与 Scheduler，不增加服务。
+- 当前 4C/8GB 测试服务器的 Worker concurrency 固定为 `2`。
+- Heavy Import Preview/Confirm 全局同时最多运行 `1` 个，通过可恢复的锁/lease 控制，而不是仅依赖进程内变量。
+- 任务入口只解析参数、装配 Session 并调用 `backend_core`；不得复制业务逻辑。
+- Retry 必须重新读取持久化 Job/File/Row/Preview 状态；同 Job/Revision 的操作保持幂等。
+- Scheduler 只负责持久化任务的 reconciliation，不创建 Browser Automation 或采集器。
 
 ---
 
-## 7. 后台任务
+## 7. 数据库与 Migration 边界
 
-Celery Queue：
-
-- default
-- import
-- ai
-- email
-- analytics
-
-重要任务：
-- import_file
-- analyze_influencer
-- generate_personalization
-- generate_email
-- send_email
-- schedule_followup
-- sync_inbox
-- classify_reply
-- aggregate_metrics
+- 当前生产/测试基线 head 为 `0003_phase1b`。
+- Phase 2 实现阶段按顺序新增：
+  1. `0004_phase2_bulk_import`
+  2. `0005_phase2_refresh_queue`
+- Task 0 只冻结设计，不创建上述 migration 文件，也不创建空 migration。
+- 仍被 `ImportJobFile` lineage 引用的 `StoredImportFile` 不得被 cleaner 物理删除；`expires_at` 不是删除授权。
+- 含真实多文件或 Queue 数据时，破坏性 downgrade 必须安全拒绝并给出原因，不能静默丢失 lineage。
 
 ---
 
-## 8. 幂等性
+## 8. 幂等性与数据安全
 
-以下任务必须幂等：
-- 导入
-- 邮件发送
-- Follow-up
-- 回复同步
-- Analytics 聚合
+必须幂等：
+
+- 同 Job 相同 SHA 的文件上传。
+- 文件 Parse/Retry。
+- Preview Revision 生成。
+- Confirm 与 Worker Retry。
+- Refresh Queue Item fulfillment。
 
 必须使用：
-- idempotency key
-- unique constraints
-- distributed lock（必要时）
+
+- 数据库唯一约束和稳定幂等键。
+- Preview Revision、Plan Hash 与相关状态再校验。
+- PostgreSQL transaction/row lock。
+- Heavy Import 分布式 lease（必要时）。
+
+不得使用：
+
+- Email 自动匹配或合并。
+- filename/mtime 推断 acquisition time。
+- free-text 或 AI 推断 Screening。
+- 将旧 Preview、旧 committed_at 或 Influencer.updated_at 伪装成新的来源观察。
 
 ---
 
-## 9. 错误处理
+## 9. 可观测性
 
-任务错误：
-- retry
-- max attempts
-- dead-letter style 状态
-- error_reason
+结构化日志与 Audit 至少覆盖：
 
-用户必须能在后台看到失败原因。
+- Batch/File/Row 标识、状态迁移和稳定错误码。
+- Preview Revision、Confirm 结果与 Worker Retry。
+- Queue 创建、导出与核销结果。
+- API/Worker/Import/Login 失败。
+
+禁止记录密码、Token、Secret、完整 Contact 或原始敏感行。日志字段只能使用白名单摘要和实体 ID。
 
 ---
 
-## 10. 可观测性
+## 10. 性能门禁
 
-必须记录：
-- API error
-- Worker error
-- Email send failure
-- AI failure
-- Import failure
-- Login failure
+- 2000 行：Parse、Normalize、Dedup、Preview、Confirm 必须稳定且没有逐行 N+1，是 MVP 发布 blocker。
+- 5000 行：capacity gate 与性能观察。
+- 10000 行：correctness/no-OOM soak；耗时不作为 MVP 发布 blocker。
+- 优化应优先采用 batch preload、in-memory batch index 和批量写入，不能为极端规模复制 Matcher 或改变 Phase 1B Merge 语义。
 
-至少输出结构化日志。
+详细验收与任务切片见 `docs/PHASE_2_SCOPE.md`。

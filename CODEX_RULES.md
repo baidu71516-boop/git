@@ -43,6 +43,8 @@
 
 `CODEX_RULES.md > PRODUCT_PRD.md > SECURITY_RULES.md > DATABASE_SCHEMA.md > API_SPEC.md > UI_SPEC.md > 其他`
 
+已经人工签字的阶段冻结文档是对该阶段的特别契约；当前 Phase 2 必须使用 `docs/PHASE_2_SCOPE.md`，它覆盖旧 PRD/排期中与当前 Phase 2 相冲突的内容，但不降低本文、`SECURITY_RULES.md` 或更新的人工决策所要求的安全边界。
+
 ---
 
 ## 2. 开发方式
@@ -69,7 +71,7 @@
 
 ## 3. 目录规范
 
-推荐：
+当前项目固定目录：
 
 ```text
 /apps
@@ -78,15 +80,10 @@
   /worker
 
 /packages
+  /backend_core
   /shared
   /ui
   /types
-
-/services
-  /ai
-  /email
-  /imports
-  /analytics
 
 /infrastructure
   /docker
@@ -96,7 +93,12 @@
 /docs
 ```
 
-如果使用 monorepo，应保证：
+架构约束：
+- `packages/backend_core` 是唯一共享 Python 业务核心。
+- `apps/api` 只负责 HTTP、依赖注入和响应转换。
+- `apps/worker` 只负责 Celery 初始化和异步任务入口。
+- 禁止在 `apps/api` 内复制 Service/Repository/Provider 规则。
+- 禁止恢复根目录 `services/`。
 - Web、API、Worker 独立可运行
 - 类型定义可复用
 - 环境变量统一管理

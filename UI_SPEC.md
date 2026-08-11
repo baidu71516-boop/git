@@ -1,5 +1,7 @@
 # UI / UX 规范
 
+> 本文件包含长期 V1 页面草案。当前 Phase 2 只实现明确标注的 Bulk Import、Freshness 和 Refresh Queue 功能性增量；AI、Campaign、邮件、CRM、通用 Batch Mutation 与整体视觉重构均不在当前范围。详细冻结契约见 `docs/PHASE_2_SCOPE.md`。
+
 ## 1. 总体风格
 
 定位：内部企业后台。
@@ -82,7 +84,7 @@
 
 创建任务用 Step Form：
 1. 基本目标
-2. AI筛选建议
+2. 结构化筛选规则
 3. 导入
 4. 结果
 
@@ -91,6 +93,16 @@
 - Excel
 - CSV
 - 下载字段映射模板
+
+### Phase 2 功能性补充
+
+- 一次选择多个 CSV/XLSX，但每个文件独立上传和显示状态。
+- 显示 uploaded/parsing/mapping_required/ready/failed/excluded。
+- Blocking file 未 replace/exclude/retry 前禁止统一 Preview。
+- Preview 首屏显示 Raw、Unique、Duplicate、Existing、New、Changed、No change、Warnings、Errors。
+- 默认 Tab 为“需要处理”，行数据使用服务端分页，不渲染全部 2000 行。
+- Preview 后禁止修改文件集合、Mapping 和 acquisition time。
+- 保持人工 Confirm，不提供 Auto Confirm。
 
 ---
 
@@ -117,7 +129,18 @@
 - Pagination
 - Batch actions
 
-批量操作：
+Phase 2 增加：
+- 最近灰豚数据时间
+- Freshness 状态
+- 需要刷新筛选
+- Refresh Queue 最小页面与 CSV 导出
+
+`UI-BACKLOG-001`：粉丝数可显示为 `20.66万`，Tooltip/详情保留精确整数。
+`UI-BACKLOG-002`：达人库整体视觉和信息层级重构继续延期。
+
+Phase 2 不授权通用 Influencer Batch Mutation、AI Score 或整体视觉重构。
+
+未来阶段批量操作（不属于当前 Phase 2，需重新冻结）：
 - 加入 Campaign
 - 分配负责人
 - 设置标签

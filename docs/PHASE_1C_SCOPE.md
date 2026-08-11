@@ -1,14 +1,14 @@
 # Phase 1C 需求冻结与技术设计
 
-- 文档状态：`IMPLEMENTED — pending final human acceptance`
+- 文档状态：`ACCEPTED BASELINE — completed and deployed`
 - 编制日期：2026-08-10
 - 最终门禁日期：2026-08-11
 - 设计基线：`da2c3a3`（`phase-1b-complete`）
-- 实现基线：`0ee22a7`（Phase 1C Task 1F）
-- 目标分支：`phase-1c-influencer-library`
+- 最终实现基线：`4c973c1`（`phase-1c-final`）
+- 正式分支：`main`
 - 本文用途：Phase 1C 的冻结需求、技术设计与最终实现门禁记录。
-- 状态含义：需求、API、数据读取语义、权限、测试和实施边界仍保持冻结；对应代码与运行门禁已经完成，但人工最终验收尚未完成。
-- 阶段门禁：不得重新引入第 35 节已经关闭的备选方案，也不得在未获明确指令前进入 Phase 2。
+- 状态含义：需求、API、数据读取语义、权限、测试和实施边界仍保持冻结；对应代码、工程门禁、真实服务器 E2E 与人工验收已经完成。
+- 阶段门禁：不得重新引入第 35 节已经关闭的备选方案。后续 Phase 2 以 `docs/PHASE_2_SCOPE.md` 为唯一实施契约。
 
 ## 0. 依据、优先级与冲突裁决
 
@@ -45,7 +45,7 @@
 - `PRODUCT_PRD.md` 中“Email 自动去重”的旧规则已经失效。Email 永远不能触发自动匹配或合并。
 - `API_SPEC.md` 中通用 PATCH、批量派单、加入 Campaign、停止触达等是全 V1 草案，不自动进入 Phase 1C。
 
-`docs/OPEN_QUESTIONS.md` 当前 OPEN-003 至 OPEN-007 分别面向 Phase 2、Phase 3 和正式部署，不阻塞本次需求冻结。`PREDEPLOY-001` 的 Docker buildx 缺失仍是正式部署前事项，不改变 Phase 1C 功能范围。
+当前 OPEN 项均不影响已验收的 Phase 1C 基线；当前 Phase 2 唯一相关 UNKNOWN 以 `PHASE2-UNKNOWN-001` 为准。正式生产部署事项也不改变本历史阶段的功能范围。
 
 ---
 
@@ -936,7 +936,7 @@ SQLite 不能替代以下真实 PostgreSQL 门禁：
 - CurrentMetrics 与 Snapshot 语义清晰。
 - Contact 权限和空值规则符合冻结协议。
 
-### 1C-05 集成、回归与验收（已完成，等待人工最终验收）
+### 1C-05 集成、回归与验收（已完成并通过人工验收）
 
 - 后端、HTTP、PostgreSQL、Web、E2E 测试完成。
 - Phase 1A/1B 全量回归通过。
@@ -1080,4 +1080,4 @@ Phase 1C 没有 Schema migration 或新增写路径。回滚只需要撤销达�
 | 34 风险/回滚 | §34 | 已覆盖 |
 | 35 所有原待决问题 | §35 | 19 项全部关闭并记录 |
 
-自检结论：全文不存在阻塞性待决事项。Phase 1C 的冻结设计、代码实现与工程门禁均已完成，状态为等待人工最终验收；这不代表生产上线，也不授权开始 Phase 2。
+自检结论：全文不存在阻塞性待决事项。Phase 1C 的冻结设计、代码实现、工程门禁、内部测试部署与人工验收均已完成；正式归档基线为 `main@4c973c1`、tag `phase-1c-final`。当前 Phase 2 的范围与授权只由 `docs/PHASE_2_SCOPE.md` 决定。

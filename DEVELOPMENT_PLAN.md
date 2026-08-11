@@ -64,30 +64,43 @@ V1 推荐 5 个阶段。
 
 ---
 
-# Phase 2：SOP + Campaign + AI
+# Phase 2：Huitun Bulk Acquisition & Freshness Management
 
-## Sprint 2.1 Playbook
-- Playbook
-- Version
-- Template
-- 内置 V1 SOP
+旧的 Phase 2 Browser Automation 方案以及“SOP + Campaign + AI”排期已经人工废弃。Phase 2 的唯一权威范围见 `docs/PHASE_2_SCOPE.md`。
 
-## Sprint 2.2 AI
-- Provider Adapter
-- Fact Builder
-- Creator Analysis
-- Personalization
-- Email generation
+目标：
 
-## Sprint 2.3 Campaign
-- Campaign Create
-- Lead select
-- Sequence
-- Preview
-- Review
+- 一个 ImportJob 支持多个灰豚 CSV/XLSX。
+- 统一 Parse、Normalize、三层去重、Screening 和 Preview。
+- 保持人工 Confirm 与 Phase 1B Merge 唯一写入路径。
+- 建立可靠的 acquisition time、Freshness 与 Refresh Queue。
+- 刷新回流继续更新 CurrentMetrics 并保留不可变 Snapshot。
 
-阶段验收：
-选一批达人后能生成可审核邮件。
+实施顺序：
+
+1. Task 0 — Design Freeze。
+2. Task 1 — Bulk Domain、`0004_phase2_bulk_import` 与 Phase 1B single-file 兼容桥；Migration 不得脱离兼容代码单独部署。
+3. Task 2 — Multi-file Upload / Storage。
+4. Task 3 — Parse / Normalize / Batch Dedup。
+5. Task 4 — Bulk Repository、预加载与 N+1 消除。
+6. Task 5 — Unified Preview / Change Summary / Screening。
+7. Task 6 — Atomic Confirm / Retry / Reconciliation。
+8. Task 7 — Freshness Domain 与 Influencer Read API。
+9. Task 8 — Refresh Queue / Export 与 `0005_phase2_refresh_queue`。
+10. Task 9 — Refresh Return Reconciliation。
+11. Task 10 — Functional Web UX。
+12. Task 11 — PostgreSQL / Concurrency / Performance Gates。
+13. Task 12 — Docker E2E / 文档与部署准备。
+14. Task 13 — Server Deployment；必须单独人工授权。
+
+阶段门禁：
+
+- 2000 rows 是 MVP 发布 blocker，必须稳定完成 Parse、Normalize、Dedup、Preview 与 Confirm，且没有逐行 N+1。
+- 5000 rows 是 capacity/correctness Gate，并记录性能。
+- 10000 rows 是 correctness/no-OOM soak，执行时间不阻塞 MVP 发布。
+- 不新增服务；Worker concurrency=2，同时最多一个 Heavy Import。
+
+Playbook、AI、Campaign 的旧 Phase 2 排期延期，未来必须重新需求冻结；本次不自动为后续 Phase 重新编号或授权实现。
 
 ---
 

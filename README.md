@@ -2,7 +2,7 @@
 
 > 面向公司内部使用的达人开发、邮件触达、CRM 与数据优化系统。
 
-当前状态：**Phase 1C 已实现，等待人工最终验收。** 当前交付范围为认证、采集导入和公司级只读达人库；尚未进入 Phase 2。
+当前状态：**Phase 1A–1C 已完成、部署并通过真实服务器 E2E；Phase 2 Task 0 Design Freeze 已完成，但 Phase 2 代码尚未实现。** 当前运行版本仍为 `main@4c973c1`、tag `phase-1c-final`。
 
 ## 1. 项目目标
 
@@ -89,12 +89,13 @@
 9. `SECURITY_RULES.md`
 10. `DEVELOPMENT_PLAN.md`
 11. `ACCEPTANCE_CRITERIA.md`
+12. `docs/PHASE_2_SCOPE.md`（当前 Phase 2 唯一实施契约）
 
 ## 6. 推荐开发顺序
 
 - Phase 0：项目初始化、Docker、Next.js、FastAPI、PostgreSQL、Redis、Celery、Nginx、CI
 - Phase 1：登录 + 达人采集 + 达人库
-- Phase 2：SOP + Campaign + AI 话术
+- Phase 2：灰豚多文件 Bulk Import + 确定性 Screening + Freshness + Refresh Queue
 - Phase 3：邮件发送 + Follow-up + Inbox
 - Phase 4：CRM + Analytics + 操作日志
 - Phase 5：稳定性、权限、备份、压测、上线
@@ -184,6 +185,8 @@ docker-compose exec api bootstrap-admin \
 - `apps/worker` 只负责 Celery 任务入口。
 - Phase 1A 至 Phase 1C 的规则只存在于 `backend_core.auth`、`backend_core.audit`、`backend_core.imports` 与 `backend_core.influencers`。
 - Phase 1C 复用 `0003_phase1b` 的公司级 Influencer、PlatformAccount、Source State、Contact、Current Metrics 与 Metric Snapshot，实现只读查询层、四个 GET 和 Web 列表/详情；没有 `0004`、Schema 变更或 Influencer 写接口。
+- Phase 2 已完成文档冻结但尚未实现；计划依次使用 `0004_phase2_bulk_import` 与 `0005_phase2_refresh_queue`，不得提前创建空 Migration。
+- Phase 2 继续只在 `backend_core.imports` 与 `backend_core.influencers` 扩展业务规则，不创建 `ImportBatch`、`BatchRow`、根目录 `services/` 或 API 内重复 Service。
 - 当前仍不包含 Campaign、真实 AI、真实邮件、Inbox、CRM、Analytics 或其他平台 Connector。
 
 ### 数据与日志
@@ -191,6 +194,6 @@ docker-compose exec api bootstrap-admin \
 - PostgreSQL、Redis 与 `/data/imports` 使用 Docker named volume。
 - PostgreSQL 与 Redis 不映射宿主机端口。
 - 原始导入文件使用随机 Storage Key、`0700` 目录与 `0600` 文件权限，并保存 SHA-256；只接受经过扩展名、MIME、内容和 Parser 交叉校验的 CSV/XLSX，默认应用上限为 25 MiB。
-- 数据库为每个 Storage Object 保存默认 30 天 `expires_at`，相同 SHA-256 的新上传会延长到期时间。物理清理执行器需在正式部署的定时运维中接入；当前不会错误声称已自动删除到期文件。
+- 数据库为每个 Storage Object 保存默认 30 天 `expires_at`，相同 SHA-256 的新上传会延长到期时间。任何仍被 Import lineage 引用的文件不得物理删除；`expires_at` 不是破坏审计链的授权。Phase 2 MVP 不实现 archive/delete lifecycle。
 - 达人库四个 GET 允许所有有效 Session 公司级读取，且不要求已选择 Operator；Viewer Contact 由后端固定脱敏。Upload、Mapping、Preview、Confirm 与 Cancel 仍由后端强制要求已选择 Operator、CSRF 和非 Viewer 部门权限。
 - 日志禁止包含密码、Token、Provider Key 或 `APP_MASTER_KEY`。

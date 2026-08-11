@@ -51,7 +51,60 @@
 
 ---
 
-## 4. AI
+## 4. Phase 2 — 批量获取、智能筛选、数据新鲜度与定向刷新
+
+文档状态：`DESIGN FROZEN — Task 0`。仅 Task 0 小节的已勾选项代表设计冻结；其余均为尚未实现的 MVP 验收门禁。
+
+### Task 0 设计冻结
+
+- [x] `docs/PHASE_2_SCOPE.md` 已冻结聚合边界、状态机、数据语义、API 计划、Migration 拆分、任务顺序与测试矩阵。
+- [x] 旧的 Browser Automation 方案已废弃；旧的 AI、Playbook、Campaign Phase 2 路线已延期，不属于当前 Phase 2。
+- [x] 唯一相关 UNKNOWN 只保留灰豚实际支持的批量重新定位方式；该项不阻塞 Task 1–7。
+
+### Bulk Batch 与统一 Preview
+
+- [ ] 一个 `ImportJob` 可承载多个 `ImportJobFile`；不创建 `ImportBatch` 或 `BatchRow`。
+- [ ] 每个文件保留 Stored File、SHA-256、文件 occurrence、Mapping、`source_acquired_at` 和原始行号的可追溯关系。
+- [ ] 同一 Job 内相同 SHA 重复上传幂等返回已有 occurrence；不同 Job 可复用 Storage Blob，但必须重新 Parse 和 Preview。
+- [ ] `0004` 与 Legacy single-file 兼容桥同版本交付；现有 `POST /import-jobs` 在 `0004` head 仍能创建 occurrence、写入 Row file FK 并通过 Phase 1B 全回归，且不伪造 observed time。
+- [ ] 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前可 replace、exclude、retry；存在 blocking file 时不能生成 Preview。
+- [ ] 所有纳入文件形成一个统一 Preview Revision；文件内、跨文件和数据库三层硬身份去重共用 Phase 1B Matcher。
+- [ ] Email 仅标记疑似重复，绝不作为自动匹配或自动合并依据；身份冲突进入人工复核。
+- [ ] Preview 不写达人业务表；MVP 禁止自动 Confirm；Confirm 整批重新校验、单事务提交、支持幂等并拒绝 stale revision。
+- [ ] `raw_rows = create + update + no_change + skip + error + manual_review`；Batch Duplicate 属于 skip 子集，Warning/Contact Duplicate 为叠加维度。
+- [ ] `unique_rows = raw_rows - internal_duplicate_rows`，并可按 category 查看行级依据。
+
+### Structured Screening
+
+- [ ] 一个 ImportJob 仅绑定一个 originating CollectionJob，并只计算该 CollectionJob 的 `MATCH / NOT_MATCH / UNKNOWN`。
+- [ ] `screening_rules.schema_version` 与单调 `screening_rules_revision` 分离；MVP 只使用本次 owner ImportRow 的 Canonical incoming platform、Source Tag 原值精确 ANY 匹配和 Followers 闭区间，数据库旧值不补齐。
+- [ ] industry、subdirection、purpose、notes 不参与模糊推断；缺失或非法数据返回 UNKNOWN；不使用 AI semantic matching。
+
+### Freshness 与 Refresh Queue
+
+- [ ] 新 Bulk Draft 上传文件的 `source_acquired_at` 默认服务器接受时间，可在首次 Preview 前人工修改，之后冻结；不得从文件名、mtime 或未知来源字段推断。Legacy 单文件兼容路径保持 acquisition unknown。
+- [ ] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
+- [ ] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
+- [ ] Refresh Queue 由 Department 拥有，候选来自公司级 Influencer Library；Owner 或导入部门不改变公司级读取语义。
+- [ ] Queue quota 仅为创建参数，系统不宣称知道灰豚真实剩余额度；不创建 DailyQuotaPlan。
+- [ ] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline，且历史复用 SHA 已经人工确认 acquisition time（或 SHA 从未复用）时可 fulfill；baseline 为空或未确认旧 Blob replay 均 unresolved。
+- [ ] Queue 导出只包含数据库真实存在的 Identity；在灰豚批量定位能力完成真人验证前，不宣称导出 CSV 可被灰豚直接消费。
+- [ ] 仍被 ImportJobFile lineage 引用的 StoredImportFile 不得自动物理删除；MVP 不实现 archive/delete lifecycle。
+
+### Migration、Worker 与性能
+
+- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema；`0005_phase2_refresh_queue` 只承载 Refresh Queue Schema。
+- [ ] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
+- [ ] 当前七服务拓扑不变；Celery Worker concurrency=2，Heavy Preview/Confirm 同时最多 1 个。
+- [ ] File Parse task、Job failed_stage/retry、Broker dispatch reconciliation 与 Worker crash recovery 均由持久状态恢复，不依赖进程内状态。
+- [ ] 2000 行 Parse、Normalize、Dedup、Preview、Confirm 稳定且没有逐行 N+1，作为 MVP 发布 blocker。
+- [ ] 5000 行通过 capacity observation；10000 行通过 correctness/no-OOM soak，10000 行耗时不作为 MVP 发布 blocker。
+- [ ] Phase 1A–1C Auth、RBAC、CSRF、Audit、公司级达人读取、Viewer Contact 脱敏和 Phase 1B Merge/Snapshot 全部回归通过。
+- [ ] 真实 PostgreSQL、并发、Worker recovery、Compose 与浏览器 E2E 通过。
+
+---
+
+## 5. AI（后续阶段）
 
 - [ ] AI 输出结构化
 - [ ] AI 失败有 fallback
@@ -63,7 +116,7 @@
 
 ---
 
-## 5. Campaign
+## 6. Campaign（后续阶段）
 
 - [ ] 可以创建
 - [ ] 可以选择达人
@@ -77,7 +130,7 @@
 
 ---
 
-## 6. 邮件
+## 7. 邮件
 
 - [ ] 同 Lead 同 Step 不重复发送
 - [ ] suppression 不发送
@@ -90,7 +143,7 @@
 
 ---
 
-## 7. Inbox
+## 8. Inbox
 
 - [ ] 回复能同步
 - [ ] 邮件线程正确
@@ -102,7 +155,7 @@
 
 ---
 
-## 8. CRM
+## 9. CRM
 
 - [ ] 看板正确
 - [ ] 拖拽产生事件
@@ -114,7 +167,7 @@
 
 ---
 
-## 9. Analytics
+## 10. Analytics
 
 - [ ] 发送量准确
 - [ ] 回复量准确
@@ -127,7 +180,7 @@
 
 ---
 
-## 10. 安全
+## 11. 安全
 
 - [ ] 密码不明文
 - [ ] Secret 不进 Git
@@ -138,7 +191,7 @@
 
 ---
 
-## 11. 上线验收
+## 12. 上线验收
 
 Pilot 100 达人：
 - [ ] 导入成功率 > 95%
