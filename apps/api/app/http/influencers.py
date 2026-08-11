@@ -1,0 +1,188 @@
+"""Thin HTTP adaptation for the Phase 1C read-only influencer library."""
+
+from collections.abc import Awaitable
+from typing import Annotated, Any
+from uuid import UUID
+
+from backend_core.auth.service import AuthContext
+from backend_core.influencers.enums import CRMStage
+from backend_core.influencers.repository import InfluencerRepository
+from backend_core.influencers.schemas import InfluencerListQuery
+from backend_core.influencers.service import (
+    InfluencerNotFoundError,
+    InfluencerPermissionError,
+    InfluencerService,
+)
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.http.dependencies import get_database_session, require_auth
+from app.http.errors import ApiError
+from app.http.responses import envelope
+
+router = APIRouter(prefix="/api/v1/influencers", tags=["influencers"])
+
+LIST_QUERY_PARAMETERS = frozenset(
+    {
+        "q",
+        "tag",
+        "followers_min",
+        "followers_max",
+        "owner_operator_id",
+        "crm_stage",
+        "page",
+        "page_size",
+    }
+)
+SNAPSHOT_QUERY_PARAMETERS = frozenset({"page", "page_size"})
+
+
+def get_influencer_service(
+    session: Annotated[AsyncSession, Depends(get_database_session)],
+) -> InfluencerService:
+    return InfluencerService(InfluencerRepository(session))
+
+
+def _reject_duplicate_query_parameters(request: Request, allowed: frozenset[str]) -> None:
+    for name in allowed:
+        if len(request.query_params.getlist(name)) > 1:
+            raise RequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("query", name),
+                        "msg": "Value error, query parameter must not be repeated",
+                        "input": None,
+                        "ctx": {"error": ValueError("query parameter must not be repeated")},
+                    }
+                ]
+            )
+
+
+def reject_duplicate_list_query_parameters(request: Request) -> None:
+    _reject_duplicate_query_parameters(request, LIST_QUERY_PARAMETERS)
+
+
+def reject_duplicate_snapshot_query_parameters(request: Request) -> None:
+    _reject_duplicate_query_parameters(request, SNAPSHOT_QUERY_PARAMETERS)
+
+
+def parse_influencer_list_query(
+    request: Request,
+    q: Annotated[str | None, Query(max_length=160)] = None,
+    tag: Annotated[str | None, Query(max_length=160)] = None,
+    followers_min: Annotated[int | None, Query(ge=0)] = None,
+    followers_max: Annotated[int | None, Query(ge=0)] = None,
+    owner_operator_id: Annotated[UUID | None, Query()] = None,
+    crm_stage: Annotated[CRMStage | None, Query()] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> InfluencerListQuery:
+    """Expose the frozen OpenAPI parameters while validating their raw values in core."""
+
+    # FastAPI's typed parameters provide the OpenAPI contract and early structural
+    # validation. The raw values are deliberately passed to the API-independent
+    # Pydantic contract so its exact integer and cross-field rules remain final.
+    _ = (
+        q,
+        tag,
+        followers_min,
+        followers_max,
+        owner_operator_id,
+        crm_stage,
+        page,
+        page_size,
+    )
+    raw_query = {
+        name: request.query_params[name]
+        for name in LIST_QUERY_PARAMETERS
+        if name in request.query_params
+    }
+    try:
+        return InfluencerListQuery.model_validate(raw_query)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+def parse_snapshot_pagination(
+    request: Request,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> InfluencerListQuery:
+    """Reuse the core strict query-integer contract for snapshot pagination."""
+
+    _ = (page, page_size)
+    raw_query = {
+        name: request.query_params[name]
+        for name in SNAPSHOT_QUERY_PARAMETERS
+        if name in request.query_params
+    }
+    try:
+        return InfluencerListQuery.model_validate(raw_query)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
+
+
+async def _service_call[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
+    try:
+        return await awaitable
+    except InfluencerNotFoundError as exc:
+        raise ApiError(404, exc.code, exc.message) from exc
+    except InfluencerPermissionError as exc:
+        raise ApiError(403, exc.code, exc.message) from exc
+
+
+@router.get("", dependencies=[Depends(reject_duplicate_list_query_parameters)])
+async def list_influencers(
+    request: Request,
+    query: Annotated[InfluencerListQuery, Depends(parse_influencer_list_query)],
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[InfluencerService, Depends(get_influencer_service)],
+) -> dict[str, Any]:
+    page = await _service_call(service.list_influencers(context, query))
+    return envelope(request, data=page)
+
+
+@router.get("/filter-options")
+async def get_filter_options(
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[InfluencerService, Depends(get_influencer_service)],
+) -> dict[str, Any]:
+    options = await _service_call(service.get_filter_options(context))
+    return envelope(request, data=options)
+
+
+@router.get(
+    "/{influencer_id}/metric-snapshots",
+    dependencies=[Depends(reject_duplicate_snapshot_query_parameters)],
+)
+async def list_metric_snapshots(
+    influencer_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[InfluencerService, Depends(get_influencer_service)],
+    pagination: Annotated[InfluencerListQuery, Depends(parse_snapshot_pagination)],
+) -> dict[str, Any]:
+    snapshots = await _service_call(
+        service.list_metric_snapshots(
+            context,
+            influencer_id,
+            page=pagination.page,
+            page_size=pagination.page_size,
+        )
+    )
+    return envelope(request, data=snapshots)
+
+
+@router.get("/{influencer_id}")
+async def get_influencer_detail(
+    influencer_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[InfluencerService, Depends(get_influencer_service)],
+) -> dict[str, Any]:
+    detail = await _service_call(service.get_influencer_detail(context, influencer_id))
+    return envelope(request, data=detail)

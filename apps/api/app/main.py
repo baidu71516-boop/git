@@ -20,6 +20,7 @@ from app.http.errors import register_exception_handlers
 from app.http.health import router as health_router
 from app.http.import_jobs import router as import_jobs_router
 from app.http.import_tasks import ImportTaskDispatcher
+from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
 from app.http.operators import router as operators_router
 
@@ -66,4 +67,5 @@ app.include_router(operators_router)
 app.include_router(admin_router)
 app.include_router(collection_jobs_router)
 app.include_router(import_jobs_router)
+app.include_router(influencers_router)
 register_exception_handlers(app)
