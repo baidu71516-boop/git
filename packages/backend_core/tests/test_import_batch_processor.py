@@ -36,6 +36,7 @@ from backend_core.imports.models import (
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits
+from backend_core.imports.repository import ImportRepository
 from backend_core.imports.storage import LocalStorageAdapter
 from backend_core.influencers.enums import DataSource, Platform
 from backend_core.influencers.models import (
@@ -655,6 +656,58 @@ def test_generated_four_by_500_batch_has_stable_summary_and_provenance() -> None
                 assert persisted_files[0].error_rows == 1
                 assert all(item.raw_rows == 500 for item in persisted_files)
                 assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_batch_planning_never_falls_back_to_per_row_repository_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def reject_legacy_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("batch planning must use the prefetched repository facade")
+
+    for method_name in (
+        "get_platform_account",
+        "accounts_by_platform_id",
+        "accounts_by_external_id",
+        "accounts_by_profile_url",
+        "accounts_by_handle",
+        "get_source_identity",
+        "get_source_state",
+        "get_current_metrics",
+        "snapshot_exists",
+        "source_contacts",
+        "contacts_with_normalized_value",
+    ):
+        monkeypatch.setattr(ImportRepository, method_name, reject_legacy_read)
+
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(
+                factory,
+                storage,
+                [
+                    _csv(
+                        [
+                            _row(
+                                "prefetched-only",
+                                external_id="prefetched-external",
+                                profile_url=(
+                                    "https://www.xiaohongshu.com/user/profile/prefetched-only"
+                                ),
+                                email="prefetched@example.invalid",
+                            )
+                        ]
+                    )
+                ],
+            )
+
+            result = await _parse(factory, storage, fixture.job_id, fixture.files[0])
+            assert result["status"] == ImportJobFileStatus.READY.value
+            async with factory() as session:
+                rows = await _rows(session, fixture.job_id)
+                assert len(rows) == 1
+                assert rows[0].action is ImportRowAction.CREATE
 
     asyncio.run(scenario())
 

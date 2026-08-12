@@ -3,15 +3,25 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from backend_core.imports.contracts import CanonicalInfluencerRecord, RowIssue
 from backend_core.imports.enums import ImportMatchType, ImportRowAction
 from backend_core.imports.hashing import hash_document
-from backend_core.imports.repository import ImportRepository
-from backend_core.influencers.enums import ContactType, ContactValidationStatus, DataSource
-from backend_core.influencers.models import InfluencerPlatformAccount
+from backend_core.influencers.enums import (
+    ContactType,
+    ContactValidationStatus,
+    DataSource,
+    Platform,
+)
+from backend_core.influencers.models import (
+    InfluencerContact,
+    InfluencerCurrentMetrics,
+    InfluencerPlatformAccount,
+    InfluencerSourceState,
+    PlatformAccountSourceIdentity,
+)
 
 ACCOUNT_FIELD_MAP = {
     "display_name": "account_name",
@@ -56,6 +66,57 @@ class PlannedImportRow:
     warnings: list[dict[str, Any]]
     errors: list[dict[str, Any]]
     plan_hash: str
+
+
+class ImportPlanningRepository(Protocol):
+    """Read-only persistence boundary required by the shared Planner."""
+
+    async def accounts_by_platform_id(
+        self, platform: Platform, platform_account_id: str
+    ) -> list[InfluencerPlatformAccount]: ...
+
+    async def accounts_by_external_id(
+        self,
+        platform: Platform,
+        source: DataSource,
+        external_account_id: str,
+    ) -> list[InfluencerPlatformAccount]: ...
+
+    async def accounts_by_profile_url(
+        self, platform: Platform, normalized_profile_url: str
+    ) -> list[InfluencerPlatformAccount]: ...
+
+    async def accounts_by_handle(
+        self, platform: Platform, account_handle: str
+    ) -> list[InfluencerPlatformAccount]: ...
+
+    async def get_source_state(
+        self, platform_account_id: UUID, source: DataSource
+    ) -> InfluencerSourceState | None: ...
+
+    async def get_source_identity(
+        self,
+        platform_account_id: UUID,
+        source: DataSource,
+        external_account_id: str,
+    ) -> PlatformAccountSourceIdentity | None: ...
+
+    async def get_current_metrics(
+        self, platform_account_id: UUID, source: DataSource
+    ) -> InfluencerCurrentMetrics | None: ...
+
+    async def snapshot_exists(self, snapshot_key: str) -> bool: ...
+
+    async def source_contacts(
+        self,
+        influencer_id: UUID,
+        source: DataSource,
+        contact_type: ContactType,
+    ) -> list[InfluencerContact]: ...
+
+    async def contacts_with_normalized_value(
+        self, contact_type: ContactType, normalized_value: str
+    ) -> list[InfluencerContact]: ...
 
 
 def _is_empty(value: Any) -> bool:
@@ -112,6 +173,29 @@ def primary_identity_key(record: CanonicalInfluencerRecord) -> str | None:
     return keys[0] if keys else None
 
 
+def _metric_snapshot_key(record: CanonicalInfluencerRecord, metrics_hash: str) -> str:
+    identity = record.platform_identity
+    return hash_document(
+        {
+            "platform": identity.platform.value,
+            "platform_account_id": identity.platform_account_id,
+            "normalized_profile_url": identity.normalized_profile_url,
+            "external_source_id": identity.external_source_id,
+            "source": record.source.value,
+            "source_updated_at": record.source_updated_at,
+            "metrics_hash": metrics_hash,
+        }
+    )
+
+
+def metric_snapshot_key(record: CanonicalInfluencerRecord) -> str:
+    """Return the exact snapshot lookup key used by Planner metrics logic."""
+
+    serialized_metrics = record.as_dict()["metrics"]
+    metrics = {key: value for key, value in serialized_metrics.items() if value is not None}
+    return _metric_snapshot_key(record, hash_document(metrics))
+
+
 def build_preview_context(
     records: list[tuple[int, CanonicalInfluencerRecord]],
 ) -> tuple[dict[int, int], set[str]]:
@@ -136,7 +220,7 @@ def build_preview_context(
 
 
 class ImportPlanner:
-    def __init__(self, repository: ImportRepository) -> None:
+    def __init__(self, repository: ImportPlanningRepository) -> None:
         self.repository = repository
 
     async def _match(self, record: CanonicalInfluencerRecord) -> MatchResult:
@@ -636,7 +720,7 @@ class ImportPlanner:
         self,
         record: CanonicalInfluencerRecord,
         account: InfluencerPlatformAccount | None,
-        current_metrics: Any,
+        current_metrics: InfluencerCurrentMetrics | None,
         relation: FreshnessRelation,
     ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
         warnings: list[dict[str, Any]] = []
@@ -645,18 +729,7 @@ class ImportPlanner:
         serialized_metrics = record.as_dict()["metrics"]
         metrics = {key: value for key, value in serialized_metrics.items() if value is not None}
         metrics_hash = hash_document(metrics)
-        identity = record.platform_identity
-        snapshot_key = hash_document(
-            {
-                "platform": identity.platform.value,
-                "platform_account_id": identity.platform_account_id,
-                "normalized_profile_url": identity.normalized_profile_url,
-                "external_source_id": identity.external_source_id,
-                "source": record.source.value,
-                "source_updated_at": record.source_updated_at,
-                "metrics_hash": metrics_hash,
-            }
-        )
+        snapshot_key = _metric_snapshot_key(record, metrics_hash)
         snapshot_exists = (
             await self.repository.snapshot_exists(snapshot_key) if account is not None else False
         )

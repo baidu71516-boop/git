@@ -38,6 +38,12 @@ from backend_core.imports.batch import (
     duplicate_email_values,
     resolve_identity_graph,
 )
+from backend_core.imports.bulk_repository import (
+    BulkImportContext,
+    BulkImportRepository,
+    PrefetchedImportRepository,
+    PrefetchedImportState,
+)
 from backend_core.imports.contracts import AdaptedRow, CanonicalInfluencerRecord, SourceAdapter
 from backend_core.imports.enums import (
     ImportJobFileStatus,
@@ -51,7 +57,12 @@ from backend_core.imports.hashing import hash_document
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
 from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow, StoredImportFile
 from backend_core.imports.parsers import ParsedTable, ParserLimits, parse_table
-from backend_core.imports.planner import ImportPlanner, MatchResult, PlannedImportRow
+from backend_core.imports.planner import (
+    ImportPlanner,
+    MatchResult,
+    PlannedImportRow,
+    metric_snapshot_key,
+)
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.storage import StorageAdapter
 
@@ -548,9 +559,17 @@ class BatchImportProcessor:
             if not row.initial_errors
         ]
         graph = build_identity_graph(valid_batch_rows)
-        planner = ImportPlanner(self.repository)
+        records = [row.record for row in valid_batch_rows]
+        bulk_context = BulkImportContext.from_records(
+            records,
+            snapshot_keys=(metric_snapshot_key(record) for record in records),
+        )
+        prefetched_state = await BulkImportRepository(self.session).prefetch(bulk_context)
+        planner = ImportPlanner(PrefetchedImportRepository(prefetched_state))
         database_matches, match_results, hard_conflicts = await self._database_matches(
-            graph.components, planner
+            graph.components,
+            planner,
+            prefetched_state,
         )
         resolutions = list(resolve_identity_graph(graph, database_matches=database_matches))
         for index, resolution in enumerate(resolutions):
@@ -631,6 +650,7 @@ class BatchImportProcessor:
                 database_matches,
                 match_results,
                 staged.locator,
+                prefetched_state,
             )
             plans.append(
                 await planner.plan(
@@ -653,6 +673,7 @@ class BatchImportProcessor:
         self,
         components: Sequence[IdentityComponent],
         planner: ImportPlanner,
+        prefetched_state: PrefetchedImportState,
     ) -> tuple[
         dict[str, tuple[DatabaseIdentityTarget, ...]],
         dict[tuple[UUID, int], MatchResult],
@@ -679,14 +700,18 @@ class BatchImportProcessor:
                     if hard_key is None:
                         continue
                     for account_id in account_ids:
-                        account = await self.repository.get_platform_account(UUID(account_id))
-                        if account is not None:
-                            targets_by_key[hard_key].add(
-                                DatabaseIdentityTarget(
-                                    platform_account_id=account.id,
-                                    influencer_id=account.influencer_id,
-                                )
+                        account = prefetched_state.accounts_by_id.get(UUID(account_id))
+                        if account is None:
+                            raise ImportDomainError(
+                                "IMPORT_STAGING_INVALID",
+                                "Matched platform account is absent from the prefetch context",
                             )
+                        targets_by_key[hard_key].add(
+                            DatabaseIdentityTarget(
+                                platform_account_id=account.id,
+                                influencer_id=account.influencer_id,
+                            )
+                        )
         return (
             {
                 key: tuple(
@@ -763,6 +788,7 @@ class BatchImportProcessor:
         database_matches: DatabaseIdentityMatches,
         match_results: Mapping[tuple[UUID, int], MatchResult],
         owner_locator: RowLocator,
+        prefetched_state: PrefetchedImportState,
     ) -> MatchResult:
         targets = {
             target
@@ -772,7 +798,7 @@ class BatchImportProcessor:
         if not targets:
             return match_results[owner_locator.identity]
         target = next(iter(targets))
-        account = await self.repository.get_platform_account(target.platform_account_id)
+        account = prefetched_state.accounts_by_id.get(target.platform_account_id)
         if account is None:
             raise ImportDomainError(
                 "IMPORT_STAGING_INVALID", "Matched platform account no longer exists"

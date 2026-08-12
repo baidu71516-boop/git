@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend_core.imports.bulk_repository import BulkImportRepository
 from backend_core.imports.enums import (
     ImportJobFileStatus,
     ImportJobStatus,
@@ -15,7 +16,6 @@ from backend_core.imports.enums import (
     SourceAcquiredAtOrigin,
 )
 from backend_core.imports.errors import ImportDomainError
-from backend_core.imports.hashing import advisory_lock_key
 from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
@@ -468,8 +468,4 @@ class ImportRepository:
         return value is not None
 
     async def acquire_identity_locks(self, identities: Iterable[str]) -> None:
-        if self.session.bind is None or self.session.bind.dialect.name != "postgresql":
-            return
-        keys = sorted({advisory_lock_key(identity) for identity in identities})
-        for key in keys:
-            await self.session.execute(select(func.pg_advisory_xact_lock(key)))
+        await BulkImportRepository(self.session).acquire_identity_locks_bulk(identities)
