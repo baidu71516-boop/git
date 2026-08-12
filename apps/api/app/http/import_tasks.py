@@ -35,6 +35,17 @@ class ImportTaskDispatcher:
             queue="import",
         )
 
+    async def preview(self, import_job_id: UUID, task_id: str) -> None:
+        """Dispatch a persisted unified Preview using only its identifiers."""
+
+        await asyncio.to_thread(
+            self.celery_client.send_task,
+            "imports.preview_import_job",
+            args=[str(import_job_id), task_id],
+            task_id=task_id,
+            queue="import",
+        )
+
     async def confirm(self, import_job_id: UUID, preview_revision: int, task_id: str) -> None:
         await asyncio.to_thread(
             self.celery_client.send_task,

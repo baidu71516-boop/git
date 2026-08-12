@@ -17,6 +17,8 @@ from backend_core.imports.schemas import (
     ImportJobFileUploadResult,
     ImportJobPublic,
     ImportMappingUpdate,
+    ImportPreviewInput,
+    ImportRowCategory,
     ImportRowPublic,
     ImportRowsPage,
     SourceAcquiredAtUpdate,
@@ -24,6 +26,7 @@ from backend_core.imports.schemas import (
 from backend_core.imports.service import FileUploadDecision, ImportService, QueueDecision
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
 from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.http.dependencies import (
@@ -38,6 +41,7 @@ from app.http.import_tasks import ImportTaskDispatcher
 from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/import-jobs", tags=["import-jobs"])
+IMPORT_ROWS_QUERY_PARAMETERS = frozenset({"offset", "limit", "action", "category"})
 
 
 def _error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
@@ -118,9 +122,39 @@ def _dispatch_public(decision: QueueDecision) -> ImportDispatchResult:
         import_job_id=decision.job.id,
         status=decision.job.status,
         preview_revision=decision.job.preview_revision,
-        task_id=decision.job.confirm_task_id or decision.job.parse_task_id,
+        task_id=decision.task_id,
         idempotent=decision.idempotent,
     )
+
+
+def validate_import_rows_query(request: Request) -> None:
+    """Reject ambiguous row filters before they reach the read service."""
+
+    for name in IMPORT_ROWS_QUERY_PARAMETERS:
+        if len(request.query_params.getlist(name)) > 1:
+            raise RequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("query", name),
+                        "msg": "Value error, query parameter must not be repeated",
+                        "input": None,
+                        "ctx": {"error": ValueError("query parameter must not be repeated")},
+                    }
+                ]
+            )
+    if "action" in request.query_params and "category" in request.query_params:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("query", "category"),
+                    "msg": "Value error, category and action are mutually exclusive",
+                    "input": request.query_params.get("category"),
+                    "ctx": {"error": ValueError("category and action are mutually exclusive")},
+                }
+            ]
+        )
 
 
 async def _compensate_dispatch_failure(
@@ -470,7 +504,11 @@ async def exclude_bulk_import_file(
     return envelope(request, data=_file_public(record))
 
 
-@router.get("/{import_job_id}")
+@router.get(
+    "/{import_job_id}",
+    response_model=SuccessEnvelope[ImportJobPublic],
+    responses=_error_responses(401, 403, 404, 422),
+)
 async def get_import_job(
     import_job_id: UUID,
     request: Request,
@@ -481,7 +519,12 @@ async def get_import_job(
     return envelope(request, data=ImportJobPublic.model_validate(job))
 
 
-@router.get("/{import_job_id}/rows")
+@router.get(
+    "/{import_job_id}/rows",
+    response_model=SuccessEnvelope[ImportRowsPage],
+    responses=_error_responses(401, 403, 404, 409, 422),
+    dependencies=[Depends(validate_import_rows_query)],
+)
 async def list_import_rows(
     import_job_id: UUID,
     request: Request,
@@ -490,6 +533,7 @@ async def list_import_rows(
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     action: Annotated[ImportRowAction | None, Query()] = None,
+    category: Annotated[ImportRowCategory | None, Query()] = None,
 ) -> dict[str, Any]:
     rows, total = await service.list_import_rows(
         context,
@@ -497,9 +541,13 @@ async def list_import_rows(
         offset=offset,
         limit=limit,
         action=action,
+        category=category,
     )
     page = ImportRowsPage(
-        items=[ImportRowPublic.model_validate(row) for row in rows],
+        items=[
+            row if isinstance(row, ImportRowPublic) else ImportRowPublic.model_validate(row)
+            for row in rows
+        ],
         total=total,
         offset=offset,
         limit=limit,
@@ -526,42 +574,128 @@ async def update_mapping(
         user_agent=get_user_agent(request),
     )
     try:
-        await dispatcher.parse(import_job_id, task_id)
+        await dispatcher.parse(import_job_id, decision.task_id)
     except Exception:
         await _compensate_dispatch_failure(
             service=service,
             context=context,
             import_job_id=import_job_id,
-            task_id=task_id,
+            task_id=decision.task_id,
             request=request,
         )
     return envelope(request, data=_dispatch_public(decision))
 
 
-@router.post("/{import_job_id}/preview", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/{import_job_id}/preview",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SuccessEnvelope[ImportDispatchResult],
+    responses={
+        status.HTTP_200_OK: {
+            "model": SuccessEnvelope[ImportDispatchResult],
+            "description": "Idempotent Preview request replay",
+        },
+        **_error_responses(401, 403, 404, 409, 422, 503),
+    },
+)
 async def regenerate_preview(
     import_job_id: UUID,
     request: Request,
     context: Annotated[AuthContext, Depends(require_import_mutation)],
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
-) -> dict[str, Any]:
+    payload: ImportPreviewInput | None = None,
+) -> JSONResponse:
     task_id = uuid4().hex
-    decision = await service.request_preview(context, import_job_id, task_id)
-    try:
-        await dispatcher.parse(import_job_id, task_id)
-    except Exception:
-        await _compensate_dispatch_failure(
-            service=service,
-            context=context,
-            import_job_id=import_job_id,
-            task_id=task_id,
-            request=request,
-        )
-    return envelope(request, data=_dispatch_public(decision))
+    decision = await service.request_preview(
+        context,
+        import_job_id,
+        task_id,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        rebuild=payload.rebuild if payload is not None else False,
+    )
+    if decision.should_dispatch:
+        try:
+            if decision.task_kind == "bulk_preview":
+                await dispatcher.preview(import_job_id, decision.task_id)
+            else:
+                await dispatcher.parse(import_job_id, decision.task_id)
+        except Exception:
+            await _compensate_dispatch_failure(
+                service=service,
+                context=context,
+                import_job_id=import_job_id,
+                task_id=decision.task_id,
+                request=request,
+            )
+    response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
+    return JSONResponse(
+        status_code=response_status,
+        content=jsonable_encoder(envelope(request, data=_dispatch_public(decision))),
+    )
 
 
-@router.post("/{import_job_id}/confirm", status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/{import_job_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SuccessEnvelope[ImportDispatchResult],
+    responses={
+        status.HTTP_200_OK: {
+            "model": SuccessEnvelope[ImportDispatchResult],
+            "description": "Idempotent failed Preview retry replay",
+        },
+        **_error_responses(401, 403, 404, 409, 422, 503),
+    },
+)
+async def retry_import_preview(
+    import_job_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    service: Annotated[ImportService, Depends(get_import_service)],
+    dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
+) -> JSONResponse:
+    """Retry only the persisted Bulk Preview stage; Task 6 owns Confirm retry."""
+
+    task_id = uuid4().hex
+    decision = await service.request_preview(
+        context,
+        import_job_id,
+        task_id,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        retry_only=True,
+    )
+    if decision.should_dispatch:
+        try:
+            await dispatcher.preview(import_job_id, decision.task_id)
+        except Exception:
+            await _compensate_dispatch_failure(
+                service=service,
+                context=context,
+                import_job_id=import_job_id,
+                task_id=decision.task_id,
+                request=request,
+            )
+    response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
+    return JSONResponse(
+        status_code=response_status,
+        content=jsonable_encoder(envelope(request, data=_dispatch_public(decision))),
+    )
+
+
+@router.post(
+    "/{import_job_id}/confirm",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SuccessEnvelope[ImportDispatchResult],
+    responses={
+        status.HTTP_200_OK: {
+            "model": SuccessEnvelope[ImportDispatchResult],
+            "description": "Idempotent Confirm request replay",
+        },
+        **_error_responses(401, 403, 404, 409, 422, 503),
+    },
+)
 async def confirm_import(
     import_job_id: UUID,
     payload: ImportConfirmInput,
@@ -581,13 +715,17 @@ async def confirm_import(
     )
     if decision.should_dispatch:
         try:
-            await dispatcher.confirm(import_job_id, payload.preview_revision, task_id)
+            await dispatcher.confirm(
+                import_job_id,
+                payload.preview_revision,
+                decision.task_id,
+            )
         except Exception:
             await _compensate_dispatch_failure(
                 service=service,
                 context=context,
                 import_job_id=import_job_id,
-                task_id=task_id,
+                task_id=decision.task_id,
                 request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
@@ -597,7 +735,11 @@ async def confirm_import(
     )
 
 
-@router.post("/{import_job_id}/cancel")
+@router.post(
+    "/{import_job_id}/cancel",
+    response_model=SuccessEnvelope[ImportJobPublic],
+    responses=_error_responses(401, 403, 404, 409, 422),
+)
 async def cancel_import(
     import_job_id: UUID,
     request: Request,

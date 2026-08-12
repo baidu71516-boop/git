@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, text, tuple_
+from sqlalchemy import and_, func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.imports.contracts import CanonicalInfluencerRecord
@@ -193,6 +194,7 @@ class PrefetchedImportState:
     covered_external_source_ids: frozenset[ExternalIdentityKey]
     source_states: Mapping[AccountSourceKey, InfluencerSourceState]
     current_metrics: Mapping[AccountSourceKey, InfluencerCurrentMetrics]
+    last_confirmed_observations: Mapping[AccountSourceKey, datetime]
     covered_account_sources: frozenset[AccountSourceKey]
     existing_snapshot_keys: frozenset[str]
     requested_snapshot_keys: frozenset[str]
@@ -379,6 +381,7 @@ class BulkImportRepository:
         )
         source_states = await self._source_states(account_source_keys)
         current_metrics = await self._current_metrics(account_source_keys)
+        last_confirmed_observations = await self._last_confirmed_observations(account_source_keys)
         existing_snapshots = await self._existing_snapshot_keys(context.snapshot_keys)
         source_contact_keys = frozenset(
             SourceContactKey(influencer_id, source, ContactType.EMAIL)
@@ -401,12 +404,89 @@ class BulkImportRepository:
             covered_external_source_ids=context.external_source_ids,
             source_states=MappingProxyType(source_states),
             current_metrics=MappingProxyType(current_metrics),
+            last_confirmed_observations=MappingProxyType(last_confirmed_observations),
             covered_account_sources=account_source_keys,
             existing_snapshot_keys=frozenset(existing_snapshots),
             requested_snapshot_keys=context.snapshot_keys,
             source_contacts=MappingProxyType(source_contacts),
             contacts_by_normalized_value=MappingProxyType(contacts_by_value),
         )
+
+    async def _last_confirmed_observations(
+        self,
+        keys: Iterable[AccountSourceKey],
+    ) -> dict[AccountSourceKey, datetime]:
+        """Load reliable observations from successful Confirm lineage.
+
+        Freshness is keyed by PlatformAccount + canonical source.  Preview
+        revisions and uncommitted staging rows are deliberately excluded: only
+        completed jobs, committed business actions, included occurrences, and
+        confirmed acquisition timestamps can advance the baseline.
+        """
+
+        from backend_core.imports.enums import (
+            ImportJobFileStatus,
+            ImportJobStatus,
+            ImportRowAction,
+            ImportSourceType,
+        )
+        from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
+
+        source_types = {
+            DataSource.HUITUN: ImportSourceType.MANUAL_HUITUN_EXPORT,
+            DataSource.GENERIC: ImportSourceType.GENERIC_CSV,
+        }
+        account_ids_by_source: dict[DataSource, set[UUID]] = {}
+        for key in keys:
+            account_ids_by_source.setdefault(key.source, set()).add(key.platform_account_id)
+
+        observations: dict[AccountSourceKey, datetime] = {}
+        committed_actions = (
+            ImportRowAction.CREATE,
+            ImportRowAction.UPDATE,
+            ImportRowAction.NO_CHANGE,
+        )
+        for source in sorted(account_ids_by_source, key=lambda item: item.value):
+            source_type = source_types.get(source)
+            if source_type is None:
+                continue
+            for account_ids in iter_safe_chunks(
+                account_ids_by_source[source],
+                chunk_size=self.chunk_size,
+                key=str,
+            ):
+                statement = (
+                    select(
+                        ImportRow.matched_platform_account_id,
+                        func.max(ImportJobFile.source_acquired_at),
+                    )
+                    .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+                    .join(
+                        ImportJobFile,
+                        and_(
+                            ImportJobFile.id == ImportRow.import_job_file_id,
+                            ImportJobFile.import_job_id == ImportRow.import_job_id,
+                        ),
+                    )
+                    .where(
+                        ImportRow.matched_platform_account_id.in_(account_ids),
+                        ImportRow.committed_at.is_not(None),
+                        ImportRow.committed_action.in_(committed_actions),
+                        ImportJob.status == ImportJobStatus.COMPLETED,
+                        ImportJob.stored_file_id.is_(None),
+                        ImportJob.confirmed_revision.is_not(None),
+                        ImportRow.preview_revision == ImportJob.confirmed_revision,
+                        ImportJob.source_type == source_type,
+                        ImportJobFile.status == ImportJobFileStatus.READY,
+                        ImportJobFile.source_acquired_at.is_not(None),
+                        ImportJobFile.source_acquired_at_confirmation_required.is_(False),
+                    )
+                    .group_by(ImportRow.matched_platform_account_id)
+                )
+                for account_id, observed_at in (await self.session.execute(statement)).all():
+                    if account_id is not None and observed_at is not None:
+                        observations[AccountSourceKey(account_id, source)] = observed_at
+        return dict(sorted(observations.items(), key=lambda item: repr(item[0])))
 
     async def acquire_identity_locks_bulk(self, identities: Iterable[str]) -> tuple[int, ...]:
         """Acquire sorted transaction-level advisory locks in chunk-sized SQL calls."""

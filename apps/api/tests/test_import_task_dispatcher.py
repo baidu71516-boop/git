@@ -22,6 +22,22 @@ def test_parse_file_dispatches_only_ids_and_persisted_task_token() -> None:
     )
 
 
+def test_preview_dispatches_only_job_id_and_persisted_task_token() -> None:
+    celery_client = MagicMock()
+    dispatcher = ImportTaskDispatcher(celery_client)
+    job_id = uuid4()
+    task_id = uuid4().hex
+
+    asyncio.run(dispatcher.preview(job_id, task_id))
+
+    celery_client.send_task.assert_called_once_with(
+        "imports.preview_import_job",
+        args=[str(job_id), task_id],
+        task_id=task_id,
+        queue="import",
+    )
+
+
 def test_legacy_dispatch_payloads_remain_unchanged() -> None:
     celery_client = MagicMock()
     dispatcher = ImportTaskDispatcher(celery_client)

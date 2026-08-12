@@ -65,6 +65,7 @@ class PlannedImportRow:
     merge_plan: dict[str, Any]
     warnings: list[dict[str, Any]]
     errors: list[dict[str, Any]]
+    preconditions: dict[str, Any]
     plan_hash: str
 
 
@@ -665,15 +666,16 @@ class ImportPlanner:
         merge_plan: dict[str, Any],
         warnings: list[dict[str, Any]],
         errors: list[dict[str, Any]],
+        preview_revision: int = 0,
     ) -> PlannedImportRow:
-        """Create a deterministic revision-zero plan for a retained duplicate row."""
+        """Create a deterministic plan for a retained batch duplicate row."""
 
         return self._finalize(
             job_id=job_id,
             row_number=row_number,
             normalized_data=normalized_data,
             mapping_hash=mapping_hash,
-            preview_revision=0,
+            preview_revision=preview_revision,
             match_type=ImportMatchType.NONE,
             action=ImportRowAction.SKIP,
             matched_influencer_id=None,
@@ -696,6 +698,7 @@ class ImportPlanner:
         merge_plan: dict[str, Any],
         warnings: list[dict[str, Any]],
         errors: list[dict[str, Any]],
+        preview_revision: int = 0,
     ) -> PlannedImportRow:
         """Create a deterministic non-sensitive plan for a conflicted component."""
 
@@ -704,7 +707,7 @@ class ImportPlanner:
             row_number=row_number,
             normalized_data=normalized_data,
             mapping_hash=mapping_hash,
-            preview_revision=0,
+            preview_revision=preview_revision,
             match_type=ImportMatchType.NONE,
             action=ImportRowAction.MANUAL_REVIEW,
             matched_influencer_id=None,
@@ -972,5 +975,6 @@ class ImportPlanner:
             merge_plan=merge_plan,
             warnings=warnings,
             errors=errors,
+            preconditions=preconditions,
             plan_hash=hash_document(payload),
         )

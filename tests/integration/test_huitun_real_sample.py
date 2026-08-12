@@ -33,6 +33,7 @@ from backend_core.imports.models import (
 )
 from backend_core.imports.parsers import ParserLimits, parse_csv
 from backend_core.imports.planner import build_preview_context
+from backend_core.imports.preview_processor import UnifiedPreviewProcessor
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
 from backend_core.influencers.models import (
@@ -291,6 +292,119 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                         row.committed_action is None and row.committed_at is None
                         for row in bulk_rows
                     )
+                    for business_model in (
+                        Influencer,
+                        InfluencerPlatformAccount,
+                        PlatformAccountSourceIdentity,
+                        InfluencerSourceState,
+                        InfluencerContact,
+                        InfluencerCurrentMetrics,
+                        InfluencerMetricSnapshot,
+                    ):
+                        assert (
+                            await session.scalar(select(func.count()).select_from(business_model))
+                            == 0
+                        )
+
+                    # Task 5 builds the single-occurrence Bulk Preview from the
+                    # exact same normalized records.  Compare only canonical
+                    # hashes; never render real rows or contacts in test output.
+                    persisted_bulk_job.status = ImportJobStatus.PREVIEWING
+                    persisted_bulk_job.parse_task_id = "real-sample-bulk-preview"
+                    await session.commit()
+                    bulk_preview = await UnifiedPreviewProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(max_rows=10_000),
+                        max_batch_rows=10_000,
+                    ).build(bulk_job.id, "real-sample-bulk-preview")
+                    assert bulk_preview == {
+                        "import_job_id": str(bulk_job.id),
+                        "status": ImportJobStatus.PREVIEW_READY.value,
+                        "preview_revision": 1,
+                        "idempotent": False,
+                    }
+                    await session.refresh(persisted_bulk_job)
+                    assert persisted_bulk_job.preview_summary is not None
+                    expected_unified_summary = {
+                        "file_count": 1,
+                        "occurrence_count": 1,
+                        "excluded_file_count": 0,
+                        "raw_rows": 50,
+                        "unique_rows": 50,
+                        "internal_duplicate_rows": 0,
+                        "existing_rows": 0,
+                        "new_rows": 50,
+                        "changed_rows": 0,
+                        "no_change_rows": 0,
+                        "created_rows": 50,
+                        "updated_rows": 0,
+                        "skipped_rows": 0,
+                        "error_rows": 0,
+                        "manual_review_rows": 0,
+                        "warning_rows": 0,
+                        "possible_duplicate_contact_rows": 0,
+                        "screened_rows": 50,
+                        "screening_match_rows": 0,
+                        "screening_not_match_rows": 0,
+                        "screening_unknown_rows": 50,
+                    }
+                    assert {
+                        key: persisted_bulk_job.preview_summary[key]
+                        for key in expected_unified_summary
+                    } == expected_unified_summary
+                    assert len(persisted_bulk_job.preview_summary["context_hash"]) == 64
+                    assert len(persisted_bulk_job.preview_summary["batch_plan_hash"]) == 64
+
+                    unified_rows = list(
+                        await session.scalars(
+                            select(ImportRow)
+                            .where(ImportRow.import_job_id == bulk_job.id)
+                            .order_by(ImportRow.row_number)
+                        )
+                    )
+                    assert [row.row_number for row in unified_rows] == legacy_row_numbers
+                    assert [
+                        hash_document(row.normalized_data) for row in unified_rows
+                    ] == legacy_normalized_hashes
+                    assert {row.preview_revision for row in unified_rows} == {1}
+                    assert all(len(row.plan_hash) == 64 for row in unified_rows)
+                    sensitive_contacts = {
+                        value
+                        for item in adapted
+                        for contact in item.record.contacts
+                        for value in (contact.value, contact.normalized_value)
+                    }
+                    safe_documents = [
+                        persisted_bulk_job.preview_summary,
+                        *[(row.merge_plan or {}).get("change_summary", {}) for row in unified_rows],
+                    ]
+                    safe_serialized = hash_document(safe_documents)
+                    assert len(safe_serialized) == 64
+
+                    def sensitive_paths(value: object, path: str = "$") -> list[str]:
+                        if isinstance(value, str):
+                            return (
+                                [path]
+                                if any(contact in value for contact in sensitive_contacts)
+                                else []
+                            )
+                        if isinstance(value, list):
+                            return [
+                                item
+                                for index, child in enumerate(value)
+                                for item in sensitive_paths(child, f"{path}[{index}]")
+                            ]
+                        if isinstance(value, dict):
+                            return [
+                                item
+                                for key, child in value.items()
+                                for item in sensitive_paths(child, f"{path}.{key}")
+                            ]
+                        return []
+
+                    # A failure reports only document paths, never values.
+                    assert sensitive_paths(safe_documents) == []
                     for business_model in (
                         Influencer,
                         InfluencerPlatformAccount,

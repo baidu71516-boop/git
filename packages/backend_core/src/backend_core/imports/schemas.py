@@ -1,10 +1,19 @@
 """Validated Phase 1B API and service contracts."""
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from backend_core.imports.enums import (
     CollectionJobStatus,
@@ -16,6 +25,38 @@ from backend_core.imports.enums import (
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
+from backend_core.imports.preview_domain import ImportRowCategory as ImportRowCategory
+from backend_core.imports.preview_domain import ScreeningRulePayload
+
+type ScreeningTag = Annotated[str, StringConstraints(min_length=1, max_length=160)]
+
+
+class ScreeningRulesV1(ScreeningRulePayload):
+    """Typed API name for the frozen structured screening-rule schema."""
+
+    schema_version: Literal[1] = 1
+    source_tags_exact_any: tuple[ScreeningTag, ...] = ()
+
+
+class CollectionJobScreeningRulesUpdate(BaseModel):
+    """Full CAS replacement of one CollectionJob's screening configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    screening_rules: ScreeningRulesV1
+    follower_min: StrictInt | None = Field(default=None, ge=0)
+    follower_max: StrictInt | None = Field(default=None, ge=0)
+    expected_revision: StrictInt = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_follower_range(self) -> "CollectionJobScreeningRulesUpdate":
+        if (
+            self.follower_min is not None
+            and self.follower_max is not None
+            and self.follower_min > self.follower_max
+        ):
+            raise ValueError("follower_min must not exceed follower_max")
+        return self
 
 
 class CollectionJobCreate(BaseModel):
@@ -60,6 +101,8 @@ class CollectionJobPublic(BaseModel):
     source_type: ImportSourceType
     status: CollectionJobStatus
     notes: str | None
+    screening_rules: ScreeningRulesV1
+    screening_rules_revision: int
     created_at: datetime
     updated_at: datetime
 
@@ -72,6 +115,14 @@ class ImportMappingUpdate(BaseModel):
 
 class ImportConfirmInput(BaseModel):
     preview_revision: int = Field(ge=1)
+
+
+class ImportPreviewInput(BaseModel):
+    """Explicitly distinguish a rebuild from a retry of the current request."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    rebuild: StrictBool = False
 
 
 class BulkImportJobCreate(BaseModel):

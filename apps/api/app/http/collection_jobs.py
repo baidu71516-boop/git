@@ -4,17 +4,39 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from backend_core.auth.service import AuthContext
-from backend_core.imports.schemas import CollectionJobCreate, CollectionJobPublic
+from backend_core.imports.schemas import (
+    CollectionJobCreate,
+    CollectionJobPublic,
+    CollectionJobScreeningRulesUpdate,
+)
 from backend_core.imports.service import ImportService
 from fastapi import APIRouter, Depends, Request, status
 
-from app.http.dependencies import get_import_service, require_auth, require_import_mutation
-from app.http.responses import envelope
+from app.http.dependencies import (
+    get_client_ip,
+    get_import_service,
+    get_user_agent,
+    require_auth,
+    require_import_mutation,
+)
+from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/collection-jobs", tags=["collection-jobs"])
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+def _error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
+    return {
+        status_code: {"model": ErrorEnvelope, "description": "Error response"}
+        for status_code in status_codes
+    }
+
+
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    response_model=SuccessEnvelope[CollectionJobPublic],
+    responses=_error_responses(401, 403, 409, 422),
+)
 async def create_collection_job(
     payload: CollectionJobCreate,
     request: Request,
@@ -25,7 +47,11 @@ async def create_collection_job(
     return envelope(request, data=CollectionJobPublic.model_validate(job))
 
 
-@router.get("")
+@router.get(
+    "",
+    response_model=SuccessEnvelope[list[CollectionJobPublic]],
+    responses=_error_responses(401),
+)
 async def list_collection_jobs(
     request: Request,
     context: Annotated[AuthContext, Depends(require_auth)],
@@ -38,7 +64,33 @@ async def list_collection_jobs(
     )
 
 
-@router.get("/{collection_job_id}")
+@router.put(
+    "/{collection_job_id}/screening-rules",
+    response_model=SuccessEnvelope[CollectionJobPublic],
+    responses=_error_responses(401, 403, 404, 409, 422),
+)
+async def update_collection_job_screening_rules(
+    collection_job_id: UUID,
+    payload: CollectionJobScreeningRulesUpdate,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    service: Annotated[ImportService, Depends(get_import_service)],
+) -> dict[str, Any]:
+    job = await service.update_collection_job_screening_rules(
+        context,
+        collection_job_id,
+        payload,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+    return envelope(request, data=CollectionJobPublic.model_validate(job))
+
+
+@router.get(
+    "/{collection_job_id}",
+    response_model=SuccessEnvelope[CollectionJobPublic],
+    responses=_error_responses(401, 404, 422),
+)
 async def get_collection_job(
     collection_job_id: UUID,
     request: Request,

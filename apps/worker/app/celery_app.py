@@ -23,6 +23,7 @@ celery_app.conf.update(
     task_routes={
         "imports.parse_import_job": {"queue": "import"},
         "imports.parse_import_job_file": {"queue": "import"},
+        "imports.preview_import_job": {"queue": "import"},
         "imports.confirm_import_job": {"queue": "import"},
     },
     task_queues=(

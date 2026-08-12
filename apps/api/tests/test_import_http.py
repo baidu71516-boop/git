@@ -7,6 +7,7 @@ from uuid import UUID
 
 from app.http.dependencies import (
     get_database_session,
+    get_import_service,
     get_import_storage,
     get_import_task_dispatcher,
     get_redis,
@@ -213,6 +214,7 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             )
                             assert mapped.status_code == 202
                             assert len(dispatcher.parse_calls) == 2
+                            assert mapped.json()["data"]["task_id"] == dispatcher.parse_calls[-1][1]
 
                             job.status = ImportJobStatus.PREVIEW_READY
                             job.preview_revision = 1
@@ -239,19 +241,78 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             assert page.json()["data"]["total"] == 1
                             assert page.json()["data"]["items"][0]["row_number"] == 2
 
+                            legacy_retry = await client.post(f"/api/v1/import-jobs/{job_id}/retry")
+                            assert legacy_retry.status_code == 409
+                            assert (
+                                legacy_retry.json()["error"]["code"] == "INVALID_STATE_TRANSITION"
+                            )
+                            assert len(dispatcher.parse_calls) == 2
+
                             confirmed = await client.post(
                                 f"/api/v1/import-jobs/{job_id}/confirm",
                                 json={"preview_revision": 1},
                             )
                             assert confirmed.status_code == 202
                             assert len(dispatcher.confirm_calls) == 1
+                            assert (
+                                confirmed.json()["data"]["task_id"]
+                                == dispatcher.confirm_calls[-1][2]
+                            )
                             repeated = await client.post(
                                 f"/api/v1/import-jobs/{job_id}/confirm",
                                 json={"preview_revision": 1},
                             )
                             assert repeated.status_code == 200
                             assert repeated.json()["data"]["idempotent"] is True
+                            assert (
+                                repeated.json()["data"]["task_id"]
+                                == dispatcher.confirm_calls[-1][2]
+                            )
                             assert len(dispatcher.confirm_calls) == 1
+
+                            # Late broker compensation is bound to both its
+                            # persisted token and stage.  A stale Preview token
+                            # must not overwrite a valid Confirm, nor may an old
+                            # Confirm token overwrite a later Preview.
+                            parse_task_id = str(job.parse_task_id)
+                            confirm_task_id = str(job.confirm_task_id)
+                            service = get_import_service(session, storage)
+                            await service.mark_dispatch_failed(
+                                operator_context,
+                                job_id,
+                                parse_task_id,
+                                ip="127.0.0.1",
+                                user_agent="stale-preview-compensation",
+                            )
+                            await session.refresh(job)
+                            assert job.status is ImportJobStatus.CONFIRM_QUEUED
+                            old_confirm_task_id = confirm_task_id
+                            job.status = ImportJobStatus.PREVIEWING
+                            job.parse_task_id = "new-preview-after-confirm"
+                            await session.commit()
+                            await service.mark_dispatch_failed(
+                                operator_context,
+                                job_id,
+                                old_confirm_task_id,
+                                ip="127.0.0.1",
+                                user_agent="stale-confirm-compensation",
+                            )
+                            await session.refresh(job)
+                            assert job.status is ImportJobStatus.PREVIEWING
+                            # The shared-session HTTP harness reuses ORM-backed
+                            # AuthContext objects across requests; production
+                            # reconstructs them per request.  Refresh after the
+                            # expected rollback-only stale compensations.
+                            for auth_context in (
+                                operator_context,
+                                viewer_context,
+                                admin_context,
+                                no_operator_context,
+                            ):
+                                await session.refresh(auth_context.department)
+                                await session.refresh(auth_context.auth_session)
+                                if auth_context.operator is not None:
+                                    await session.refresh(auth_context.operator)
 
                             dispatcher.fail_parse = True
                             dispatch_failed = await client.post(

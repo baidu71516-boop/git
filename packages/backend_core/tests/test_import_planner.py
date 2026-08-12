@@ -664,6 +664,10 @@ def test_snapshot_key_is_stable_and_existing_snapshot_makes_replan_idempotent() 
 
             snapshot = first.merge_plan["metrics"]["snapshot"]
             assert snapshot is not None
+            # Phase 1B keeps its frozen action semantics.  Unified Preview
+            # reclassifies snapshot-only work as NO_CHANGE in the Task 5 layer
+            # without changing this legacy Planner contract.
+            assert first.action is ImportRowAction.UPDATE
             assert repeated_preview.merge_plan["metrics"]["snapshot"]["snapshot_key"] == (
                 snapshot["snapshot_key"]
             )

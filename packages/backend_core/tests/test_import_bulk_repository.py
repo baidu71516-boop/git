@@ -30,8 +30,16 @@ from backend_core.imports.contracts import (
     CanonicalInfluencerRecord,
     PlatformIdentity,
 )
-from backend_core.imports.enums import ImportMatchType
+from backend_core.imports.enums import (
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportMatchType,
+    ImportRowAction,
+    ImportSourceType,
+    SourceAcquiredAtOrigin,
+)
 from backend_core.imports.hashing import hash_document
+from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
 from backend_core.imports.planner import ImportPlanner, metric_snapshot_key
 from backend_core.imports.repository import ImportRepository
 from backend_core.influencers.enums import (
@@ -392,6 +400,103 @@ def test_prefetch_returns_complete_typed_deterministic_state() -> None:
                 assert state.contacts_by_normalized_value[
                     ContactValueKey(ContactType.EMAIL, "shared@example.invalid")
                 ] == (source_contact, duplicate_contact)
+
+    asyncio.run(scenario())
+
+
+def test_confirmed_observation_requires_ready_bulk_lineage() -> None:
+    async def scenario() -> None:
+        async with _database() as (factory, _statements):
+            async with factory() as session:
+                _, _, account, *_ = await _seed_state(session)
+                baseline = datetime(2026, 8, 2, tzinfo=UTC)
+
+                def add_lineage(
+                    *,
+                    sequence: int,
+                    observed_at: datetime,
+                    job_stored_file_id: UUID | None,
+                    file_status: ImportJobFileStatus,
+                ) -> None:
+                    job_id = UUID(int=700 + sequence)
+                    file_id = UUID(int=710 + sequence)
+                    stored_file_id = UUID(int=800 + sequence)
+                    session.add_all(
+                        (
+                            ImportJob(
+                                id=job_id,
+                                collection_job_id=UUID(int=901),
+                                department_id=UUID(int=902),
+                                operator_id=UUID(int=903),
+                                stored_file_id=job_stored_file_id,
+                                source_type=ImportSourceType.GENERIC_CSV,
+                                status=ImportJobStatus.COMPLETED,
+                                preview_revision=1,
+                                confirmed_revision=1,
+                            ),
+                            ImportJobFile(
+                                id=file_id,
+                                import_job_id=job_id,
+                                stored_file_id=stored_file_id,
+                                position=1,
+                                original_filename=f"lineage-{sequence}.csv",
+                                declared_mime="text/csv",
+                                status=file_status,
+                                source_acquired_at=observed_at,
+                                source_acquired_at_origin=(SourceAcquiredAtOrigin.USER_CONFIRMED),
+                                source_acquired_at_confirmation_required=False,
+                            ),
+                            ImportRow(
+                                id=UUID(int=720 + sequence),
+                                import_job_id=job_id,
+                                import_job_file_id=file_id,
+                                row_number=2,
+                                raw_data={"fixture": sequence},
+                                normalized_data={"fixture": sequence},
+                                matched_influencer_id=account.influencer_id,
+                                matched_platform_account_id=account.id,
+                                match_type=ImportMatchType.PLATFORM_ACCOUNT_ID,
+                                action=ImportRowAction.NO_CHANGE,
+                                merge_plan={},
+                                warnings=[],
+                                errors=[],
+                                preview_revision=1,
+                                plan_hash=f"{sequence}" * 64,
+                                committed_action=ImportRowAction.NO_CHANGE,
+                                committed_at=observed_at,
+                            ),
+                        )
+                    )
+
+                add_lineage(
+                    sequence=1,
+                    observed_at=baseline,
+                    job_stored_file_id=None,
+                    file_status=ImportJobFileStatus.READY,
+                )
+                add_lineage(
+                    sequence=2,
+                    observed_at=baseline.replace(day=3),
+                    job_stored_file_id=UUID(int=802),
+                    file_status=ImportJobFileStatus.READY,
+                )
+                add_lineage(
+                    sequence=3,
+                    observed_at=baseline.replace(day=4),
+                    job_stored_file_id=None,
+                    file_status=ImportJobFileStatus.FAILED,
+                )
+                await session.commit()
+
+                key = AccountSourceKey(account.id, DataSource.GENERIC)
+                observations = await BulkImportRepository(session)._last_confirmed_observations(
+                    {key}
+                )
+
+                actual = observations[key]
+                if actual.tzinfo is None:  # SQLite drops timezone metadata.
+                    actual = actual.replace(tzinfo=UTC)
+                assert actual == baseline
 
     asyncio.run(scenario())
 

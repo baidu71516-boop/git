@@ -1,16 +1,24 @@
 """Thin Celery entrypoints for persisted legacy and bulk import jobs."""
 
 import asyncio
+from typing import Any
 from uuid import UUID
 
 from backend_core.config import Settings, get_settings
 from backend_core.db import Database
 from backend_core.imports.batch_processor import BatchImportProcessor
+from backend_core.imports.hashing import advisory_lock_key
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.celery_app import celery_app
+
+HEAVY_IMPORT_PREVIEW_LOCK_KEY = advisory_lock_key("phase2:heavy-import")
+HEAVY_IMPORT_RETRY_DELAY_SECONDS = 5
+HEAVY_IMPORT_MAX_RETRIES = 120
 
 
 def _parser_limits(settings: Settings) -> ParserLimits:
@@ -61,6 +69,70 @@ async def _parse_file(
         await database.close()
 
 
+async def _preview(
+    import_job_id: UUID,
+    task_id: str,
+    *,
+    mark_retry_exhausted: bool = False,
+) -> bool:
+    """Run one guarded unified Preview, returning false when the heavy gate is busy."""
+
+    # Import lazily while Task 5's core module remains independent from Celery
+    # task discovery and worker registration.
+    from backend_core.imports.preview_processor import UnifiedPreviewProcessor
+
+    settings = get_settings()
+    database = Database(settings.database_url)
+    lock_acquired = False
+    try:
+        # PostgreSQL advisory locks are session scoped.  Pin both lock calls and
+        # the whole Preview to this one physical connection so pooled sessions
+        # cannot leak or prematurely release the heavy-work gate.
+        async with database.engine.connect() as connection:
+            lock_acquired = bool(
+                await connection.scalar(
+                    text("SELECT pg_try_advisory_lock(:lock_key)"),
+                    {"lock_key": HEAVY_IMPORT_PREVIEW_LOCK_KEY},
+                )
+            )
+            await connection.commit()
+            if not lock_acquired:
+                if mark_retry_exhausted:
+                    async with AsyncSession(
+                        bind=connection,
+                        expire_on_commit=False,
+                    ) as session:
+                        processor = UnifiedPreviewProcessor(
+                            session,
+                            LocalStorageAdapter(settings.import_data_dir),
+                            parser_limits=_parser_limits(settings),
+                            max_batch_rows=settings.import_max_batch_rows,
+                        )
+                        await processor.mark_failed_after_retry_exhausted(
+                            import_job_id,
+                            task_id,
+                        )
+                return False
+            try:
+                async with AsyncSession(bind=connection, expire_on_commit=False) as session:
+                    processor = UnifiedPreviewProcessor(
+                        session,
+                        LocalStorageAdapter(settings.import_data_dir),
+                        parser_limits=_parser_limits(settings),
+                        max_batch_rows=settings.import_max_batch_rows,
+                    )
+                    await processor.build(import_job_id, task_id)
+                return True
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": HEAVY_IMPORT_PREVIEW_LOCK_KEY},
+                )
+                await connection.commit()
+    finally:
+        await database.close()
+
+
 async def _confirm(import_job_id: UUID, preview_revision: int) -> None:
     settings = get_settings()
     database = Database(settings.database_url)
@@ -104,6 +176,35 @@ def parse_import_job_file(
     """Parse one occurrence from persisted state using an ID-only broker payload."""
 
     asyncio.run(_parse_file(UUID(import_job_id), UUID(import_job_file_id), task_id))
+
+
+@celery_app.task(
+    name="imports.preview_import_job",
+    bind=True,
+    ignore_result=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    max_retries=HEAVY_IMPORT_MAX_RETRIES,
+)  # type: ignore[untyped-decorator]
+def preview_import_job(self: Any, import_job_id: str, task_id: str) -> None:
+    """Build a token-guarded Preview, retrying while another heavy import runs."""
+
+    retries = int(self.request.retries)
+    exhausted = retries >= HEAVY_IMPORT_MAX_RETRIES
+    if exhausted:
+        acquired = asyncio.run(
+            _preview(
+                UUID(import_job_id),
+                task_id,
+                mark_retry_exhausted=True,
+            )
+        )
+    else:
+        acquired = asyncio.run(_preview(UUID(import_job_id), task_id))
+    if not acquired:
+        if exhausted:
+            return
+        raise self.retry(countdown=HEAVY_IMPORT_RETRY_DELAY_SECONDS)
 
 
 @celery_app.task(

@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, case, delete, false, func, or_, select, true, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from backend_core.imports.bulk_repository import BulkImportRepository
 from backend_core.imports.enums import (
@@ -24,6 +26,7 @@ from backend_core.imports.models import (
     ImportRow,
     StoredImportFile,
 )
+from backend_core.imports.schemas import ImportRowCategory
 from backend_core.influencers.enums import ContactType, DataSource, Platform
 from backend_core.influencers.models import (
     InfluencerContact,
@@ -74,6 +77,21 @@ class ImportRepository:
             statement = statement.where(ImportJob.department_id == department_id)
         result = await self.session.scalars(statement.order_by(ImportJob.created_at.desc()))
         return list(result)
+
+    async def mark_collection_previews_stale(self, collection_job_id: UUID) -> int:
+        result = cast(
+            CursorResult[object],
+            await self.session.execute(
+                update(ImportJob)
+                .where(
+                    ImportJob.collection_job_id == collection_job_id,
+                    ImportJob.stored_file_id.is_(None),
+                    ImportJob.status == ImportJobStatus.PREVIEW_READY,
+                )
+                .values(status=ImportJobStatus.PREVIEW_STALE)
+            ),
+        )
+        return int(result.rowcount or 0)
 
     async def get_stored_file(self, stored_file_id: UUID) -> StoredImportFile | None:
         return await self.session.get(StoredImportFile, stored_file_id)
@@ -270,21 +288,46 @@ class ImportRepository:
         offset: int = 0,
         limit: int = 100,
         action: ImportRowAction | None = None,
+        category: ImportRowCategory | None = None,
     ) -> tuple[list[ImportRow], int]:
-        criteria = [ImportRow.import_job_id == import_job_id]
+        criteria = [
+            ImportRow.import_job_id == import_job_id,
+            ImportJob.preview_revision > 0,
+            ImportRow.preview_revision == ImportJob.preview_revision,
+        ]
         if action is not None:
             criteria.append(ImportRow.action == action)
-        visible_staging = or_(
-            ImportJob.status != ImportJobStatus.DRAFT,
-            ImportJobFile.status == ImportJobFileStatus.READY,
-        )
+        warning_expression = self._row_has_warning_expression()
+        duplicate_expression = self._row_is_batch_duplicate_expression()
+        if category is not None and category is not ImportRowCategory.ALL:
+            criteria.append(
+                self._row_category_expression(
+                    category,
+                    warning_expression=warning_expression,
+                    duplicate_expression=duplicate_expression,
+                )
+            )
         count = await self.session.scalar(
             select(func.count())
             .select_from(ImportRow)
             .join(ImportJobFile, ImportJobFile.id == ImportRow.import_job_file_id)
             .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
-            .where(*criteria, visible_staging)
+            .where(*criteria)
         )
+        ordering: list[ColumnElement[object]] = []
+        if category is ImportRowCategory.ATTENTION:
+            ordering.append(
+                case(
+                    (ImportRow.action == ImportRowAction.ERROR, 0),
+                    (ImportRow.action == ImportRowAction.MANUAL_REVIEW, 1),
+                    (warning_expression, 2),
+                    (ImportRow.action == ImportRowAction.UPDATE, 3),
+                    (ImportRow.action == ImportRowAction.CREATE, 4),
+                    (ImportRow.action == ImportRowAction.NO_CHANGE, 5),
+                    (duplicate_expression, 6),
+                    else_=7,
+                )
+            )
         result = await self.session.scalars(
             select(ImportRow)
             .join(
@@ -292,12 +335,60 @@ class ImportRepository:
                 ImportJobFile.id == ImportRow.import_job_file_id,
             )
             .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
-            .where(*criteria, visible_staging)
-            .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
+            .where(*criteria)
+            .order_by(*ordering, ImportJobFile.position, ImportRow.row_number, ImportRow.id)
             .offset(offset)
             .limit(limit)
         )
         return list(result), int(count or 0)
+
+    def _row_has_warning_expression(self) -> ColumnElement[bool]:
+        bind = self.session.get_bind()
+        if bind.dialect.name == "postgresql":
+            return func.jsonb_array_length(ImportRow.warnings) > 0
+        return func.json_array_length(ImportRow.warnings) > 0
+
+    def _row_is_batch_duplicate_expression(self) -> ColumnElement[bool]:
+        bind = self.session.get_bind()
+        if bind.dialect.name == "postgresql":
+            return and_(
+                ImportRow.action == ImportRowAction.SKIP,
+                ImportRow.merge_plan["batch_duplicate"].isnot(None),
+            )
+        return and_(
+            ImportRow.action == ImportRowAction.SKIP,
+            func.json_extract(ImportRow.merge_plan, "$.batch_duplicate").isnot(None),
+        )
+
+    @staticmethod
+    def _row_category_expression(
+        category: ImportRowCategory,
+        *,
+        warning_expression: ColumnElement[bool],
+        duplicate_expression: ColumnElement[bool],
+    ) -> ColumnElement[bool]:
+        if category is ImportRowCategory.ATTENTION:
+            return or_(
+                ImportRow.action.in_((ImportRowAction.ERROR, ImportRowAction.MANUAL_REVIEW)),
+                warning_expression,
+            )
+        if category is ImportRowCategory.ERROR:
+            return ImportRow.action == ImportRowAction.ERROR
+        if category is ImportRowCategory.MANUAL_REVIEW:
+            return ImportRow.action == ImportRowAction.MANUAL_REVIEW
+        if category is ImportRowCategory.WARNING:
+            return warning_expression
+        if category is ImportRowCategory.CHANGED:
+            return ImportRow.action == ImportRowAction.UPDATE
+        if category is ImportRowCategory.NEW:
+            return ImportRow.action == ImportRowAction.CREATE
+        if category is ImportRowCategory.NO_CHANGE:
+            return ImportRow.action == ImportRowAction.NO_CHANGE
+        if category is ImportRowCategory.DUPLICATE:
+            return duplicate_expression
+        if category is ImportRowCategory.ALL:
+            return true()
+        return false()
 
     async def all_import_rows(self, import_job_id: UUID) -> list[ImportRow]:
         result = await self.session.scalars(

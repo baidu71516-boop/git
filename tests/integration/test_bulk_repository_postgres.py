@@ -816,8 +816,9 @@ def test_bulk_prefetch_query_count_scales_by_unique_chunks_and_covers_data_mix()
                     ),
                 )
             # Three identities, then Influencer, SourceState, CurrentMetrics,
-            # Snapshot, source Contact, and normalized Contact queries.
-            _assert_chunk_bound(existing_measurement, 9 * 4)
+            # confirmed observation, Snapshot, source Contact, and normalized
+            # Contact queries.
+            _assert_chunk_bound(existing_measurement, 10 * 4)
             assert len(existing_state.accounts_by_id) == 2_000
             assert len(existing_state.influencers_by_id) == 2_000
             assert len(existing_state.source_identities) == 2_000
@@ -853,7 +854,7 @@ def test_bulk_prefetch_query_count_scales_by_unique_chunks_and_covers_data_mix()
                 )
             # Hard/snapshot/contact query sets have 2k keys (four chunks);
             # account-derived query sets have 1k matched keys (two chunks).
-            _assert_chunk_bound(mixed_measurement, (3 * 4) + (4 * 2) + 4 + 4)
+            _assert_chunk_bound(mixed_measurement, (3 * 4) + (5 * 2) + 4 + 4)
             assert len(mixed_state.accounts_by_id) == 1_000
             assert len(mixed_state.influencers_by_id) == 1_000
             assert len(mixed_state.existing_snapshot_keys) == 1_000

@@ -2,6 +2,7 @@
 
 import asyncio
 import csv
+import hashlib
 import io
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from backend_core.db.base import Base
 from backend_core.imports.batch_processor import BatchImportProcessor
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFailedStage,
     ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
@@ -36,6 +38,7 @@ from backend_core.imports.models import (
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits
+from backend_core.imports.preview_processor import UnifiedPreviewProcessor
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.storage import LocalStorageAdapter
 from backend_core.influencers.enums import DataSource, Platform
@@ -126,6 +129,7 @@ def _xlsx(rows: Iterable[dict[str, str]], *, headers: Iterable[str]) -> bytes:
     workbook = Workbook()
     try:
         worksheet = workbook.active
+        assert worksheet is not None
         worksheet.append(list(ordered_headers))
         for row in rows:
             worksheet.append([row.get(header, "") for header in ordered_headers])
@@ -362,6 +366,419 @@ async def _business_count(session: AsyncSession) -> int:
     for model in models:
         total += int(await session.scalar(select(func.count()).select_from(model)) or 0)
     return total
+
+
+async def _queue_preview(
+    factory: async_sessionmaker[AsyncSession],
+    job_id: UUID,
+    task_id: str,
+) -> None:
+    async with factory() as session:
+        job = await session.get(ImportJob, job_id)
+        assert job is not None
+        job.status = ImportJobStatus.PREVIEWING
+        job.parse_task_id = task_id
+        await session.commit()
+
+
+def test_unified_preview_promotes_complete_staging_once_without_business_writes() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(
+                factory,
+                storage,
+                [
+                    _csv([_row("owner"), _row("owner", nonce="duplicate")]),
+                    _csv([_row("second")]),
+                ],
+            )
+            for occurrence in fixture.files:
+                await _parse(factory, storage, fixture.job_id, occurrence)
+
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+
+            async with factory() as session:
+                processor = UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                )
+                result = await processor.build(fixture.job_id, task_id)
+                assert result == {
+                    "import_job_id": str(fixture.job_id),
+                    "status": "preview_ready",
+                    "preview_revision": 1,
+                    "idempotent": False,
+                }
+
+            async with factory() as session:
+                job = await session.get(ImportJob, fixture.job_id)
+                assert job is not None
+                assert job.preview_revision == 1
+                assert job.preview_summary is not None
+                assert job.preview_summary["raw_rows"] == 3
+                assert job.preview_summary["internal_duplicate_rows"] == 1
+                assert job.preview_summary["unique_rows"] == 2
+                assert job.preview_summary["screening_unknown_rows"] == 2
+                rows = await _rows(session, fixture.job_id)
+                assert {row.preview_revision for row in rows} == {1}
+                assert len({row.plan_hash for row in rows}) == 3
+                assert all(len(row.plan_hash) == 64 for row in rows)
+                assert await _business_count(session) == 0
+
+            async with factory() as session:
+                replay = await UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                ).build(fixture.job_id, task_id)
+                assert replay["idempotent"] is True
+                assert replay["preview_revision"] == 1
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_reparses_blob_instead_of_trusting_staging() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("blob-authority")])])
+            occurrence = fixture.files[0]
+            await _parse(factory, storage, fixture.job_id, occurrence)
+
+            async with factory() as session:
+                staged = (await _rows(session, fixture.job_id))[0]
+                poisoned_normalized = dict(staged.normalized_data or {})
+                poisoned_normalized["display_name"] = "POISONED STAGING VALUE"
+                staged.normalized_data = poisoned_normalized
+                staged.raw_data = {**staged.raw_data, "name": "POISONED RAW VALUE"}
+                await session.commit()
+
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+            async with factory() as session:
+                await UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                ).build(fixture.job_id, task_id)
+
+            async with factory() as session:
+                rebuilt = (await _rows(session, fixture.job_id))[0]
+                assert rebuilt.preview_revision == 1
+                assert rebuilt.raw_data["name"] == "Fixture blob-authority"
+                assert rebuilt.normalized_data is not None
+                assert rebuilt.normalized_data["display_name"] == "Fixture blob-authority"
+                assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_blob_integrity_failure_preserves_last_complete_revision() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("immutable-blob")])])
+            occurrence = fixture.files[0]
+            await _parse(factory, storage, fixture.job_id, occurrence)
+
+            first_task = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, first_task)
+            async with factory() as session:
+                await UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                ).build(fixture.job_id, first_task)
+
+            async with factory() as session:
+                complete_job = await session.get(ImportJob, fixture.job_id)
+                complete_rows = await _rows(session, fixture.job_id)
+                stored = await session.get(StoredImportFile, occurrence.stored_file_id)
+                assert complete_job is not None and complete_job.preview_summary is not None
+                assert stored is not None
+                complete_summary = dict(complete_job.preview_summary)
+                complete_hash = complete_rows[0].plan_hash
+                target = storage.root / stored.storage_key
+                original = target.read_bytes()
+                target.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+                assert target.stat().st_size == stored.size
+
+            second_task = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, second_task)
+            async with factory() as session:
+                with pytest.raises(ImportDomainError) as error:
+                    await UnifiedPreviewProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(max_rows=10_000),
+                    ).build(fixture.job_id, second_task)
+                assert error.value.code == "FILE_INTEGRITY_FAILED"
+
+            async with factory() as session:
+                failed = await session.get(ImportJob, fixture.job_id)
+                rows = await _rows(session, fixture.job_id)
+                file_model = await session.get(ImportJobFile, occurrence.id)
+                assert failed is not None
+                assert failed.status is ImportJobStatus.FAILED
+                assert failed.failed_stage is ImportJobFailedStage.PREVIEW
+                assert failed.preview_revision == 1
+                assert failed.preview_summary == complete_summary
+                assert len(rows) == 1
+                assert rows[0].preview_revision == 1
+                assert rows[0].plan_hash == complete_hash
+                assert file_model is not None
+                assert file_model.status is ImportJobFileStatus.READY
+                assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_safe_parser_rejects_corrupt_blob_after_integrity_check() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("parser-safety")])])
+            occurrence = fixture.files[0]
+            await _parse(factory, storage, fixture.job_id, occurrence)
+
+            async with factory() as session:
+                stored = await session.get(StoredImportFile, occurrence.stored_file_id)
+                assert stored is not None
+                corrupt = b"name,account_id\nunsafe,\x00value\n"
+                target = storage.root / stored.storage_key
+                target.write_bytes(corrupt)
+                stored.size = len(corrupt)
+                stored.sha256 = hashlib.sha256(corrupt).hexdigest()
+                await session.commit()
+
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+            async with factory() as session:
+                with pytest.raises(ImportDomainError) as error:
+                    await UnifiedPreviewProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(max_rows=10_000),
+                    ).build(fixture.job_id, task_id)
+                assert error.value.code == "INVALID_CSV"
+
+            async with factory() as session:
+                failed = await session.get(ImportJob, fixture.job_id)
+                rows = await _rows(session, fixture.job_id)
+                assert failed is not None
+                assert failed.status is ImportJobStatus.FAILED
+                assert failed.failed_stage is ImportJobFailedStage.PREVIEW
+                assert failed.preview_revision == 0
+                assert {row.preview_revision for row in rows} == {0}
+                assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_mapping_fingerprint_failure_is_atomic() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("mapping-freeze")])])
+            occurrence = fixture.files[0]
+            await _parse(factory, storage, fixture.job_id, occurrence)
+            async with factory() as session:
+                file_model = await session.get(ImportJobFile, occurrence.id)
+                assert file_model is not None and file_model.mapping_hash is not None
+                file_model.field_mapping = {"name": "nickname"}
+                await session.commit()
+
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+            async with factory() as session:
+                with pytest.raises(ImportDomainError) as error:
+                    await UnifiedPreviewProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(max_rows=10_000),
+                    ).build(fixture.job_id, task_id)
+                assert error.value.code == "IMPORT_PREVIEW_REVALIDATION_FAILED"
+
+            async with factory() as session:
+                failed = await session.get(ImportJob, fixture.job_id)
+                rows = await _rows(session, fixture.job_id)
+                assert failed is not None
+                assert failed.status is ImportJobStatus.FAILED
+                assert failed.failed_stage is ImportJobFailedStage.PREVIEW
+                assert failed.preview_revision == 0
+                assert {row.preview_revision for row in rows} == {0}
+                assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_stale_token_is_noop_without_storage_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("stale-token")])])
+            await _parse(factory, storage, fixture.job_id, fixture.files[0])
+            current_task = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, current_task)
+
+            read_count = 0
+            original_read = storage.read
+
+            async def tracked_read(*args: object, **kwargs: object) -> bytes:
+                nonlocal read_count
+                read_count += 1
+                return await original_read(*args, **kwargs)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(storage, "read", tracked_read)
+            async with factory() as session:
+                result = await UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                ).build(fixture.job_id, "stale-delivery")
+                assert result["idempotent"] is True
+                assert result["status"] == ImportJobStatus.PREVIEWING.value
+            assert read_count == 0
+
+            async with factory() as session:
+                job = await session.get(ImportJob, fixture.job_id)
+                assert job is not None
+                assert job.status is ImportJobStatus.PREVIEWING
+                assert job.parse_task_id == current_task
+                assert job.failed_stage is None
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_cancellation_rolls_back_without_marking_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("cancelled")])])
+            await _parse(factory, storage, fixture.job_id, fixture.files[0])
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+
+            async def cancel_read(*_args: object, **_kwargs: object) -> bytes:
+                raise asyncio.CancelledError
+
+            monkeypatch.setattr(storage, "read", cancel_read)
+            async with factory() as session:
+                with pytest.raises(asyncio.CancelledError):
+                    await UnifiedPreviewProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(max_rows=10_000),
+                    ).build(fixture.job_id, task_id)
+
+            async with factory() as session:
+                job = await session.get(ImportJob, fixture.job_id)
+                assert job is not None
+                assert job.status is ImportJobStatus.PREVIEWING
+                assert job.failed_stage is None
+                assert job.preview_revision == 0
+
+    asyncio.run(scenario())
+
+
+def test_preview_retry_exhaustion_is_current_token_guarded() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("retry-exhausted")])])
+            await _parse(factory, storage, fixture.job_id, fixture.files[0])
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+
+            async with factory() as session:
+                processor = UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                )
+                await processor.mark_failed_after_retry_exhausted(fixture.job_id, "stale-delivery")
+            async with factory() as session:
+                current = await session.get(ImportJob, fixture.job_id)
+                assert current is not None
+                assert current.status is ImportJobStatus.PREVIEWING
+
+            async with factory() as session:
+                await UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                ).mark_failed_after_retry_exhausted(fixture.job_id, task_id)
+            async with factory() as session:
+                failed = await session.get(ImportJob, fixture.job_id)
+                assert failed is not None
+                assert failed.status is ImportJobStatus.FAILED
+                assert failed.failed_stage is ImportJobFailedStage.PREVIEW
+                assert failed.error_code == "HEAVY_IMPORT_RETRY_EXHAUSTED"
+                assert failed.error_message == (
+                    "Unified Preview could not acquire the heavy-import slot"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_unified_preview_lock_order_precedes_prefetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("lock-order")])])
+            await _parse(factory, storage, fixture.job_id, fixture.files[0])
+            task_id = uuid4().hex
+            await _queue_preview(factory, fixture.job_id, task_id)
+
+            async with factory() as session:
+                processor = UnifiedPreviewProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                )
+                events: list[str] = []
+                get_job = processor.repository.get_import_job
+                get_collection = processor.repository.get_collection_job
+                acquire_locks = processor.repository.acquire_identity_locks
+                plan = processor.batch.plan_preview_staging
+
+                async def traced_get_job(
+                    job_id: UUID, *, for_update: bool = False
+                ) -> ImportJob | None:
+                    events.append("job_lock" if for_update else "job_discovery")
+                    return await get_job(job_id, for_update=for_update)
+
+                async def traced_get_collection(
+                    collection_id: UUID, *, for_update: bool = False
+                ) -> CollectionJob | None:
+                    events.append("collection_lock" if for_update else "collection_read")
+                    return await get_collection(collection_id, for_update=for_update)
+
+                async def traced_locks(identities: Iterable[str]) -> None:
+                    frozen = tuple(identities)
+                    events.append(
+                        "job_advisory"
+                        if any(value.startswith("phase2:unified-preview-job:") for value in frozen)
+                        else "identity_locks"
+                    )
+                    await acquire_locks(frozen)
+
+                async def traced_plan(*args: object, **kwargs: object) -> object:
+                    events.append("prefetch_plan")
+                    return await plan(*args, **kwargs)  # type: ignore[arg-type]
+
+                monkeypatch.setattr(processor.repository, "get_import_job", traced_get_job)
+                monkeypatch.setattr(
+                    processor.repository, "get_collection_job", traced_get_collection
+                )
+                monkeypatch.setattr(processor.repository, "acquire_identity_locks", traced_locks)
+                monkeypatch.setattr(processor.batch, "plan_preview_staging", traced_plan)
+                await processor.build(fixture.job_id, task_id)
+
+                assert events.index("collection_lock") < events.index("job_lock")
+                assert events.index("identity_locks") < events.index("prefetch_plan")
+
+    asyncio.run(scenario())
 
 
 def test_missing_mapping_is_file_scoped_and_keeps_job_draft() -> None:
@@ -915,7 +1332,7 @@ def test_four_file_mapping_variants_normalize_two_thousand_huitun_rows() -> None
                 assert len(manual_rows) == 6
                 assert len(error_rows) == 1
                 assert any(
-                    row.merge_plan.get("batch_manual_review", {}).get("reason")
+                    (row.merge_plan or {}).get("batch_manual_review", {}).get("reason")
                     == "BATCH_DATABASE_IDENTITY_CONFLICT"
                     for row in manual_rows
                 )

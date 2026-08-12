@@ -8,7 +8,7 @@ from collections.abc import AsyncIterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
-from typing import Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from uuid import UUID
 
 from sqlalchemy import inspect as sa_inspect
@@ -37,16 +37,28 @@ from backend_core.imports.models import (
     ImportJob,
     ImportJobFile,
     ImportJobFileClientId,
-    ImportRow,
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits, validate_upload_type
 from backend_core.imports.repository import ImportJobFileRecord, ImportRepository
-from backend_core.imports.schemas import CollectionJobCreate
+from backend_core.imports.schemas import (
+    CollectionJobCreate,
+    CollectionJobScreeningRulesUpdate,
+    ImportRowCategory,
+    ImportRowPublic,
+)
 from backend_core.imports.state_machine import transition_import_job
 from backend_core.imports.storage import StorageAdapter
 
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+VIEWER_EMAIL_VALUE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])" r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" r"(?![A-Za-z0-9.-])"
+)
+VIEWER_PHONE_VALUE = re.compile(r"(?<!\d)\+?\d(?:[\d\s().-]{5,}\d)(?!\d)")
+VIEWER_DECIMAL_VALUE = re.compile(r"^-?\d+\.\d+$")
+VIEWER_ISO_DATETIME_VALUE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}" r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?$"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -63,7 +75,9 @@ class SystemClock:
 class QueueDecision:
     job: ImportJob
     should_dispatch: bool
+    task_id: str
     idempotent: bool = False
+    task_kind: Literal["legacy_parse", "bulk_preview"] = "legacy_parse"
 
 
 @dataclass(frozen=True)
@@ -97,6 +111,18 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _viewer_string_contains_contact(value: str) -> bool:
+    stripped = value.strip()
+    if VIEWER_EMAIL_VALUE.search(stripped):
+        return True
+    if VIEWER_DECIMAL_VALUE.fullmatch(stripped) or VIEWER_ISO_DATETIME_VALUE.fullmatch(stripped):
+        return False
+    return any(
+        7 <= sum(character.isdigit() for character in match.group()) <= 15
+        for match in VIEWER_PHONE_VALUE.finditer(stripped)
+    )
 
 
 class ImportService:
@@ -220,6 +246,70 @@ class ImportService:
                 "COLLECTION_JOB_NOT_FOUND", "Collection job not found", status_code=404
             )
         self._require_scope(context, job.department_id)
+        return job
+
+    async def update_collection_job_screening_rules(
+        self,
+        context: AuthContext,
+        collection_job_id: UUID,
+        payload: CollectionJobScreeningRulesUpdate,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> CollectionJob:
+        self._require_mutation(context)
+        job = await self.repository.get_collection_job(collection_job_id, for_update=True)
+        if job is None:
+            raise ImportDomainError(
+                "COLLECTION_JOB_NOT_FOUND", "Collection job not found", status_code=404
+            )
+        self._require_scope(context, job.department_id)
+        if job.screening_rules_revision != payload.expected_revision:
+            raise ImportDomainError(
+                "SCREENING_RULES_REVISION_CONFLICT",
+                "Screening rules were changed; reload before updating",
+                status_code=409,
+                details={"current_revision": job.screening_rules_revision},
+            )
+        before_hash = hash_document(
+            {
+                "screening_rules": job.screening_rules,
+                "follower_min": job.follower_min,
+                "follower_max": job.follower_max,
+                "revision": job.screening_rules_revision,
+            }
+        )
+        job.screening_rules = payload.screening_rules.model_dump(mode="json")
+        job.follower_min = payload.follower_min
+        job.follower_max = payload.follower_max
+        job.screening_rules_revision += 1
+        stale_previews = await self.repository.mark_collection_previews_stale(job.id)
+        after_hash = hash_document(
+            {
+                "screening_rules": job.screening_rules,
+                "follower_min": job.follower_min,
+                "follower_max": job.follower_max,
+                "revision": job.screening_rules_revision,
+            }
+        )
+        self.audit.add(
+            action=AuditAction.COLLECTION_SCREENING_RULES_UPDATED,
+            result=AuditResult.SUCCESS,
+            department_id=job.department_id,
+            operator_id=self._operator_id(context),
+            ip=ip,
+            user_agent=user_agent,
+            entity_type="collection_job",
+            entity_id=job.id,
+            before={"revision": payload.expected_revision, "rule_hash": before_hash},
+            after={
+                "revision": job.screening_rules_revision,
+                "rule_hash": after_hash,
+                "stale_preview_count": stale_previews,
+            },
+        )
+        await self.session.commit()
+        await self.session.refresh(job)
         return job
 
     async def create_import_job(
@@ -1166,12 +1256,69 @@ class ImportService:
         offset: int,
         limit: int,
         action: ImportRowAction | None,
-    ) -> tuple[list[ImportRow], int]:
-        await self.get_import_job(context, import_job_id)
+        category: ImportRowCategory | None = None,
+    ) -> tuple[list[ImportRowPublic], int]:
+        job = await self.get_import_job(context, import_job_id)
+        if job.preview_revision <= 0:
+            return [], 0
         rows, total = await self.repository.list_import_rows(
-            import_job_id, offset=offset, limit=limit, action=action
+            import_job_id,
+            offset=offset,
+            limit=limit,
+            action=action,
+            category=category,
         )
-        return list(rows), total
+        public = [ImportRowPublic.model_validate(row) for row in rows]
+        if context.role is Role.VIEWER:
+            public = [self._viewer_import_row(row) for row in public]
+        return public, total
+
+    @classmethod
+    def _viewer_import_row(cls, row: ImportRowPublic) -> ImportRowPublic:
+        normalized = dict(row.normalized_data or {})
+        if "contacts" in normalized:
+            normalized["contacts"] = []
+        normalized = cast(
+            dict[str, Any],
+            cls._redact_preview_document(normalized),
+        )
+        merge_plan = cast(
+            dict[str, Any] | None,
+            cls._redact_preview_document(row.merge_plan),
+        )
+        return row.model_copy(
+            update={
+                "raw_data": {"redacted": True},
+                "normalized_data": normalized,
+                "merge_plan": merge_plan,
+            }
+        )
+
+    @classmethod
+    def _redact_preview_document(cls, value: object) -> object:
+        sensitive_keys = {
+            "value",
+            "normalized_value",
+            "email",
+            "phone",
+            "mobile",
+            "secret",
+            "token",
+            "access_token",
+        }
+        if isinstance(value, dict):
+            result: dict[str, object] = {}
+            for key, item in value.items():
+                if key.lower() in sensitive_keys:
+                    result[key] = "***"
+                else:
+                    result[key] = cls._redact_preview_document(item)
+            return result
+        if isinstance(value, list):
+            return [cls._redact_preview_document(item) for item in value]
+        if isinstance(value, str) and _viewer_string_contains_contact(value):
+            return "***"
+        return value
 
     async def request_mapping_preview(
         self,
@@ -1230,19 +1377,149 @@ class ImportService:
             after={"next_preview_revision": job.preview_revision + 1},
         )
         await self.session.commit()
-        return QueueDecision(job=job, should_dispatch=True)
+        return QueueDecision(job=job, should_dispatch=True, task_id=task_id)
 
     async def request_preview(
         self,
         context: AuthContext,
         import_job_id: UUID,
         task_id: str,
+        *,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+        retry_only: bool = False,
+        rebuild: bool = False,
     ) -> QueueDecision:
         self._require_mutation(context)
         job = await self.repository.get_import_job(import_job_id, for_update=True)
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        if retry_only and rebuild:
+            raise ImportDomainError(
+                "INVALID_PREVIEW_REQUEST",
+                "Preview retry and explicit rebuild are mutually exclusive",
+                status_code=409,
+            )
+        if retry_only and job.stored_file_id is not None:
+            raise ImportDomainError(
+                "INVALID_STATE_TRANSITION",
+                "Legacy import jobs do not support the Bulk Preview retry endpoint",
+                status_code=409,
+            )
+        if job.stored_file_id is None:
+            if retry_only and not (
+                (
+                    job.status is ImportJobStatus.FAILED
+                    and job.failed_stage is ImportJobFailedStage.PREVIEW
+                )
+                or (job.status is ImportJobStatus.PREVIEWING and job.parse_task_id is not None)
+            ):
+                raise ImportDomainError(
+                    "INVALID_STATE_TRANSITION",
+                    "Only a failed Bulk Preview can be retried",
+                    status_code=409,
+                )
+            if job.status is ImportJobStatus.PREVIEWING and job.parse_task_id:
+                await self.session.commit()
+                return QueueDecision(
+                    job=job,
+                    should_dispatch=False,
+                    idempotent=True,
+                    task_id=job.parse_task_id,
+                    task_kind="bulk_preview",
+                )
+            if job.status is ImportJobStatus.PREVIEW_READY and not rebuild:
+                await self.session.commit()
+                return QueueDecision(
+                    job=job,
+                    should_dispatch=False,
+                    idempotent=True,
+                    task_id=job.parse_task_id or task_id,
+                    task_kind="bulk_preview",
+                )
+            if job.status is ImportJobStatus.FAILED and not retry_only:
+                raise ImportDomainError(
+                    "INVALID_STATE_TRANSITION",
+                    "Use the Preview retry endpoint for a failed Preview",
+                    status_code=409,
+                )
+            if job.status is ImportJobStatus.FAILED:
+                if job.failed_stage is not ImportJobFailedStage.PREVIEW:
+                    raise ImportDomainError(
+                        "INVALID_STATE_TRANSITION",
+                        "Only a failed Preview can be retried",
+                        status_code=409,
+                    )
+            elif job.status not in {
+                ImportJobStatus.DRAFT,
+                ImportJobStatus.PREVIEW_READY,
+                ImportJobStatus.PREVIEW_STALE,
+            }:
+                raise ImportDomainError(
+                    "INVALID_STATE_TRANSITION",
+                    "Unified Preview cannot be generated in this state",
+                    status_code=409,
+                )
+            files = await self.repository.list_import_job_files(job.id, for_update=True)
+            included = [item for item in files if item.status is not ImportJobFileStatus.EXCLUDED]
+            if not included:
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_EMPTY",
+                    "At least one included file is required",
+                    status_code=409,
+                )
+            blocking = [item for item in included if item.status is not ImportJobFileStatus.READY]
+            if blocking:
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_BLOCKED",
+                    "All included files must be parsed successfully",
+                    status_code=409,
+                    details={
+                        "files": [
+                            {"id": str(item.id), "status": item.status.value} for item in blocking
+                        ]
+                    },
+                )
+            confirmation = [
+                item for item in included if item.source_acquired_at_confirmation_required
+            ]
+            if confirmation:
+                raise ImportDomainError(
+                    "SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED",
+                    "Confirm source acquisition time before generating Preview",
+                    status_code=409,
+                    details={"file_ids": [str(item.id) for item in confirmation]},
+                )
+            retrying = job.status is ImportJobStatus.FAILED
+            transition_import_job(job, ImportJobStatus.PREVIEWING)
+            job.parse_task_id = task_id
+            # Preserve the last complete revision while a rebuild is in flight.
+            # The worker replaces summary + rows atomically on success; retaining
+            # it keeps the last user-visible result available for rollback/stale
+            # handling.  Freshness baselines come only from confirmed lineage.
+            job.error_code = None
+            job.error_message = None
+            job.failed_stage = None
+            if retrying:
+                self.audit.add(
+                    action=AuditAction.IMPORT_BATCH_RETRIED,
+                    result=AuditResult.SUCCESS,
+                    department_id=job.department_id,
+                    operator_id=self._operator_id(context),
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="import_job",
+                    entity_id=job.id,
+                    after={"next_preview_revision": job.preview_revision + 1},
+                )
+            await self.session.commit()
+            return QueueDecision(
+                job=job,
+                should_dispatch=True,
+                task_id=task_id,
+                task_kind="bulk_preview",
+            )
         occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
         if not job.field_mapping or not job.mapping_hash:
             raise ImportDomainError(
@@ -1270,7 +1547,12 @@ class ImportService:
         occurrence.error_code = None
         occurrence.error_message = None
         await self.session.commit()
-        return QueueDecision(job=job, should_dispatch=True)
+        return QueueDecision(
+            job=job,
+            should_dispatch=True,
+            task_id=task_id,
+            task_kind="legacy_parse",
+        )
 
     async def request_confirm(
         self,
@@ -1287,10 +1569,21 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        if job.stored_file_id is None:
+            raise ImportDomainError(
+                "BULK_CONFIRM_NOT_AVAILABLE",
+                "Bulk Confirm is not available until Phase 2 Task 6",
+                status_code=409,
+            )
         if job.status == ImportJobStatus.COMPLETED:
             if job.confirmed_revision == preview_revision:
                 await self.session.commit()
-                return QueueDecision(job=job, should_dispatch=False, idempotent=True)
+                return QueueDecision(
+                    job=job,
+                    should_dispatch=False,
+                    task_id=job.confirm_task_id or task_id,
+                    idempotent=True,
+                )
             raise ImportDomainError(
                 "PREVIEW_STALE",
                 "Confirmed revision does not match the completed import",
@@ -1299,7 +1592,12 @@ class ImportService:
         if job.status in {ImportJobStatus.CONFIRM_QUEUED, ImportJobStatus.IMPORTING}:
             if job.confirmed_revision == preview_revision:
                 await self.session.commit()
-                return QueueDecision(job=job, should_dispatch=False, idempotent=True)
+                return QueueDecision(
+                    job=job,
+                    should_dispatch=False,
+                    task_id=job.confirm_task_id or task_id,
+                    idempotent=True,
+                )
             raise ImportDomainError(
                 "PREVIEW_STALE",
                 "Another preview revision is already being confirmed",
@@ -1347,7 +1645,7 @@ class ImportService:
             after={"preview_revision": preview_revision},
         )
         await self.session.commit()
-        return QueueDecision(job=job, should_dispatch=True)
+        return QueueDecision(job=job, should_dispatch=True, task_id=task_id)
 
     async def cancel(
         self,
@@ -1362,11 +1660,16 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
-        occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
         transition_import_job(job, ImportJobStatus.CANCELLED)
-        occurrence.status = ImportJobFileStatus.EXCLUDED
+        if job.stored_file_id is not None:
+            occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
+            occurrence.status = ImportJobFileStatus.EXCLUDED
         self.audit.add(
-            action=AuditAction.IMPORT_CANCELLED,
+            action=(
+                AuditAction.IMPORT_CANCELLED
+                if job.stored_file_id is not None
+                else AuditAction.IMPORT_BATCH_CANCELLED
+            ),
             result=AuditResult.SUCCESS,
             department_id=job.department_id,
             operator_id=self._operator_id(context),
@@ -1393,19 +1696,22 @@ class ImportService:
             await self.session.rollback()
             return
         self._require_scope(context, job.department_id)
-        expected = task_id in {job.parse_task_id, job.confirm_task_id}
-        if not expected or job.status not in {
+        is_preview_dispatch = task_id == job.parse_task_id and job.status in {
             ImportJobStatus.UPLOADED,
             ImportJobStatus.PREVIEWING,
-            ImportJobStatus.CONFIRM_QUEUED,
-        }:
+        }
+        is_confirm_dispatch = (
+            task_id == job.confirm_task_id and job.status is ImportJobStatus.CONFIRM_QUEUED
+        )
+        if not (is_preview_dispatch or is_confirm_dispatch):
             await self.session.rollback()
             return
-        if task_id == job.parse_task_id:
-            occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
-            occurrence.status = ImportJobFileStatus.FAILED
-            occurrence.error_code = "TASK_DISPATCH_FAILED"
-            occurrence.error_message = "Background task could not be queued"
+        if is_preview_dispatch:
+            if job.stored_file_id is not None:
+                occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
+                occurrence.status = ImportJobFileStatus.FAILED
+                occurrence.error_code = "TASK_DISPATCH_FAILED"
+                occurrence.error_message = "Background task could not be queued"
             job.failed_stage = ImportJobFailedStage.PREVIEW
         else:
             job.failed_stage = ImportJobFailedStage.CONFIRM
@@ -1413,7 +1719,11 @@ class ImportService:
         job.error_code = "TASK_DISPATCH_FAILED"
         job.error_message = "Background task could not be queued"
         self.audit.add(
-            action=AuditAction.IMPORT_FAILED,
+            action=(
+                AuditAction.IMPORT_FAILED
+                if job.stored_file_id is not None
+                else AuditAction.IMPORT_BATCH_FAILED
+            ),
             result=AuditResult.FAILED,
             department_id=job.department_id,
             operator_id=context.operator.id if context.operator else None,

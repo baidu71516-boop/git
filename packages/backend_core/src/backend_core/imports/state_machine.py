@@ -1,6 +1,6 @@
 """Single import-job state machine shared by HTTP and workers."""
 
-from backend_core.imports.enums import ImportJobStatus
+from backend_core.imports.enums import ImportJobFailedStage, ImportJobStatus
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.models import ImportJob
 
@@ -26,6 +26,7 @@ ALLOWED_TRANSITIONS: dict[ImportJobStatus, frozenset[ImportJobStatus]] = {
     ImportJobStatus.PREVIEW_READY: frozenset(
         {
             ImportJobStatus.PREVIEWING,
+            ImportJobStatus.PREVIEW_STALE,
             ImportJobStatus.CONFIRM_QUEUED,
             ImportJobStatus.FAILED,
             ImportJobStatus.CANCELLED,
@@ -50,12 +51,22 @@ ALLOWED_TRANSITIONS: dict[ImportJobStatus, frozenset[ImportJobStatus]] = {
         }
     ),
     ImportJobStatus.COMPLETED: frozenset(),
-    ImportJobStatus.FAILED: frozenset(),
+    ImportJobStatus.FAILED: frozenset({ImportJobStatus.PREVIEWING}),
     ImportJobStatus.CANCELLED: frozenset(),
 }
 
 
 def transition_import_job(job: ImportJob, target: ImportJobStatus) -> None:
+    if (
+        job.status is ImportJobStatus.FAILED
+        and target is ImportJobStatus.PREVIEWING
+        and job.failed_stage is not ImportJobFailedStage.PREVIEW
+    ):
+        raise ImportDomainError(
+            "INVALID_STATE_TRANSITION",
+            "Only a failed Preview stage can be retried as Preview",
+            status_code=409,
+        )
     if target not in ALLOWED_TRANSITIONS[job.status]:
         raise ImportDomainError(
             "INVALID_STATE_TRANSITION",

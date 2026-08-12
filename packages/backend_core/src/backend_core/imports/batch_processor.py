@@ -194,6 +194,127 @@ class BatchImportProcessor:
             "staged_rows": staged_rows,
         }
 
+    async def revalidate_ready_files(
+        self,
+        job: ImportJob,
+        files: Sequence[ImportJobFile],
+    ) -> list[_StagingRow]:
+        """Re-read and normalize every included READY occurrence for Preview.
+
+        Task 3 staging is deliberately not trusted as the source of a Unified
+        Preview.  This method verifies each immutable StoredImportFile, runs the
+        same safe parser and source adapter again, and reconstructs rows from the
+        bytes protected by the frozen per-file mapping.  Any row replacement or
+        deletion remains in the caller's Preview transaction, so a later failure
+        restores the last complete revision atomically.
+        """
+
+        records = await self.repository.list_import_job_file_records(job.id)
+        records_by_id = {record.occurrence.id: record for record in records}
+        persisted_models = await self._all_job_rows(job.id)
+        models_by_locator = {
+            (model.import_job_file_id, model.row_number): model for model in persisted_models
+        }
+        rebuilt_locators: set[tuple[UUID, int]] = set()
+        staging_rows: list[_StagingRow] = []
+
+        for occurrence in files:
+            if occurrence.status is not ImportJobFileStatus.READY:
+                continue
+            record = records_by_id.get(occurrence.id)
+            if record is None or record.stored_file.id != occurrence.stored_file_id:
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_REVALIDATION_FAILED",
+                    "Preview file lineage changed during revalidation",
+                )
+            mapping = dict(occurrence.field_mapping or {})
+            if not mapping or occurrence.mapping_hash != hash_document(mapping):
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_REVALIDATION_FAILED",
+                    "Preview file mapping changed during revalidation",
+                )
+
+            stored_file = record.stored_file
+            content = await self.storage.read(
+                stored_file.storage_key,
+                expected_size=stored_file.size,
+                expected_sha256=stored_file.sha256,
+            )
+            table = parse_table(
+                content,
+                file_type=stored_file.detected_type,
+                declared_mime=occurrence.declared_mime or stored_file.detected_mime,
+                limits=self.parser_limits,
+            )
+            snapshot = _TaskSnapshot(
+                job_id=job.id,
+                file_id=occurrence.id,
+                stored_file_id=stored_file.id,
+                storage_key=stored_file.storage_key,
+                expected_size=stored_file.size,
+                expected_sha256=stored_file.sha256,
+                file_type=stored_file.detected_type,
+                declared_mime=occurrence.declared_mime or stored_file.detected_mime,
+                source_type=job.source_type,
+                field_mapping=mapping,
+                task_id=job.parse_task_id or "",
+            )
+            validated_mapping, adapter = self._mapping_and_adapter(snapshot, table)
+            if (
+                adapter is None
+                or validated_mapping != mapping
+                or hash_document(validated_mapping) != occurrence.mapping_hash
+            ):
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_REVALIDATION_FAILED",
+                    "Preview file mapping no longer matches its source fields",
+                )
+
+            adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
+            for index, adapted in enumerate(adapted_rows):
+                locator = (occurrence.id, adapted.row_number)
+                model = models_by_locator.get(locator)
+                import_row_id = (
+                    model.id
+                    if model is not None
+                    else uuid5(job.id, f"import-row:{occurrence.id}:{adapted.row_number}")
+                )
+                warnings = list(adapted.warning_dicts())
+                if index == 0:
+                    warnings.extend(dict(warning) for warning in table.warnings)
+                staging_rows.append(
+                    _StagingRow(
+                        occurrence=occurrence,
+                        import_row_id=import_row_id,
+                        row_number=adapted.row_number,
+                        raw_data=dict(adapted.raw_data),
+                        normalized_data=adapted.normalized_data(),
+                        record=adapted.record,
+                        mapping_hash=occurrence.mapping_hash,
+                        initial_warnings=warnings,
+                        initial_errors=list(adapted.error_dicts()),
+                        model=model,
+                    )
+                )
+                rebuilt_locators.add(locator)
+
+        if not staging_rows or len(staging_rows) > self.max_batch_rows:
+            raise ImportDomainError(
+                "IMPORT_BATCH_ROW_LIMIT",
+                "Included import batch has an invalid row count",
+                status_code=409,
+                details={"max_batch_rows": self.max_batch_rows},
+            )
+
+        # Staging is only a locator cache.  Revalidation is authoritative: an
+        # unexpected persisted row is removed in the same transaction that will
+        # publish the rebuilt Preview, never as a separate Task 3 mutation.
+        for model in persisted_models:
+            if (model.import_job_file_id, model.row_number) not in rebuilt_locators:
+                await self.session.delete(model)
+        staging_rows.sort(key=lambda item: item.locator.sort_key)
+        return staging_rows
+
     async def _task_snapshot(
         self,
         import_job_id: UUID,
@@ -548,7 +669,25 @@ class BatchImportProcessor:
         self,
         job: ImportJob,
         staging_rows: Sequence[_StagingRow],
+        *,
+        preview_revision: int = 0,
     ) -> list[PlannedImportRow]:
+        plans, _ = await self.plan_preview_staging(
+            job,
+            staging_rows,
+            preview_revision=preview_revision,
+        )
+        return plans
+
+    async def plan_preview_staging(
+        self,
+        job: ImportJob,
+        staging_rows: Sequence[_StagingRow],
+        *,
+        preview_revision: int,
+    ) -> tuple[list[PlannedImportRow], PrefetchedImportState]:
+        """Plan a complete ordered batch and expose its frozen prefetch state."""
+
         valid_batch_rows = [
             BatchRow(
                 locator=row.locator,
@@ -600,7 +739,7 @@ class BatchImportProcessor:
                         record=staged.record,
                         normalized_data=staged.normalized_data,
                         mapping_hash=staged.mapping_hash,
-                        preview_revision=0,
+                        preview_revision=preview_revision,
                         initial_warnings=list(staged.initial_warnings),
                         initial_errors=list(staged.initial_errors),
                         possible_duplicate_emails=duplicate_emails,
@@ -624,6 +763,7 @@ class BatchImportProcessor:
                         merge_plan=merge_plan,
                         warnings=[*staged.initial_warnings, warning],
                         errors=list(staged.initial_errors),
+                        preview_revision=preview_revision,
                     )
                 )
                 continue
@@ -641,6 +781,7 @@ class BatchImportProcessor:
                         merge_plan=annotation.merge_plan(),
                         warnings=[*staged.initial_warnings, annotation.warning()],
                         errors=list(staged.initial_errors),
+                        preview_revision=preview_revision,
                     )
                 )
                 continue
@@ -659,7 +800,7 @@ class BatchImportProcessor:
                     record=staged.record,
                     normalized_data=staged.normalized_data,
                     mapping_hash=staged.mapping_hash,
-                    preview_revision=0,
+                    preview_revision=preview_revision,
                     initial_warnings=list(staged.initial_warnings),
                     initial_errors=list(staged.initial_errors),
                     possible_duplicate_emails=duplicate_emails,
@@ -667,7 +808,7 @@ class BatchImportProcessor:
                     match_override=match_override,
                 )
             )
-        return plans
+        return plans, prefetched_state
 
     async def _database_matches(
         self,

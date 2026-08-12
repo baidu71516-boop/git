@@ -18,6 +18,7 @@ from app.http.dependencies import (
     require_csrf_context,
 )
 from app.main import app
+from backend_core.audit.models import AuditLog
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.security import hash_token
@@ -25,8 +26,14 @@ from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
-from backend_core.imports.enums import ImportJobFileStatus, ImportJobStatus
-from backend_core.imports.models import ImportJob, ImportJobFile, StoredImportFile
+from backend_core.imports.enums import (
+    ImportJobFailedStage,
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportMatchType,
+    ImportRowAction,
+)
+from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow, StoredImportFile
 from backend_core.imports.storage import LocalStorageAdapter
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient, Response
@@ -113,8 +120,10 @@ class NoopDispatcher:
     def __init__(self) -> None:
         self.parse_calls: list[tuple[UUID, str]] = []
         self.parse_file_calls: list[tuple[UUID, UUID, str]] = []
+        self.preview_calls: list[tuple[UUID, str]] = []
         self.file_dispatch_had_open_transaction: list[bool] = []
         self.fail_parse_file = False
+        self.fail_preview = False
         self.session: AsyncSession | None = None
 
     async def parse(self, import_job_id: UUID, task_id: str) -> None:
@@ -134,6 +143,11 @@ class NoopDispatcher:
 
     async def confirm(self, import_job_id: UUID, preview_revision: int, task_id: str) -> None:
         _ = (import_job_id, preview_revision, task_id)
+
+    async def preview(self, import_job_id: UUID, task_id: str) -> None:
+        self.preview_calls.append((import_job_id, task_id))
+        if self.fail_preview:
+            raise RuntimeError("synthetic Preview broker failure")
 
 
 @asynccontextmanager
@@ -833,6 +847,534 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
     asyncio.run(scenario())
 
 
+def test_bulk_preview_dispatch_is_idempotent_rows_are_categorized_and_confirm_is_gated() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="Bulk Preview HTTP")
+            created = await create_bulk(harness.client, collection_id)
+            assert created.status_code == 201, created.text
+            import_job_id = UUID(created.json()["data"]["id"])
+            uploaded = await upload_file(
+                harness.client,
+                import_job_id,
+                client_file_id="preview-file",
+                filename="preview.csv",
+                content=valid_csv("preview"),
+                content_type="text/csv",
+                source_acquired_at="2026-08-10T10:00:00+08:00",
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            file_data, _ = upload_result(uploaded)
+            occurrence = await harness.session.get(ImportJobFile, UUID(file_data["id"]))
+            assert occurrence is not None
+            occurrence.status = ImportJobFileStatus.READY
+            occurrence.raw_rows = 4
+            await harness.session.commit()
+
+            first = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/preview")
+            assert first.status_code == 202, first.text
+            first_data = assert_success_envelope(first)["data"]
+            assert first_data["status"] == "previewing"
+            assert isinstance(first_data["task_id"], str) and first_data["task_id"]
+            assert first_data["idempotent"] is False
+            assert harness.dispatcher.preview_calls == [
+                (import_job_id, first_data["task_id"]),
+            ]
+
+            replay = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/preview")
+            assert replay.status_code == 200, replay.text
+            replay_data = assert_success_envelope(replay)["data"]
+            assert replay_data["task_id"] == first_data["task_id"]
+            assert replay_data["idempotent"] is True
+            assert harness.dispatcher.preview_calls == [
+                (import_job_id, first_data["task_id"]),
+            ]
+
+            job = await harness.session.get(ImportJob, import_job_id)
+            assert job is not None
+            job.status = ImportJobStatus.PREVIEW_READY
+            job.preview_revision = 1
+            job.preview_summary = {"raw_rows": 4}
+            harness.session.add_all(
+                [
+                    ImportRow(
+                        import_job_id=job.id,
+                        import_job_file_id=occurrence.id,
+                        row_number=2,
+                        raw_data={"达人名称": "new"},
+                        normalized_data={"display_name": "new"},
+                        match_type=ImportMatchType.NONE,
+                        action=ImportRowAction.CREATE,
+                        merge_plan={},
+                        warnings=[],
+                        errors=[],
+                        preview_revision=1,
+                        plan_hash="1" * 64,
+                    ),
+                    ImportRow(
+                        import_job_id=job.id,
+                        import_job_file_id=occurrence.id,
+                        row_number=3,
+                        raw_data={
+                            "达人名称": "warning",
+                            "邮箱": "viewer-secret@example.com",
+                        },
+                        normalized_data={
+                            "display_name": "warning",
+                            "public_profile": {
+                                "bio": "商务联系：nested-secret@example.com",
+                                "details": [
+                                    {"phone_note": "联系电话：13800138000"},
+                                    {"wechat_note": "wx13800138000"},
+                                    {"observed_at": "2026-08-10T10:00:00+08:00"},
+                                    {"score": "98.123456789"},
+                                ],
+                            },
+                            "contacts": [
+                                {
+                                    "type": "email",
+                                    "value": "viewer-secret@example.com",
+                                    "normalized_value": "viewer-secret@example.com",
+                                    "validation_status": "valid",
+                                }
+                            ],
+                        },
+                        match_type=ImportMatchType.NONE,
+                        action=ImportRowAction.CREATE,
+                        merge_plan={
+                            "contacts": {
+                                "create": [
+                                    {
+                                        "type": "email",
+                                        "value": "viewer-secret@example.com",
+                                        "normalized_value": "viewer-secret@example.com",
+                                    }
+                                ]
+                            }
+                        },
+                        warnings=[{"code": "SYNTHETIC_WARNING", "message": "warning"}],
+                        errors=[],
+                        preview_revision=1,
+                        plan_hash="2" * 64,
+                    ),
+                    ImportRow(
+                        import_job_id=job.id,
+                        import_job_file_id=occurrence.id,
+                        row_number=4,
+                        raw_data={"达人名称": "duplicate"},
+                        normalized_data={"display_name": "duplicate"},
+                        match_type=ImportMatchType.NONE,
+                        action=ImportRowAction.SKIP,
+                        merge_plan={"batch_duplicate": {"owner_row_number": 2}},
+                        warnings=[{"code": "BATCH_DUPLICATE", "message": "duplicate"}],
+                        errors=[],
+                        preview_revision=1,
+                        plan_hash="3" * 64,
+                    ),
+                    ImportRow(
+                        import_job_id=job.id,
+                        import_job_file_id=occurrence.id,
+                        row_number=5,
+                        raw_data={"达人名称": "error"},
+                        normalized_data={"display_name": "error"},
+                        match_type=ImportMatchType.NONE,
+                        action=ImportRowAction.ERROR,
+                        merge_plan={},
+                        warnings=[],
+                        errors=[{"code": "SYNTHETIC_ERROR", "message": "error"}],
+                        preview_revision=1,
+                        plan_hash="4" * 64,
+                    ),
+                ]
+            )
+            await harness.session.commit()
+
+            for category, expected in (
+                ("all", 4),
+                ("new", 2),
+                ("warning", 2),
+                ("attention", 3),
+                ("duplicate", 1),
+                ("error", 1),
+            ):
+                response = await harness.client.get(
+                    f"/api/v1/import-jobs/{import_job_id}/rows",
+                    params={"category": category, "offset": 0, "limit": 50},
+                )
+                assert response.status_code == 200, response.text
+                page = assert_success_envelope(response)["data"]
+                assert page["total"] == expected, category
+                if category == "all":
+                    assert [item["row_number"] for item in page["items"]] == [2, 3, 4, 5]
+                elif category == "warning":
+                    assert [item["row_number"] for item in page["items"]] == [3, 4]
+                elif category == "attention":
+                    assert [item["row_number"] for item in page["items"]] == [5, 3, 4]
+
+            operator_rows = await harness.client.get(
+                f"/api/v1/import-jobs/{import_job_id}/rows?category=warning"
+            )
+            assert operator_rows.status_code == 200, operator_rows.text
+            assert "nested-secret@example.com" in operator_rows.text
+            assert "13800138000" in operator_rows.text
+
+            set_context(harness, "manager")
+            manager_rows = await harness.client.get(
+                f"/api/v1/import-jobs/{import_job_id}/rows?category=warning"
+            )
+            assert manager_rows.status_code == 200, manager_rows.text
+            assert "nested-secret@example.com" in manager_rows.text
+            assert "13800138000" in manager_rows.text
+            set_context(harness, "operator")
+
+            conflicting = await harness.client.get(
+                f"/api/v1/import-jobs/{import_job_id}/rows?action=create&category=new"
+            )
+            assert_error_envelope(conflicting, status_code=422, code="VALIDATION_ERROR")
+            for query in (
+                "category=new&category=warning",
+                "action=create&action=update",
+                "offset=0&offset=1",
+                "limit=50&limit=100",
+            ):
+                duplicate = await harness.client.get(
+                    f"/api/v1/import-jobs/{import_job_id}/rows?{query}"
+                )
+                assert_error_envelope(duplicate, status_code=422, code="VALIDATION_ERROR")
+
+            set_context(harness, "viewer")
+            viewer_rows = await harness.client.get(
+                f"/api/v1/import-jobs/{import_job_id}/rows?category=warning"
+            )
+            assert viewer_rows.status_code == 200, viewer_rows.text
+            viewer_page = assert_success_envelope(viewer_rows)["data"]
+            viewer_warning = next(item for item in viewer_page["items"] if item["row_number"] == 3)
+            viewer_profile = viewer_warning["normalized_data"]["public_profile"]
+            assert viewer_warning["raw_data"] == {"redacted": True}
+            assert viewer_warning["normalized_data"]["contacts"] == []
+            assert viewer_profile["bio"] == "***"
+            assert viewer_profile["details"] == [
+                {"phone_note": "***"},
+                {"wechat_note": "***"},
+                {"observed_at": "2026-08-10T10:00:00+08:00"},
+                {"score": "98.123456789"},
+            ]
+            assert "viewer-secret@example.com" not in viewer_rows.text
+            assert "nested-secret@example.com" not in viewer_rows.text
+            assert "13800138000" not in viewer_rows.text
+            assert "2026-08-10T10:00:00+08:00" in viewer_rows.text
+            assert "98.123456789" in viewer_rows.text
+
+            for mutation_path in ("preview", "retry", "cancel"):
+                viewer_mutation = await harness.client.post(
+                    f"/api/v1/import-jobs/{import_job_id}/{mutation_path}"
+                )
+                assert_error_envelope(
+                    viewer_mutation,
+                    status_code=403,
+                    code="PERMISSION_DENIED",
+                )
+
+            set_context(harness, "cross_department")
+            hidden_rows = await harness.client.get(f"/api/v1/import-jobs/{import_job_id}/rows")
+            assert_error_envelope(
+                hidden_rows,
+                status_code=403,
+                code="PERMISSION_DENIED",
+            )
+            set_context(harness, "operator")
+
+            audits_before_reads = int(
+                await harness.session.scalar(select(func.count()).select_from(AuditLog)) or 0
+            )
+            summary_read = await harness.client.get(f"/api/v1/import-jobs/{import_job_id}")
+            assert summary_read.status_code == 200, summary_read.text
+            assert assert_success_envelope(summary_read)["data"]["preview_summary"] == {
+                "raw_rows": 4
+            }
+            rows_read = await harness.client.get(f"/api/v1/import-jobs/{import_job_id}/rows")
+            assert rows_read.status_code == 200, rows_read.text
+            audits_after_reads = int(
+                await harness.session.scalar(select(func.count()).select_from(AuditLog)) or 0
+            )
+            assert audits_after_reads == audits_before_reads
+
+            bulk_confirm = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/confirm",
+                json={"preview_revision": 1},
+            )
+            assert_error_envelope(
+                bulk_confirm,
+                status_code=409,
+                code="BULK_CONFIRM_NOT_AVAILABLE",
+            )
+
+            delayed_retry = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/preview"
+            )
+            assert delayed_retry.status_code == 200, delayed_retry.text
+            delayed_data = assert_success_envelope(delayed_retry)["data"]
+            assert delayed_data["preview_revision"] == 1
+            assert delayed_data["task_id"] == first_data["task_id"]
+            assert delayed_data["idempotent"] is True
+            assert harness.dispatcher.preview_calls == [
+                (import_job_id, first_data["task_id"]),
+            ]
+
+            explicit_rebuild = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/preview",
+                json={"rebuild": True},
+            )
+            assert explicit_rebuild.status_code == 202, explicit_rebuild.text
+            rebuild_data = assert_success_envelope(explicit_rebuild)["data"]
+            assert rebuild_data["preview_revision"] == 1
+            assert rebuild_data["task_id"] != first_data["task_id"]
+            assert rebuild_data["idempotent"] is False
+            assert harness.dispatcher.preview_calls[-1] == (
+                import_job_id,
+                rebuild_data["task_id"],
+            )
+
+    asyncio.run(scenario())
+
+
+def test_collection_job_screening_rules_are_versioned_validated_and_role_guarded() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(
+                harness.client,
+                name="Screening Rules HTTP",
+            )
+            fetched = await harness.client.get(f"/api/v1/collection-jobs/{collection_id}")
+            fetched_data = assert_success_envelope(fetched)["data"]
+            assert fetched_data["screening_rules"] == {
+                "schema_version": 1,
+                "platforms": [],
+                "source_tags_exact_any": [],
+            }
+            assert fetched_data["screening_rules_revision"] == 1
+
+            bulk = await create_bulk(harness.client, collection_id)
+            bulk_job_id = UUID(assert_success_envelope(bulk)["data"]["id"])
+            bulk_job = await harness.session.get(ImportJob, bulk_job_id)
+            assert bulk_job is not None
+            frozen_summary = {"raw_rows": 17, "rule_hash": "frozen-before-update"}
+            bulk_job.status = ImportJobStatus.PREVIEW_READY
+            bulk_job.preview_revision = 3
+            bulk_job.preview_summary = frozen_summary
+            await harness.session.commit()
+
+            payload = {
+                "screening_rules": {
+                    "schema_version": 1,
+                    "platforms": ["xiaohongshu"],
+                    "source_tags_exact_any": ["  Beauty美妆  "],
+                },
+                "follower_min": 0,
+                "follower_max": 200_000,
+                "expected_revision": 1,
+            }
+            updated = await harness.client.put(
+                f"/api/v1/collection-jobs/{collection_id}/screening-rules",
+                json=payload,
+            )
+            updated_data = assert_success_envelope(updated)["data"]
+            assert updated_data["screening_rules"] == {
+                "schema_version": 1,
+                "platforms": ["xiaohongshu"],
+                "source_tags_exact_any": ["Beauty美妆"],
+            }
+            assert updated_data["follower_min"] == 0
+            assert updated_data["follower_max"] == 200_000
+            assert updated_data["screening_rules_revision"] == 2
+
+            await harness.session.refresh(bulk_job)
+            assert bulk_job.status is ImportJobStatus.PREVIEW_STALE
+            assert bulk_job.preview_revision == 3
+            assert bulk_job.preview_summary == frozen_summary
+
+            stale = await harness.client.put(
+                f"/api/v1/collection-jobs/{collection_id}/screening-rules",
+                json=payload,
+            )
+            assert_error_envelope(
+                stale,
+                status_code=409,
+                code="SCREENING_RULES_REVISION_CONFLICT",
+            )
+
+            invalid = await harness.client.put(
+                f"/api/v1/collection-jobs/{collection_id}/screening-rules",
+                json={
+                    "screening_rules": {
+                        "schema_version": 1,
+                        "source_tags_exact_any": ["Beauty美妆", " Beauty美妆 "],
+                    },
+                    "expected_revision": 2,
+                },
+            )
+            assert_error_envelope(invalid, status_code=422, code="VALIDATION_ERROR")
+
+            set_context(harness, "viewer")
+            viewer = await harness.client.put(
+                f"/api/v1/collection-jobs/{collection_id}/screening-rules",
+                json={
+                    "screening_rules": {"schema_version": 1},
+                    "expected_revision": 2,
+                },
+            )
+            assert_error_envelope(viewer, status_code=403, code="PERMISSION_DENIED")
+
+    asyncio.run(scenario())
+
+
+def test_bulk_preview_freeze_gates_report_exact_blocking_files() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="Preview Freeze Gates")
+            created = await create_bulk(harness.client, collection_id)
+            import_job_id = UUID(assert_success_envelope(created)["data"]["id"])
+
+            empty = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/preview")
+            assert_error_envelope(empty, status_code=409, code="IMPORT_PREVIEW_EMPTY")
+
+            uploaded = await upload_file(
+                harness.client,
+                import_job_id,
+                client_file_id="freeze-file",
+                filename="freeze.csv",
+                content=valid_csv("freeze"),
+                content_type="text/csv",
+            )
+            occurrence_id = UUID(upload_result(uploaded)[0]["id"])
+            occurrence = await harness.session.get(ImportJobFile, occurrence_id)
+            assert occurrence is not None
+
+            for blocking_status in (
+                ImportJobFileStatus.PARSING,
+                ImportJobFileStatus.MAPPING_REQUIRED,
+                ImportJobFileStatus.FAILED,
+            ):
+                occurrence.status = blocking_status
+                await harness.session.commit()
+                blocked = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/preview")
+                body = assert_error_envelope(
+                    blocked,
+                    status_code=409,
+                    code="IMPORT_PREVIEW_BLOCKED",
+                )
+                assert body["error"]["details"] == {
+                    "files": [{"id": str(occurrence_id), "status": blocking_status.value}]
+                }
+
+            occurrence.status = ImportJobFileStatus.READY
+            occurrence.source_acquired_at_confirmation_required = True
+            await harness.session.commit()
+            confirmation = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/preview")
+            body = assert_error_envelope(
+                confirmation,
+                status_code=409,
+                code="SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED",
+            )
+            assert body["error"]["details"] == {"file_ids": [str(occurrence_id)]}
+
+            occurrence.source_acquired_at_confirmation_required = False
+            occurrence.status = ImportJobFileStatus.EXCLUDED
+            await harness.session.commit()
+            excluded_only = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/preview"
+            )
+            assert_error_envelope(
+                excluded_only,
+                status_code=409,
+                code="IMPORT_PREVIEW_EMPTY",
+            )
+
+    asyncio.run(scenario())
+
+
+def test_bulk_preview_retry_is_idempotent_and_rejects_confirm_stage() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="Bulk Retry HTTP")
+            created = await create_bulk(harness.client, collection_id)
+            import_job_id = UUID(created.json()["data"]["id"])
+            uploaded = await upload_file(
+                harness.client,
+                import_job_id,
+                client_file_id="retry-file",
+                filename="retry.csv",
+                content=valid_csv("retry"),
+                content_type="text/csv",
+                source_acquired_at="2026-08-10T10:00:00+08:00",
+            )
+            occurrence = await harness.session.get(
+                ImportJobFile,
+                UUID(upload_result(uploaded)[0]["id"]),
+            )
+            job = await harness.session.get(ImportJob, import_job_id)
+            assert occurrence is not None and job is not None
+            occurrence.status = ImportJobFileStatus.READY
+            await harness.session.commit()
+
+            harness.dispatcher.fail_preview = True
+            dispatch_failed = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/preview"
+            )
+            assert_error_envelope(
+                dispatch_failed,
+                status_code=503,
+                code="TASK_DISPATCH_FAILED",
+            )
+            await harness.session.refresh(job)
+            await harness.session.refresh(occurrence)
+            assert job.status is ImportJobStatus.FAILED
+            assert job.failed_stage is ImportJobFailedStage.PREVIEW
+            assert occurrence.status is ImportJobFileStatus.READY
+            assert len(harness.dispatcher.preview_calls) == 1
+            harness.dispatcher.fail_preview = False
+
+            wrong_endpoint = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/preview"
+            )
+            assert_error_envelope(
+                wrong_endpoint,
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+            )
+            assert len(harness.dispatcher.preview_calls) == 1
+
+            first = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
+            assert first.status_code == 202, first.text
+            first_data = assert_success_envelope(first)["data"]
+            assert first_data["status"] == "previewing"
+            assert first_data["idempotent"] is False
+            assert harness.dispatcher.preview_calls[-1] == (
+                import_job_id,
+                first_data["task_id"],
+            )
+
+            replay = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
+            assert replay.status_code == 200, replay.text
+            replay_data = assert_success_envelope(replay)["data"]
+            assert replay_data["task_id"] == first_data["task_id"]
+            assert replay_data["idempotent"] is True
+            assert len(harness.dispatcher.preview_calls) == 2
+
+            job.status = ImportJobStatus.FAILED
+            job.failed_stage = ImportJobFailedStage.CONFIRM
+            await harness.session.commit()
+            confirm_stage = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
+            assert_error_envelope(
+                confirm_stage,
+                status_code=409,
+                code="INVALID_STATE_TRANSITION",
+            )
+            assert len(harness.dispatcher.preview_calls) == 2
+
+    asyncio.run(scenario())
+
+
 def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
     async def scenario() -> None:
         settings = get_settings()
@@ -957,6 +1499,13 @@ def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
                             assert read_without_csrf.status_code == 200
 
                             mutation_without_csrf = (
+                                await client.put(
+                                    f"/api/v1/collection-jobs/{collection_id}/screening-rules",
+                                    json={
+                                        "screening_rules": {"schema_version": 1},
+                                        "expected_revision": 1,
+                                    },
+                                ),
                                 await client.post(
                                     "/api/v1/import-jobs/bulk",
                                     json={"collection_job_id": collection_id},
@@ -994,6 +1543,12 @@ def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
                                 await client.post(
                                     f"/api/v1/import-jobs/{import_job_id}/files/"
                                     f"{import_job_file_id}/exclude"
+                                ),
+                                await client.post(f"/api/v1/import-jobs/{import_job_id}/preview"),
+                                await client.post(f"/api/v1/import-jobs/{import_job_id}/retry"),
+                                await client.post(
+                                    f"/api/v1/import-jobs/{import_job_id}/confirm",
+                                    json={"preview_revision": 1},
                                 ),
                             )
                             for rejected in mutation_without_csrf:
@@ -1189,6 +1744,10 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
     retry_file = paths["/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/retry"][
         "post"
     ]
+    job_detail = paths["/api/v1/import-jobs/{import_job_id}"]["get"]
+    preview = paths["/api/v1/import-jobs/{import_job_id}/preview"]["post"]
+    retry_preview = paths["/api/v1/import-jobs/{import_job_id}/retry"]["post"]
+    rows = paths["/api/v1/import-jobs/{import_job_id}/rows"]["get"]
 
     bulk_envelope = _response_schema(document, bulk_create, 201)
     bulk_data = _resolve_openapi_schema(document, bulk_envelope["properties"]["data"])
@@ -1232,6 +1791,59 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
     error_body = _resolve_openapi_schema(document, validation_envelope["properties"]["error"])
     assert {"code", "message", "details"} <= set(error_body["properties"])
 
+    detail_envelope = _response_schema(document, job_detail, 200)
+    detail_data = _resolve_openapi_schema(document, detail_envelope["properties"]["data"])
+    assert {"preview_revision", "preview_summary"} <= set(detail_data["properties"])
+
+    for status_code in (200, 202):
+        preview_envelope = _response_schema(document, preview, status_code)
+        preview_data = _resolve_openapi_schema(document, preview_envelope["properties"]["data"])
+        assert {"import_job_id", "status", "preview_revision", "task_id", "idempotent"} <= set(
+            preview_data["properties"]
+        )
+    preview_request = preview["requestBody"]["content"]["application/json"]["schema"]
+    if "anyOf" in preview_request:
+        preview_request = next(item for item in preview_request["anyOf"] if "$ref" in item)
+    preview_request = _resolve_openapi_schema(document, preview_request)
+    assert preview_request["properties"]["rebuild"] == {
+        "type": "boolean",
+        "title": "Rebuild",
+        "default": False,
+    }
+    assert preview_request["additionalProperties"] is False
+    assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(preview["responses"])
+    for status_code in (200, 202):
+        retry_envelope = _response_schema(document, retry_preview, status_code)
+        retry_data = _resolve_openapi_schema(document, retry_envelope["properties"]["data"])
+        assert {"import_job_id", "status", "preview_revision", "task_id", "idempotent"} <= set(
+            retry_data["properties"]
+        )
+    assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(
+        retry_preview["responses"]
+    )
+
+    rows_envelope = _response_schema(document, rows, 200)
+    rows_data = _resolve_openapi_schema(document, rows_envelope["properties"]["data"])
+    assert {"items", "total", "offset", "limit"} <= set(rows_data["properties"])
+    category_parameter = next(
+        parameter for parameter in rows["parameters"] if parameter["name"] == "category"
+    )
+    category_schema = category_parameter["schema"]
+    if "anyOf" in category_schema:
+        category_schema = next(item for item in category_schema["anyOf"] if "$ref" in item)
+    category_schema = _resolve_openapi_schema(document, category_schema)
+    assert set(category_schema["enum"]) == {
+        "attention",
+        "error",
+        "manual_review",
+        "warning",
+        "changed",
+        "new",
+        "no_change",
+        "duplicate",
+        "all",
+    }
+
     assert {
         "200",
         "201",
@@ -1258,6 +1870,51 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
             document,
             operation["responses"][str(success_status)]["content"]["application/json"]["schema"],
         )
+
+
+def test_collection_screening_openapi_is_strict_typed_and_versioned() -> None:
+    document = app.openapi()
+    operation = document["paths"]["/api/v1/collection-jobs/{collection_job_id}/screening-rules"][
+        "put"
+    ]
+    request_schema = _resolve_openapi_schema(
+        document,
+        operation["requestBody"]["content"]["application/json"]["schema"],
+    )
+    assert set(request_schema["required"]) == {"screening_rules", "expected_revision"}
+    assert {
+        "screening_rules",
+        "follower_min",
+        "follower_max",
+        "expected_revision",
+    } == set(request_schema["properties"])
+
+    rules_schema = _resolve_openapi_schema(
+        document,
+        request_schema["properties"]["screening_rules"],
+    )
+    assert {"schema_version", "platforms", "source_tags_exact_any"} == set(
+        rules_schema["properties"]
+    )
+    platform_schema = _resolve_openapi_schema(
+        document,
+        rules_schema["properties"]["platforms"]["items"],
+    )
+    assert set(platform_schema["enum"]) == {"xiaohongshu"}
+    tag_schema = _resolve_openapi_schema(
+        document,
+        rules_schema["properties"]["source_tags_exact_any"]["items"],
+    )
+    assert tag_schema["minLength"] == 1
+    assert tag_schema["maxLength"] == 160
+
+    response_envelope = _response_schema(document, operation, 200)
+    response_data = _resolve_openapi_schema(
+        document,
+        response_envelope["properties"]["data"],
+    )
+    assert {"screening_rules", "screening_rules_revision"} <= set(response_data["properties"])
+    assert {"200", "401", "403", "404", "409", "422"} <= set(operation["responses"])
 
 
 def test_legacy_import_job_http_response_contract_remains_compatible() -> None:
