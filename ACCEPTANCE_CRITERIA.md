@@ -65,8 +65,11 @@
 
 - [ ] 一个 `ImportJob` 可承载多个 `ImportJobFile`；不创建 `ImportBatch` 或 `BatchRow`。
 - [ ] 每个文件保留 Stored File、SHA-256、文件 occurrence、Mapping、`source_acquired_at` 和原始行号的可追溯关系。
-- [ ] 同一 Job 内相同 SHA 重复上传幂等返回已有 occurrence；不同 Job 可复用 Storage Blob，但必须重新 Parse 和 Preview。
-- [ ] `0004` 与 Legacy single-file 兼容桥同版本交付；现有 `POST /import-jobs` 在 `0004` head 仍能创建 occurrence、写入 Row file FK 并通过 Phase 1B 全回归，且不伪造 observed time。
+- [ ] `import_job_file_client_ids` 是 `(import_job_id, client_file_id) → import_job_file_id` 的唯一权威持久化幂等映射；Job 内 client ID 唯一，复合 FK 保证 alias occurrence 属于同一 Job，一个 occurrence 可有多个 aliases，Redis/Audit/内存不得充当事实源。
+- [ ] 同一 Job 内相同 SHA 重复上传幂等返回已有 occurrence；不同 client ID 命中同 SHA 必须为已有 occurrence 持久化新 alias；不同 Job 可复用 Storage Blob，但必须重新 Parse 和 Preview。
+- [ ] 幂等真值全部通过：A+X 首次创建；A+X 重放返回同 occurrence；A+Y 返回 409 且不改绑定；B+X 返回同 occurrence并持久化 B alias；之后 B+Y 稳定返回 409。
+- [ ] PostgreSQL 16 并发门禁全部通过：A+X/A+X 最终一个 occurrence/一个 alias；A+X/B+X 最终一个 occurrence/两个 aliases；A+X/A+Y 最终一个 A binding、一个成功和一个 deterministic 409；均不得出现 500、覆盖或分叉 alias。
+- [ ] `0004` 与 Legacy single-file 兼容桥同版本交付；现有 `POST /import-jobs` 在 `0004` head 仍能创建 occurrence、写入 Row file FK 并通过 Phase 1B 全回归，且不伪造 observed time 或 client-ID alias。
 - [ ] 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前可 replace、exclude、retry；存在 blocking file 时不能生成 Preview。
 - [ ] 所有纳入文件形成一个统一 Preview Revision；文件内、跨文件和数据库三层硬身份去重共用 Phase 1B Matcher。
 - [ ] Email 仅标记疑似重复，绝不作为自动匹配或自动合并依据；身份冲突进入人工复核。
@@ -93,8 +96,9 @@
 
 ### Migration、Worker 与性能
 
-- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema；`0005_phase2_refresh_queue` 只承载 Refresh Queue Schema。
+- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
 - [ ] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
+- [ ] `0004` alias Migration Gate 在 PostgreSQL 16 覆盖 fresh DB、0003 realistic data、repeat upgrade、safe downgrade→0003→0004、dangerous multi-file downgrade guard、`alembic check`、metadata drift、Legacy lineage 和 alias unique/composite FK；Legacy occurrence 保持 0 alias。
 - [ ] 当前七服务拓扑不变；Celery Worker concurrency=2，Heavy Preview/Confirm 同时最多 1 个。
 - [ ] File Parse task、Job failed_stage/retry、Broker dispatch reconciliation 与 Worker crash recovery 均由持久状态恢复，不依赖进程内状态。
 - [ ] 2000 行 Parse、Normalize、Dedup、Preview、Confirm 稳定且没有逐行 N+1，作为 MVP 发布 blocker。

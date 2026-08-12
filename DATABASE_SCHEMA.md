@@ -16,8 +16,8 @@
 
 - Phase 1A–1C 使用 `Influencer + InfluencerPlatformAccount + SourceState/SourceIdentity + Contact + CurrentMetrics + MetricSnapshot`，不是把小红书/灰豚字段直接塞入 Influencer。
 - Import 使用 `StoredImportFile + CollectionJob + ImportJob + ImportRow`、持久化 Preview Revision 和人工 Confirm。
-- 当前 Alembic head 是 `0003_phase1b`。
-- Phase 2 Task 0 只冻结设计；仓库中尚不存在 `0004` 或 `0005` migration 文件。
+- 当前 Phase 2 开发分支 Alembic head 是 `0004_phase2_bulk_import`；正式测试服务器仍停留在 `0003_phase1b`。
+- `0004` 尚未 merge/deploy，已授权直接完善 client-ID alias 结构；不得为此创建 `0005`，`0005` 仍保留给 Refresh Queue。
 
 ---
 
@@ -29,20 +29,20 @@
 CollectionJob (one originating collection)
   └─ ImportJob (one Bulk Batch)
        ├─ ImportJobFile (one file occurrence)
-       │    └─ StoredImportFile (content-addressed/raw blob)
+       │    ├─ StoredImportFile (content-addressed/raw blob)
+       │    └─ ImportJobFileClientId (zero or many idempotency aliases)
        └─ ImportRow
             └─ ImportJobFile + original row_number
 ```
 
 不新增 `ImportBatch` 或 `BatchRow`。
 
-### A.2 `import_job_files`（计划由 0004 新增）
+### A.2 `import_job_files` 与 `import_job_file_client_ids`（0004）
 
 - id UUID PK
 - import_job_id UUID FK
 - stored_file_id UUID FK
 - position INT
-- client_file_id VARCHAR
 - original_filename VARCHAR
 - declared_mime VARCHAR nullable
 - status ENUM(uploaded, parsing, mapping_required, ready, failed, excluded)
@@ -65,19 +65,39 @@ CollectionJob (one originating collection)
 约束：
 
 - unique(import_job_id, position)
-- unique(import_job_id, client_file_id)
 - unique(import_job_id, stored_file_id)
 - unique(id, import_job_id)
 - position >= 1
 
+`import_job_file_client_ids`：
+
+- id UUID PK
+- import_job_id UUID FK
+- import_job_file_id UUID
+- client_file_id VARCHAR
+- created_at / updated_at TIMESTAMPTZ
+
+约束：
+
+- unique(import_job_id, client_file_id)
+- 复合 FK `(import_job_file_id, import_job_id)` → `import_job_files(id, import_job_id)`，数据库必须保证 alias 指向同一 Job 的 occurrence
+- index(import_job_file_id)
+- 一个 occurrence 可有多个 aliases；同一个 client ID 可在不同 ImportJob 中复用
+
+该 alias 表是 `(import_job_id, client_file_id) → import_job_file_id` 的 authoritative idempotency mapping。`import_job_files` 不保留 competing `client_file_id` 字段；Redis、Audit JSON 或内存状态不得承担该事实源。
+
 语义：
 
 - 同 Job 相同 SHA 会解析到同一个 StoredImportFile，因此命中 unique(job, stored_file) 并幂等返回已有 occurrence。
+- 不同 client ID 命中同 Job 相同 SHA 时，为已有 occurrence 新增 alias；随后该 client ID 上传不同 SHA 必须返回 409 `IDEMPOTENCY_CONFLICT`。
 - 不同 Job 可关联相同 StoredImportFile，但必须创建各自 occurrence 并重新 Parse/Preview。
 - 新 Bulk Draft `/import-jobs/{id}/files` 上传缺省 acquisition time 时由 Service 写入服务器接受时间，origin 为 `server_default`；上传显式值或 Preview 前显式 PATCH 的 origin 为 `user_confirmed`。Legacy 单文件兼容 endpoint 保持 acquisition unknown。
 - 跨历史 Job 复用 SHA 且没有显式提供 acquisition time 时，文件保持 Preview blocker，直到显式 PATCH 确认/修正时间。
 - Legacy occurrence 回填 `source_acquired_at=NULL`、origin=`legacy_unknown`；Migration 不伪造来源观察时间。`legacy_unknown` 必须对应 NULL，其他两种 origin 必须对应非空 acquisition time。
+- Legacy single-file occurrence 没有 client ID，允许 0 个 alias；Migration 和兼容 endpoint 都不得伪造 alias。
 - `preview_revision > 0` 表示文件集合、Mapping 与 acquisition time 已冻结，不新增 `files_frozen_at`。
+
+幂等真值：A+X 首次创建 occurrence X 和 alias A；A+X 重放返回 X；A+Y 返回 409；B+X 为 X 新增 alias B；其后的 B+Y 返回 409。并发 A+X/A+X 最终一个 occurrence/一个 alias，并发 A+X/B+X 最终一个 occurrence/两个 aliases，并发 A+X/A+Y 最终一个 A binding、一个成功和一个 deterministic 409。所有最终状态由 PostgreSQL transaction、Job 范围锁、unique 和 composite FK 约束保证，不允许 500、silent overwrite 或全局锁。
 
 ### A.3 `import_jobs` / `import_rows` / `collection_jobs`（0004 additive changes）
 
@@ -96,7 +116,7 @@ CollectionJob (one originating collection)
 - 复合 FK `(import_job_file_id, import_job_id)`，禁止 Row 指向其他 Job 的文件。
 - Freshness 查询索引 `(matched_platform_account_id, committed_at DESC, import_job_id)`。
 
-`0004` 不得脱离应用兼容桥单独部署：现有 `POST /import-jobs` 创建的每个新 Legacy single-file Job 也必须同时创建 position=1、`client_file_id=legacy:{import_job_id}`、acquisition NULL/origin `legacy_unknown` 的 occurrence，现有 Parse/Mapping/Preview 路径同步它的最小文件状态，所有新 ImportRow 写入该 file FK。Phase 1B 单文件回归必须在 `0004` head 通过。
+`0004` 不得脱离应用兼容桥单独部署：现有 `POST /import-jobs` 创建的每个新 Legacy single-file Job 也必须同时创建 position=1、acquisition NULL/origin `legacy_unknown` 的 occurrence，但不得创建伪造 client-ID alias；现有 Parse/Mapping/Preview 路径同步它的最小文件状态，所有新 ImportRow 写入该 file FK。Phase 1B 单文件回归必须在 `0004` head 通过。
 
 `collection_jobs`：
 
@@ -172,6 +192,8 @@ Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQu
 2. `0005_phase2_refresh_queue`
 
 禁止合并为一个 Migration，也禁止创建空 Migration。`0004 → 0003` 仅在没有 Phase 2 创建的 Bulk Job/新 occurrence、所有 Screening 规则仍是 Migration 默认空值时允许；只由 Migration 回填的 Legacy 单 occurrence 可恢复。不得只在多文件时拒绝，因为单 occurrence Bulk 的 Draft/File/acquisition/Mapping/task metadata 也会丢失。`0005 → 0004` 仅在 Queue/Item 和 Queue 引用全空时允许；其他情况必须安全拒绝。
+
+client-ID alias 属于尚未发布 `0004_phase2_bulk_import` 的最终 Schema，直接完善 `0004`。Legacy 回填 occurrence 不创建 alias；alias unique/composite FK、fresh/repeat/0003-realistic-data/downgrade guard/metadata drift/`alembic check` 均属于 `0004` Gate。
 
 ---
 

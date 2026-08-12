@@ -130,6 +130,15 @@ Phase 2 MVP 不包含：
 - `StoredImportFile` 是按 SHA-256 去重的不可变内容对象。
 - `ImportJobFile` 保存本批次中的顺序、文件名、Mapping、状态、取得时间和错误。
 
+`ImportJobFileClientId`（物理表 `import_job_file_client_ids`）保存上传客户端幂等键。它是
+`(import_job_id, client_file_id) → import_job_file_id` 的唯一权威持久化映射：
+
+- 一个 occurrence 可以拥有多个 client-ID aliases。
+- 同一 ImportJob 内一个 `client_file_id` 永久绑定到一个 occurrence。
+- 不同 ImportJob 可以使用相同 `client_file_id`。
+- Legacy single-file occurrence 没有客户端幂等键，可以拥有 0 个 alias；Migration 不得伪造 alias。
+- Redis、Audit JSON、内存状态和 occurrence 元数据都不得作为幂等事实源。
+
 ### 4.3 Row Locator
 
 `ImportRow.row_number` 继续表示原文件物理行号。多文件中的唯一定位为：
@@ -226,12 +235,24 @@ Web 可以一次拖入多个文件，但 API 每个请求只流式上传一个�
 - 每个文件使用 `client_file_id` 支持网络重试幂等。
 - Batch 安全上限使用 validated Settings；MVP 默认最多 20 个 occurrence、累计原始文件 100 MiB、included rows 10000。超出文件/字节限制返回 413，超出行限制返回稳定业务错误；excluded occurrence 仍计入已占用存储字节。
 
-幂等冲突语义：
+幂等真值规则（alias 表是唯一权威映射）：
 
-- 同一 `client_file_id` + 相同 SHA：返回已有 occurrence，`idempotent=true`。
-- 同一 `client_file_id` + 不同 SHA：返回 409 `IDEMPOTENCY_CONFLICT`，不得静默替换内容。
-- 不同 `client_file_id` + 相同 SHA：仍返回按 SHA 找到的已有 occurrence，不创建第二条。
-- 幂等重试保持第一次 `source_acquired_at`，不得按重试时间刷新；初次上传显式提供的值记为 `user_confirmed`，未提供时才使用服务器接受时间并记为 `server_default`。
+| Case | 当前 Job 状态 | 结果 |
+|---|---|---|
+| A + SHA-X，A/X 均不存在 | 无 alias A、无 X occurrence | 创建或复用 StoredImportFile X；创建 occurrence X；创建 alias A → X；返回 created |
+| A + SHA-X，alias A 已指向 X | alias A → occurrence X | 返回同一 occurrence，`idempotent=true`；不创建 alias/occurrence |
+| A + SHA-Y，alias A 已指向 X | alias A → occurrence X，Y≠X | 返回 409 `IDEMPOTENCY_CONFLICT`；不修改 alias/occurrence，不覆盖文件 |
+| B + SHA-X，B 不存在但 X occurrence 已存在 | alias A → occurrence X | 创建 alias B → 同一 occurrence X；返回 existing/idempotent SHA result；不创建第二 occurrence |
+| B + SHA-Y，alias B 已指向 X | alias B → occurrence X，Y≠X | 返回 409 `IDEMPOTENCY_CONFLICT`；不修改任何既有绑定 |
+
+并发最终状态必须由 PostgreSQL transaction、unique/composite FK 约束和 Job 范围锁共同保证，不使用全局锁：
+
+- `A+X / A+X`：一个 occurrence、一个 alias；一个创建，其余稳定幂等返回。
+- `A+X / B+X`：一个 occurrence、两个 aliases；两者都指向同一 occurrence。
+- `A+X / A+Y`：client A 最终只绑定一个 occurrence；其中一个成功，另一个稳定返回 409，不得出现 500、静默覆盖或分叉 alias。
+- IntegrityError 重试/重读只能用于约束冲突 reconciliation，数据库约束始终是最终事实源。
+
+幂等重试保持第一次 `source_acquired_at`，不得按重试时间刷新；初次上传显式提供的值记为 `user_confirmed`，未提供时才使用服务器接受时间并记为 `server_default`。
 
 ### 6.2 相同 SHA
 
@@ -833,7 +854,6 @@ Influencer / PlatformAccount
 - import_job_id
 - stored_file_id
 - position
-- client_file_id
 - original_filename
 - declared_mime
 - status
@@ -852,10 +872,25 @@ Influencer / PlatformAccount
 约束：
 
 - unique(import_job_id, position)
-- unique(import_job_id, client_file_id)
 - unique(import_job_id, stored_file_id)
 - unique(id, import_job_id)
 - position >= 1
+
+`import_job_file_client_ids`：
+
+- id
+- import_job_id
+- import_job_file_id
+- client_file_id
+- created_at / updated_at
+
+约束：
+
+- unique(import_job_id, client_file_id)
+- 复合 FK `(import_job_file_id, import_job_id)` → `import_job_files(id, import_job_id)`，由数据库保证 alias occurrence 属于同一 Job
+- index(import_job_file_id)
+- 一个 ImportJobFile 可有多个 aliases；不同 ImportJob 可重复使用相同 client ID
+- alias 表是 authoritative idempotency mapping；`import_job_files` 不保留 competing `client_file_id` 字段
 
 `import_rows`：
 
@@ -867,7 +902,7 @@ Influencer / PlatformAccount
 
 `0004` 的 NOT NULL Row FK 必须与单文件兼容桥同一个 Task 1 交付，不允许只部署 Migration：
 
-- 现有 `POST /import-jobs` 创建新 Legacy single-file Job 时同时创建 position=1、`client_file_id=legacy:{import_job_id}` 的 ImportJobFile。
+- 现有 `POST /import-jobs` 创建新 Legacy single-file Job 时同时创建 position=1 的 ImportJobFile，但不创建或伪造 client-ID alias。
 - 该兼容 occurrence 的 `source_acquired_at=NULL`、origin=`legacy_unknown`，因为旧 API 没有 Draft 期 acquisition 确认；它不得推进 `last_huitun_observed_at`。
 - 现有 Parse/Mapping/Preview 路径同步该 occurrence 的最小文件状态/Mapping，新 ImportRow 必须写入该 `import_job_file_id`。
 - Phase 1B 单文件全回归必须在 `0004` head 通过，然后 Task 1 才可独立部署/验收。
@@ -921,9 +956,9 @@ Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 creat
 
 ### 18.1 0004
 
-1. 新建 ImportJobFile 结构。
+1. 新建 ImportJobFile 与 `import_job_file_client_ids` alias 结构；alias 表使用 Job 内 client ID 唯一约束和 `(import_job_file_id, import_job_id)` 复合 FK，ImportJobFile 本身不保存 `client_file_id`。
 2. 预检并安全拒绝仍处于 uploaded/parsing/previewing/confirm_queued/importing 的活动 Legacy Job；部署前先让任务完成或人工处理。
-3. 每个历史 ImportJob 回填 position=1、`client_file_id=legacy:{import_job_id}` 的 occurrence；`source_acquired_at=NULL`、`source_acquired_at_origin=legacy_unknown`；completed/preview_ready/preview_stale 映射 ready，mapping_required 映射 mapping_required，failed 映射 failed，cancelled 映射 excluded。
+3. 每个历史 ImportJob 回填 position=1 的 occurrence，但不回填任何 alias；`source_acquired_at=NULL`、`source_acquired_at_origin=legacy_unknown`；completed/preview_ready/preview_stale 映射 ready，mapping_required 映射 mapping_required，failed 映射 failed，cancelled 映射 excluded。
 4. 每个历史 ImportRow 关联该 occurrence。
 5. 删除 `uq_import_rows_job_number(import_job_id, row_number)`，建立 `unique(import_job_file_id, row_number)`、复合 FK 与索引。
 6. 将 Row file FK 变为 non-null。
@@ -932,6 +967,7 @@ Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 creat
 9. 为历史 CollectionJob 回填空规则 `{"schema_version":1,"platforms":[],"source_tags_exact_any":[]}` 与 `screening_rules_revision=1`。
 10. 增加 Draft/File status、failed_stage 与 Batch Audit enum。
 11. 同版本交付 Legacy single-file 兼容桥；不得在旧 create/parse/preview 仍会生成无 file FK Row 时单独上线 Migration。
+12. `0004` 尚未发布，alias 补充直接完善同一 `0004_phase2_bulk_import`；不得创建 `0005`，`0005` 仍专用于 Refresh Queue。
 
 ### 18.2 0005
 
@@ -979,6 +1015,8 @@ Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 creat
 Rows 保留 Phase 1B 的 `offset/limit/action`，并 additive 增加 `category`；`action` 与 `category` 同传返回 422。Rows 使用第 9 节的 file-aware 稳定排序，不得静默混用两套分页或过滤协议。
 
 `PATCH source_acquired_at` 必须写专用 Audit。`replace` 是单文件 multipart；`POST /retry` 只执行第 5 节按 `failed_stage` 冻结的恢复转换。静态 `/bulk` 路由必须先于 `/{id}` 注册。
+
+`POST /import-jobs/{id}/files` 的 `client_file_id` 由 `import_job_file_client_ids` 持久化；同 Job 内 alias 永久绑定 occurrence，且 alias ownership 由复合 FK 保证。API 按第 6.1 节完整真值表处理：不同 client ID 命中相同 SHA 时必须新增 alias，后续该 alias 上传不同 SHA 必须稳定返回 409。Legacy endpoint 不创建伪造 alias。
 
 `0004`/Task 2 阶段的 `POST /import-jobs/bulk` 请求只接受 `collection_job_id`，对 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 部署后才 additive 接受可选 `refresh_queue_id`，并执行同 Department 与 Queue status 校验。
 
@@ -1151,6 +1189,11 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 | 文件 Schema 不同 | 每文件 Mapping；Blocking 未解决不得 Preview |
 | 文件损坏 | Job 保持 Draft；replace/exclude/retry |
 | 同 Batch 相同 SHA | 幂等返回已有 occurrence |
+| A+X 后 B+X | 返回同一 occurrence，并持久化 A/B 两个 aliases |
+| A+X 后 A+Y | 409 `IDEMPOTENCY_CONFLICT`，原 alias/occurrence 不变 |
+| 并发 A+X/A+X | 一个 occurrence、一个 alias；无 500 |
+| 并发 A+X/B+X | 一个 occurrence、两个 aliases；无 500 |
+| 并发 A+X/A+Y | 一个成功、一个 deterministic 409；无覆盖或分叉 alias |
 | 跨 Batch 相同 SHA | 允许、复用 blob、重新 Preview |
 | 达人跨文件重复 | 统一 Batch Context，单 owner |
 | 同 Email 不同达人 | 不 hard merge，只标 possible duplicate |
@@ -1249,8 +1292,8 @@ MVP 最终交付：
 | Task | Scope | Schema/API/Worker/Web 影响 | 关键测试与完成标准 | 依赖 | 风险 |
 |---|---|---|---|---|---|
 | 0 Design Freeze | 本文及根文档同步 | Docs only | 无冲突、唯一 Phase 2 UNKNOWN、独立 commit | 无 | 高 |
-| 1 Bulk Domain | ImportJobFile、Row FK、Draft/File status、Legacy single-file 兼容桥 | `0004`；无 Web | 历史 backfill、约束、fresh/repeat/check；`0004` head 的 Phase 1B 单文件回归 | 0 | 高 |
-| 2 Multi-file Upload | Draft、单文件上传、replace/exclude/retry | API/Service；文件 Worker 入口 | SHA/client id 幂等、断网、损坏、RBAC | 1 | 中 |
+| 1 Bulk Domain | ImportJobFile、client-ID alias、Row FK、Draft/File status、Legacy single-file 兼容桥 | `0004`；无 Web | 历史 backfill、alias 复合 FK/unique、fresh/repeat/check；Legacy 无伪造 alias；`0004` head 的 Phase 1B 单文件回归 | 0 | 高 |
+| 2 Multi-file Upload | Draft、单文件上传、replace/exclude/retry | API/Service；文件 Worker 入口 | 完整 SHA/client-ID 真值表、A+X/A+X、A+X/B+X、A+X/A+Y 并发、断网、损坏、RBAC | 1 | 中 |
 | 3 Parse/Normalize/Dedup | 每文件 Mapping、统一 Batch Context | Processor/Planner/Worker | 4×500、跨文件 hard duplicate、Email 边界 | 2 | 高 |
 | 4 Bulk Repository | 批量预取和写入 | Repository/Planner/Processor | SQL query-count、2k 性能 | 3 | 最高 |
 | 5 Unified Preview | Summary、分页、Change、Screening | API/Worker | 统计不变量、Stale、三态 Screening | 3–4 | 高 |
@@ -1277,8 +1320,8 @@ MVP 最终交付：
 | Service | Viewer Mutation/Export 拒绝、公司级读取、Operator 必选、CSRF、幂等、Stale |
 | API | Envelope、Request ID、401/403/409/413/422/503、OpenAPI |
 | Worker | route、ID-only payload、acks_late、retry、reconcile |
-| PostgreSQL | FK/unique/JSONB/locks/单事务 Confirm |
-| Concurrency | 双 Confirm、两个 Batch 同 identity、Queue 双建 |
+| PostgreSQL | alias 复合 FK/unique、Row FK/unique、JSONB/locks/单事务 Confirm |
+| Concurrency | A+X/A+X、A+X/B+X、A+X/A+Y、双 Confirm、两个 Batch 同 identity、Queue 双建 |
 | Multi-file | 4×500、CSV+XLSX、不同 Header、坏文件、跨文件重复 |
 | Duplicate | 同 SHA、同/跨文件 Row、同 Email、同昵称 |
 | Freshness | acquisition/import/source time、阈值、Legacy unknown |
@@ -1330,6 +1373,7 @@ Gate 数据：
 15. 2000 为发布 blocker；5000 capacity；10000 soak 非性能 blocker。
 16. Same-time Metrics 完全保持 Phase 1B。
 17. 粉丝人类化可随 Web Task 完成；视觉重构延期。
+18. client-ID alias 表是 Job 范围幂等的唯一权威事实源；一个 occurrence 可有多个 aliases，Legacy occurrence 不伪造 alias，直接完善尚未发布的 0004。
 
 ---
 

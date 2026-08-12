@@ -6,6 +6,7 @@ from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
     ImportJobFile,
+    ImportJobFileClientId,
     ImportRow,
     StoredImportFile,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "DepartmentPermission",
     "ImportJob",
     "ImportJobFile",
+    "ImportJobFileClientId",
     "ImportRow",
     "Influencer",
     "InfluencerContact",

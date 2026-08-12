@@ -4,6 +4,7 @@ from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
     ImportJobFile,
+    ImportJobFileClientId,
     ImportRow,
     StoredImportFile,
     default_screening_rules,
@@ -25,7 +26,6 @@ def test_import_job_file_occurrence_constraints_are_registered() -> None:
 
     unique_names = _constraint_names(ImportJobFile, UniqueConstraint)
     assert unique_names == {
-        "uq_import_job_file_client_id",
         "uq_import_job_file_job_pair",
         "uq_import_job_file_position",
         "uq_import_job_file_stored_file",
@@ -44,6 +44,42 @@ def test_import_job_file_occurrence_constraints_are_registered() -> None:
     assert ImportJobFile.import_job.property.back_populates == "files"
     assert ImportJobFile.stored_file.property.back_populates == "import_job_files"
     assert StoredImportFile.import_job_files.property.back_populates == "stored_file"
+
+
+def test_import_job_file_client_id_alias_constraints_are_authoritative() -> None:
+    configure_mappers()
+
+    alias_unique_constraints = [
+        constraint
+        for constraint in ImportJobFileClientId.__table__.constraints
+        if isinstance(constraint, UniqueConstraint)
+    ]
+    assert [constraint.name for constraint in alias_unique_constraints] == [
+        "uq_import_job_file_client_id_alias"
+    ]
+    assert tuple(column.name for column in alias_unique_constraints[0].columns) == (
+        "import_job_id",
+        "client_file_id",
+    )
+    alias_file_job_foreign_key = next(
+        constraint
+        for constraint in ImportJobFileClientId.__table__.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+        and constraint.name == "fk_import_job_file_client_id_file_job"
+    )
+    assert tuple(element.parent.name for element in alias_file_job_foreign_key.elements) == (
+        "import_job_file_id",
+        "import_job_id",
+    )
+    assert tuple(element.target_fullname for element in alias_file_job_foreign_key.elements) == (
+        "import_job_files.id",
+        "import_job_files.import_job_id",
+    )
+    assert ImportJobFileClientId.__table__.c.import_job_id.nullable is False
+    assert ImportJobFileClientId.__table__.c.import_job_file_id.nullable is False
+    assert ImportJobFileClientId.__table__.c.client_file_id.nullable is False
+    assert ImportJobFile.client_ids.property.back_populates == "import_job_file"
+    assert ImportJobFileClientId.import_job_file.property.back_populates == "client_ids"
 
 
 def test_import_row_locator_and_same_job_composite_fk_are_file_scoped() -> None:

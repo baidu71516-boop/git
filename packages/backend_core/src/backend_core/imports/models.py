@@ -212,7 +212,6 @@ class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "import_job_files"
     __table_args__ = (
         UniqueConstraint("import_job_id", "position", name="uq_import_job_file_position"),
-        UniqueConstraint("import_job_id", "client_file_id", name="uq_import_job_file_client_id"),
         UniqueConstraint("import_job_id", "stored_file_id", name="uq_import_job_file_stored_file"),
         UniqueConstraint("id", "import_job_id", name="uq_import_job_file_job_pair"),
         CheckConstraint("position >= 1", name="ck_import_job_file_position"),
@@ -235,7 +234,6 @@ class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ForeignKey("stored_import_files.id", ondelete="RESTRICT"), nullable=False
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
-    client_file_id: Mapped[str] = mapped_column(String(160), nullable=False)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     declared_mime: Mapped[str | None] = mapped_column(String(160), nullable=True)
     status: Mapped[ImportJobFileStatus] = mapped_column(
@@ -276,7 +274,36 @@ class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     stored_file: Mapped[StoredImportFile] = relationship(
         back_populates="import_job_files", lazy="raise"
     )
+    client_ids: Mapped[list["ImportJobFileClientId"]] = relationship(
+        back_populates="import_job_file", lazy="raise"
+    )
     rows: Mapped[list["ImportRow"]] = relationship(back_populates="import_job_file", lazy="raise")
+
+
+class ImportJobFileClientId(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "import_job_file_client_ids"
+    __table_args__ = (
+        UniqueConstraint(
+            "import_job_id",
+            "client_file_id",
+            name="uq_import_job_file_client_id_alias",
+        ),
+        ForeignKeyConstraint(
+            ["import_job_file_id", "import_job_id"],
+            ["import_job_files.id", "import_job_files.import_job_id"],
+            name="fk_import_job_file_client_id_file_job",
+            ondelete="RESTRICT",
+        ),
+        Index("ix_import_job_file_client_ids_file", "import_job_file_id"),
+    )
+
+    import_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    import_job_file_id: Mapped[UUID] = mapped_column(nullable=False)
+    client_file_id: Mapped[str] = mapped_column(String(160), nullable=False)
+
+    import_job_file: Mapped[ImportJobFile] = relationship(back_populates="client_ids", lazy="raise")
 
 
 class ImportRow(UUIDPrimaryKeyMixin, TimestampMixin, Base):

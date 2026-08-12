@@ -100,6 +100,11 @@ def _preflight_downgrade() -> None:
             "0004 downgrade blocked: non-default screening rules cannot be represented in 0003"
         )
 
+    if _count("SELECT count(*) FROM import_job_file_client_ids") != 0:
+        raise RuntimeError(
+            "0004 downgrade blocked: upload idempotency aliases cannot be represented in 0003"
+        )
+
     unsafe_jobs = _count(
         """
         SELECT count(*)
@@ -119,7 +124,6 @@ def _preflight_downgrade() -> None:
                 JOIN stored_import_files AS stored ON stored.id = file.stored_file_id
                 WHERE file.import_job_id = job.id
                   AND file.position = 1
-                  AND file.client_file_id = 'legacy:' || job.id::text
                   AND file.stored_file_id = job.stored_file_id
                   AND stored.sha256 = job.sha256
                   AND stored.size = job.file_size
@@ -239,7 +243,6 @@ def upgrade() -> None:
         sa.Column("import_job_id", sa.Uuid(), nullable=False),
         sa.Column("stored_file_id", sa.Uuid(), nullable=False),
         sa.Column("position", sa.Integer(), nullable=False),
-        sa.Column("client_file_id", sa.String(length=160), nullable=False),
         sa.Column("original_filename", sa.String(length=255), nullable=False),
         sa.Column("declared_mime", sa.String(length=160), nullable=True),
         sa.Column(
@@ -296,7 +299,6 @@ def upgrade() -> None:
         ),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("import_job_id", "position", name="uq_import_job_file_position"),
-        sa.UniqueConstraint("import_job_id", "client_file_id", name="uq_import_job_file_client_id"),
         sa.UniqueConstraint(
             "import_job_id", "stored_file_id", name="uq_import_job_file_stored_file"
         ),
@@ -306,7 +308,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO import_job_files (
-            id, import_job_id, stored_file_id, position, client_file_id,
+            id, import_job_id, stored_file_id, position,
             original_filename, declared_mime, status,
             source_acquired_at, source_acquired_at_origin,
             detected_fields, field_mapping, mapping_hash,
@@ -318,7 +320,6 @@ def upgrade() -> None:
             job.id,
             job.stored_file_id,
             1,
-            'legacy:' || job.id::text,
             job.original_filename,
             job.mime_type,
             (CASE
@@ -345,6 +346,44 @@ def upgrade() -> None:
             job.updated_at
         FROM import_jobs AS job
         """
+    )
+
+    op.create_table(
+        "import_job_file_client_ids",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("import_job_id", sa.Uuid(), nullable=False),
+        sa.Column("import_job_file_id", sa.Uuid(), nullable=False),
+        sa.Column("client_file_id", sa.String(length=160), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.ForeignKeyConstraint(["import_job_id"], ["import_jobs.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["import_job_file_id", "import_job_id"],
+            ["import_job_files.id", "import_job_files.import_job_id"],
+            name="fk_import_job_file_client_id_file_job",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "import_job_id",
+            "client_file_id",
+            name="uq_import_job_file_client_id_alias",
+        ),
+    )
+    op.create_index(
+        "ix_import_job_file_client_ids_file",
+        "import_job_file_client_ids",
+        ["import_job_file_id"],
     )
 
     if _count(
@@ -400,7 +439,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.execute(
-        "LOCK TABLE collection_jobs, import_jobs, import_job_files, import_rows "
+        "LOCK TABLE collection_jobs, import_jobs, import_job_files, "
+        "import_job_file_client_ids, import_rows "
         "IN ACCESS EXCLUSIVE MODE"
     )
     _preflight_downgrade()
@@ -413,6 +453,11 @@ def downgrade() -> None:
     )
     op.drop_column("import_rows", "import_job_file_id")
 
+    op.drop_index(
+        "ix_import_job_file_client_ids_file",
+        table_name="import_job_file_client_ids",
+    )
+    op.drop_table("import_job_file_client_ids")
     op.drop_table("import_job_files")
 
     op.drop_constraint(

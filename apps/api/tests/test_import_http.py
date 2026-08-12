@@ -191,7 +191,6 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             )
                             assert occurrence is not None
                             assert occurrence.position == 1
-                            assert occurrence.client_file_id == f"legacy:{job_id}"
                             assert occurrence.stored_file_id == job.stored_file_id
                             assert occurrence.status is ImportJobFileStatus.UPLOADED
                             assert occurrence.source_acquired_at is None

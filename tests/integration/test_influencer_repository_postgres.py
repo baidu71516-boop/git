@@ -177,7 +177,6 @@ async def _seed_provenance(session: AsyncSession) -> _Provenance:
         import_job_id=job.id,
         stored_file_id=stored_file.id,
         position=1,
-        client_file_id=f"legacy:{job.id}",
         original_filename="repository-fixture.csv",
         declared_mime="text/csv",
         status=ImportJobFileStatus.READY,

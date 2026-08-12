@@ -607,6 +607,7 @@ def test_fresh_upgrade_repeat_and_alembic_check(
         _assert_postgresql_16(connection)
         assert _revision(connection) == "0004_phase2_bulk_import"
         assert inspect(connection).has_table("import_job_files")
+        assert inspect(connection).has_table("import_job_file_client_ids")
 
 
 def test_0003_realistic_backfill_preserves_lineage_and_metadata(
@@ -630,7 +631,7 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
         rows = connection.execute(
             text(
                 """
-                SELECT job.id, file.position, file.client_file_id, file.status::text,
+                SELECT job.id, file.position, file.status::text,
                        file.source_acquired_at, file.source_acquired_at_origin::text,
                        file.detected_fields, file.field_mapping, file.mapping_hash,
                        file.raw_rows, file.parse_task_id
@@ -651,15 +652,28 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
             "failed",
             "excluded",
         ]
-        for job_id, occurrence in zip(seeded["job_ids"], occurrences, strict=True):
+        for occurrence in occurrences:
             assert occurrence["position"] == 1
-            assert occurrence["client_file_id"] == f"legacy:{job_id}"
             assert occurrence["source_acquired_at"] is None
             assert occurrence["source_acquired_at_origin"] == "legacy_unknown"
             assert occurrence["detected_fields"] == ["达人名称", "小红书号"]
             assert occurrence["field_mapping"] == {"达人名称": "account_name"}
             assert occurrence["mapping_hash"] == "b" * 64
             assert occurrence["parse_task_id"].startswith("legacy-parse-")
+
+        assert (
+            connection.scalar(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM import_job_file_client_ids
+                    WHERE import_job_id = ANY(CAST(:job_ids AS uuid[]))
+                    """
+                ),
+                {"job_ids": seeded["job_ids"]},
+            )
+            == 0
+        )
 
         row_lineage = connection.execute(
             text(
@@ -692,6 +706,10 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
         import_job_columns = {
             column["name"]: column for column in inspect(connection).get_columns("import_jobs")
         }
+        import_job_file_columns = {
+            column["name"] for column in inspect(connection).get_columns("import_job_files")
+        }
+        assert "client_file_id" not in import_job_file_columns
         for column_name in (
             "stored_file_id",
             "original_filename",
@@ -763,6 +781,7 @@ def test_safe_legacy_downgrade_and_reupgrade_preserve_0003_data(
     with migration_database.engine.connect() as connection:
         assert _revision(connection) == "0003_phase1b"
         assert not inspect(connection).has_table("import_job_files")
+        assert not inspect(connection).has_table("import_job_file_client_ids")
         assert "import_job_file_id" not in {
             column["name"] for column in inspect(connection).get_columns("import_rows")
         }
@@ -792,10 +811,11 @@ def test_safe_legacy_downgrade_and_reupgrade_preserve_0003_data(
             )
             == 1
         )
+        assert connection.scalar(text("SELECT count(*) FROM import_job_file_client_ids")) == 0
         _assert_confirmed_lineage(connection, seeded)
 
 
-@pytest.mark.parametrize("unsafe_change", ["multi_file", "nonlegacy_single", "screening"])
+@pytest.mark.parametrize("unsafe_change", ["multi_file", "nonlegacy_single", "alias", "screening"])
 def test_downgrade_rejects_non_projectable_phase2_data(
     migration_database: MigrationDatabase,
     unsafe_change: str,
@@ -812,11 +832,11 @@ def test_downgrade_rejects_non_projectable_phase2_data(
                 text(
                     """
                     INSERT INTO import_job_files (
-                        id, import_job_id, stored_file_id, position, client_file_id,
+                        id, import_job_id, stored_file_id, position,
                         original_filename, declared_mime, status,
                         source_acquired_at, source_acquired_at_origin
                     ) VALUES (
-                        :id, :job_id, :stored_file_id, 2, 'bulk-file-2',
+                        :id, :job_id, :stored_file_id, 2,
                         'bulk-file-2.csv', 'text/csv', 'ready',
                         :source_acquired_at, 'server_default'
                     )
@@ -834,8 +854,7 @@ def test_downgrade_rejects_non_projectable_phase2_data(
                 text(
                     """
                     UPDATE import_job_files
-                    SET client_file_id = 'bulk-single',
-                        source_acquired_at = :source_acquired_at,
+                    SET source_acquired_at = :source_acquired_at,
                         source_acquired_at_origin = 'server_default'
                     WHERE import_job_id = :job_id
                     """
@@ -844,6 +863,24 @@ def test_downgrade_rejects_non_projectable_phase2_data(
                     "job_id": seeded["job_ids"][0],
                     "source_acquired_at": datetime.now(UTC),
                 },
+            )
+        elif unsafe_change == "alias":
+            file_id = connection.scalar(
+                text("SELECT id FROM import_job_files WHERE import_job_id = :job_id"),
+                {"job_id": seeded["job_ids"][0]},
+            )
+            assert file_id is not None
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO import_job_file_client_ids (
+                        id, import_job_id, import_job_file_id, client_file_id
+                    ) VALUES (
+                        :id, :job_id, :file_id, 'bulk-single'
+                    )
+                    """
+                ),
+                {"id": uuid4(), "job_id": seeded["job_ids"][0], "file_id": file_id},
             )
         else:
             connection.execute(
@@ -910,12 +947,12 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
 
         insert_file = """
             INSERT INTO import_job_files (
-                id, import_job_id, stored_file_id, position, client_file_id,
+                id, import_job_id, stored_file_id, position,
                 original_filename, status, source_acquired_at,
                 source_acquired_at_origin, raw_rows, warning_rows,
                 error_rows, parse_attempts
             ) VALUES (
-                :id, :job_id, :stored_file_id, :position, :client_file_id,
+                :id, :job_id, :stored_file_id, :position,
                 'constraint.csv', CAST(:status AS import_job_file_status),
                 :source_acquired_at,
                 CAST(:origin AS source_acquired_at_origin),
@@ -927,7 +964,6 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
             "job_id": job_one,
             "stored_file_id": second_stored_file,
             "position": 2,
-            "client_file_id": "file-2",
             "status": "ready",
             "source_acquired_at": datetime.now(UTC),
             "origin": "server_default",
@@ -938,15 +974,6 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
             connection,
             insert_file,
             {**base_file_parameters, "id": uuid4(), "position": 1},
-        )
-        _assert_database_rejects(
-            connection,
-            insert_file,
-            {
-                **base_file_parameters,
-                "id": uuid4(),
-                "client_file_id": f"legacy:{job_one}",
-            },
         )
         _assert_database_rejects(
             connection,
@@ -1017,6 +1044,72 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
             text(insert_file),
             {**base_file_parameters, "id": second_file_id},
         )
+        insert_alias = """
+            INSERT INTO import_job_file_client_ids (
+                id, import_job_id, import_job_file_id, client_file_id
+            ) VALUES (
+                :id, :job_id, :file_id, :client_file_id
+            )
+        """
+        connection.execute(
+            text(insert_alias),
+            {
+                "id": uuid4(),
+                "job_id": job_one,
+                "file_id": file_one,
+                "client_file_id": "shared-client-id",
+            },
+        )
+        # The same client id is valid in a different ImportJob scope.
+        connection.execute(
+            text(insert_alias),
+            {
+                "id": uuid4(),
+                "job_id": job_two,
+                "file_id": file_two,
+                "client_file_id": "shared-client-id",
+            },
+        )
+        # One occurrence can retain every distinct client-side alias that resolved to it.
+        connection.execute(
+            text(insert_alias),
+            {
+                "id": uuid4(),
+                "job_id": job_one,
+                "file_id": file_one,
+                "client_file_id": "second-alias-same-file",
+            },
+        )
+        _assert_database_rejects(
+            connection,
+            insert_alias,
+            {
+                "id": uuid4(),
+                "job_id": job_one,
+                "file_id": file_one,
+                "client_file_id": "shared-client-id",
+            },
+        )
+        _assert_database_rejects(
+            connection,
+            insert_alias,
+            {
+                "id": uuid4(),
+                "job_id": job_one,
+                "file_id": second_file_id,
+                "client_file_id": "shared-client-id",
+            },
+        )
+        _assert_database_rejects(
+            connection,
+            insert_alias,
+            {
+                "id": uuid4(),
+                "job_id": job_one,
+                "file_id": file_two,
+                "client_file_id": "mismatched-file-job",
+            },
+        )
         insert_row = """
             INSERT INTO import_rows (
                 id, import_job_id, import_job_file_id, row_number, raw_data,
@@ -1068,16 +1161,21 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
                     SELECT constraint_name
                     FROM information_schema.table_constraints
                     WHERE table_schema = current_schema()
-                      AND table_name IN ('import_job_files', 'import_rows')
+                      AND table_name IN (
+                          'import_job_files',
+                          'import_job_file_client_ids',
+                          'import_rows'
+                      )
                     """
                 )
             )
         )
         assert {
             "uq_import_job_file_position",
-            "uq_import_job_file_client_id",
             "uq_import_job_file_stored_file",
             "uq_import_job_file_job_pair",
+            "uq_import_job_file_client_id_alias",
+            "fk_import_job_file_client_id_file_job",
             "uq_import_rows_file_number",
             "fk_import_row_file_job",
         } <= constraint_names

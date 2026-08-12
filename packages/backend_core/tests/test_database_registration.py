@@ -41,6 +41,7 @@ configure_mappers()
 expected = {{
     "audit_logs",
     "departments",
+    "import_job_file_client_ids",
     "import_job_files",
     "import_jobs",
     "import_rows",

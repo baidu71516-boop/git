@@ -118,7 +118,7 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/retry`
 - `POST /import-jobs/{id}/cancel`
 
-`0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`，Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
+`0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
 `0004`/Task 2 阶段的 `POST /import-jobs/bulk` JSON 只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 部署后才 additive 接受可选 `refresh_queue_id`；Queue 必须属于目标 Department 且状态为 open/exported，completed/cancelled 返回 409。一个 Job 最多关联一个 Queue，但一个未完成 Queue 可以接收多个回流 Job。
 
@@ -132,7 +132,21 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 
 同一 Job 内相同 SHA 不创建第二个 occurrence，返回现有 occurrence 和幂等标识。不同 Job 允许相同 SHA、允许复用 Storage Blob，但必须重新 Parse/Preview。
 
-同一 `client_file_id` + 不同 SHA 返回 409 `IDEMPOTENCY_CONFLICT`；任何幂等重试都不得刷新第一次记录的 `source_acquired_at`。人工修改 acquisition time 只能在 Draft/首次 Preview 前完成，并产生专用 Audit。
+`import_job_file_client_ids` 是 `(import_job_id, client_file_id) → import_job_file_id` 的唯一权威持久化映射。一个 occurrence 可有多个 aliases；同 Job 内 client ID 永久绑定，同 client ID 可跨 Job 使用。alias 使用 Job 内 unique 和 `(import_job_file_id, import_job_id)` 复合 FK；Redis、Audit JSON 和内存状态均不是幂等事实源。
+
+上传幂等真值：
+
+| 请求/已有状态 | API 结果 |
+|---|---|
+| A+SHA-X；A/X 均不存在 | 创建或复用 StoredImportFile X，创建 occurrence X 和 alias A→X；返回 created |
+| A+SHA-X；alias A→X | 返回 occurrence X，`idempotent=true`，不创建新记录 |
+| A+SHA-Y；alias A→X | 409 `IDEMPOTENCY_CONFLICT`；不修改绑定、不覆盖文件 |
+| B+SHA-X；X occurrence 已存在、B 未出现 | 新增 alias B→X，返回同一 occurrence/idempotent SHA result，不创建第二 occurrence |
+| B+SHA-Y；alias B→X | 409 `IDEMPOTENCY_CONFLICT`；不修改既有记录 |
+
+并发 A+X/A+X 必须收敛为一个 occurrence/一个 alias；A+X/B+X 必须收敛为一个 occurrence/两个 aliases；A+X/A+Y 必须只有一个 A binding，其中一个成功、另一个 deterministic 409。不得出现 500、duplicate occurrence、分叉 alias 或 silent overwrite；实现使用 transaction、PostgreSQL constraints 与 Job 范围锁，不使用全局锁。
+
+任何幂等重试都不得刷新第一次记录的 `source_acquired_at`。人工修改 acquisition time 只能在 Draft/首次 Preview 前完成，并产生专用 Audit。
 
 初次上传显式提供合法 `source_acquired_at` 时 origin 为 `user_confirmed`；缺省值时 origin 为 `server_default`。跨历史 Job 复用 SHA 且未显式提供 acquisition time 时，文件响应标记 acquisition confirmation blocker；用户必须显式 PATCH 确认/修正时间后 origin 变为 `user_confirmed`，即使时间值不变也要留下 Audit，之后才可 Preview。
 

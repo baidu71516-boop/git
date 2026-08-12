@@ -107,7 +107,6 @@ class ImportRepository:
             job.stored_file_id is None
             or occurrence.stored_file_id != job.stored_file_id
             or occurrence.position != 1
-            or occurrence.client_file_id != f"legacy:{job.id}"
             or occurrence.source_acquired_at is not None
             or occurrence.source_acquired_at_origin is not SourceAcquiredAtOrigin.LEGACY_UNKNOWN
         ):

@@ -250,7 +250,6 @@ class ImportService:
                     import_job_id=import_job.id,
                     stored_file_id=stored_file.id,
                     position=1,
-                    client_file_id=f"legacy:{import_job.id}",
                     original_filename=import_job.original_filename or "upload",
                     declared_mime=import_job.mime_type,
                     status=ImportJobFileStatus.UPLOADED,

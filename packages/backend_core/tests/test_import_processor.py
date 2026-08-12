@@ -170,7 +170,6 @@ async def seed_import_job(
             import_job_id=job.id,
             stored_file_id=stored_file.id,
             position=1,
-            client_file_id=f"legacy:{job.id}",
             original_filename=filename,
             declared_mime=mime_type,
             status=ImportJobFileStatus.UPLOADED,
@@ -247,7 +246,6 @@ def test_preview_then_confirm_is_atomic_audited_and_idempotent() -> None:
             )
             assert occurrence is not None
             assert occurrence.position == 1
-            assert occurrence.client_file_id == f"legacy:{job_id}"
             assert occurrence.source_acquired_at is None
             assert occurrence.source_acquired_at_origin is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
             assert occurrence.status is ImportJobFileStatus.READY

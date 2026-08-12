@@ -159,7 +159,6 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                         import_job_id=job.id,
                         stored_file_id=stored_file.id,
                         position=1,
-                        client_file_id=f"legacy:{job.id}",
                         original_filename=SAMPLE_PATH.name,
                         declared_mime="text/csv",
                         status=ImportJobFileStatus.UPLOADED,

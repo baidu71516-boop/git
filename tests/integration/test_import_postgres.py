@@ -202,7 +202,6 @@ async def _seed_preview_ready_jobs(
                 import_job_id=job.id,
                 stored_file_id=stored_file.id,
                 position=1,
-                client_file_id=f"legacy:{job.id}",
                 original_filename=job.original_filename or "sanitized-concurrency.csv",
                 declared_mime=job.mime_type,
                 status=ImportJobFileStatus.UPLOADED,
