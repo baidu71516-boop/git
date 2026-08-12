@@ -608,6 +608,19 @@ def test_fresh_upgrade_repeat_and_alembic_check(
         assert _revision(connection) == "0004_phase2_bulk_import"
         assert inspect(connection).has_table("import_job_files")
         assert inspect(connection).has_table("import_job_file_client_ids")
+        import_job_file_columns = {
+            column["name"]: column for column in inspect(connection).get_columns("import_job_files")
+        }
+        confirmation_required = import_job_file_columns["source_acquired_at_confirmation_required"]
+        assert confirmation_required["nullable"] is False
+        assert str(confirmation_required["default"]).lower() in {
+            "false",
+            "false::boolean",
+        }
+        assert "ck_import_job_file_acquisition_confirmation" in {
+            constraint["name"]
+            for constraint in inspect(connection).get_check_constraints("import_job_files")
+        }
 
 
 def test_0003_realistic_backfill_preserves_lineage_and_metadata(
@@ -633,6 +646,7 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
                 """
                 SELECT job.id, file.position, file.status::text,
                        file.source_acquired_at, file.source_acquired_at_origin::text,
+                       file.source_acquired_at_confirmation_required,
                        file.detected_fields, file.field_mapping, file.mapping_hash,
                        file.raw_rows, file.parse_task_id
                 FROM import_jobs AS job
@@ -656,6 +670,7 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
             assert occurrence["position"] == 1
             assert occurrence["source_acquired_at"] is None
             assert occurrence["source_acquired_at_origin"] == "legacy_unknown"
+            assert occurrence["source_acquired_at_confirmation_required"] is False
             assert occurrence["detected_fields"] == ["达人名称", "小红书号"]
             assert occurrence["field_mapping"] == {"达人名称": "account_name"}
             assert occurrence["mapping_hash"] == "b" * 64
@@ -812,7 +827,172 @@ def test_safe_legacy_downgrade_and_reupgrade_preserve_0003_data(
             == 1
         )
         assert connection.scalar(text("SELECT count(*) FROM import_job_file_client_ids")) == 0
+        assert (
+            connection.scalar(
+                text(
+                    """
+                    SELECT source_acquired_at_confirmation_required
+                    FROM import_job_files
+                    WHERE import_job_id = :job_id
+                    """
+                ),
+                {"job_id": seeded["job_ids"][0]},
+            )
+            is False
+        )
         _assert_confirmed_lineage(connection, seeded)
+
+
+def test_acquisition_confirmation_states_and_check_constraint(
+    migration_database: MigrationDatabase,
+) -> None:
+    migration_database.upgrade("0003_phase1b")
+    with migration_database.engine.begin() as connection:
+        seeded = _seed_legacy_graph(connection)
+    migration_database.upgrade("0004_phase2_bulk_import")
+
+    with migration_database.engine.begin() as connection:
+        job_id = seeded["job_ids"][0]
+        observed_at = datetime.now(UTC)
+        insert_file_with_default = """
+            INSERT INTO import_job_files (
+                id, import_job_id, stored_file_id, position,
+                original_filename, status, source_acquired_at,
+                source_acquired_at_origin
+            ) VALUES (
+                :id, :job_id, :stored_file_id, :position,
+                :original_filename, 'uploaded', :source_acquired_at,
+                CAST(:origin AS source_acquired_at_origin)
+            )
+        """
+        insert_file_with_confirmation = """
+            INSERT INTO import_job_files (
+                id, import_job_id, stored_file_id, position,
+                original_filename, status, source_acquired_at,
+                source_acquired_at_origin,
+                source_acquired_at_confirmation_required
+            ) VALUES (
+                :id, :job_id, :stored_file_id, :position,
+                :original_filename, 'uploaded', :source_acquired_at,
+                CAST(:origin AS source_acquired_at_origin),
+                :confirmation_required
+            )
+        """
+
+        default_file_id = uuid4()
+        connection.execute(
+            text(insert_file_with_default),
+            {
+                "id": default_file_id,
+                "job_id": job_id,
+                "stored_file_id": _insert_stored_file(connection),
+                "position": 2,
+                "original_filename": "server-default.csv",
+                "source_acquired_at": observed_at,
+                "origin": "server_default",
+            },
+        )
+
+        confirmation_file_id = uuid4()
+        connection.execute(
+            text(insert_file_with_confirmation),
+            {
+                "id": confirmation_file_id,
+                "job_id": job_id,
+                "stored_file_id": _insert_stored_file(connection),
+                "position": 3,
+                "original_filename": "historical-sha.csv",
+                "source_acquired_at": observed_at,
+                "origin": "server_default",
+                "confirmation_required": True,
+            },
+        )
+
+        user_confirmed_file_id = uuid4()
+        connection.execute(
+            text(insert_file_with_confirmation),
+            {
+                "id": user_confirmed_file_id,
+                "job_id": job_id,
+                "stored_file_id": _insert_stored_file(connection),
+                "position": 4,
+                "original_filename": "user-confirmed.csv",
+                "source_acquired_at": observed_at,
+                "origin": "user_confirmed",
+                "confirmation_required": False,
+            },
+        )
+
+        legacy_file_id = connection.scalar(
+            text(
+                """
+                SELECT id FROM import_job_files
+                WHERE import_job_id = :job_id AND position = 1
+                """
+            ),
+            {"job_id": job_id},
+        )
+        states = connection.execute(
+            text(
+                """
+                SELECT id, source_acquired_at, source_acquired_at_origin::text,
+                       source_acquired_at_confirmation_required
+                FROM import_job_files
+                WHERE id = ANY(CAST(:file_ids AS uuid[]))
+                """
+            ),
+            {
+                "file_ids": [
+                    legacy_file_id,
+                    default_file_id,
+                    confirmation_file_id,
+                    user_confirmed_file_id,
+                ]
+            },
+        ).mappings()
+        states_by_id = {state["id"]: state for state in states}
+
+        assert states_by_id[legacy_file_id] == {
+            "id": legacy_file_id,
+            "source_acquired_at": None,
+            "source_acquired_at_origin": "legacy_unknown",
+            "source_acquired_at_confirmation_required": False,
+        }
+        assert states_by_id[default_file_id]["source_acquired_at"] == observed_at
+        assert states_by_id[default_file_id]["source_acquired_at_origin"] == "server_default"
+        assert states_by_id[default_file_id]["source_acquired_at_confirmation_required"] is False
+        assert states_by_id[confirmation_file_id]["source_acquired_at"] == observed_at
+        assert states_by_id[confirmation_file_id]["source_acquired_at_origin"] == "server_default"
+        assert (
+            states_by_id[confirmation_file_id]["source_acquired_at_confirmation_required"] is True
+        )
+        assert states_by_id[user_confirmed_file_id]["source_acquired_at"] == observed_at
+        assert states_by_id[user_confirmed_file_id]["source_acquired_at_origin"] == "user_confirmed"
+        assert (
+            states_by_id[user_confirmed_file_id]["source_acquired_at_confirmation_required"]
+            is False
+        )
+
+        invalid_states = (
+            (None, "server_default"),
+            (observed_at, "user_confirmed"),
+            (None, "legacy_unknown"),
+        )
+        for offset, (source_acquired_at, origin) in enumerate(invalid_states, start=5):
+            _assert_database_rejects(
+                connection,
+                insert_file_with_confirmation,
+                {
+                    "id": uuid4(),
+                    "job_id": job_id,
+                    "stored_file_id": _insert_stored_file(connection),
+                    "position": offset,
+                    "original_filename": f"invalid-{offset}.csv",
+                    "source_acquired_at": source_acquired_at,
+                    "origin": origin,
+                    "confirmation_required": True,
+                },
+            )
 
 
 @pytest.mark.parametrize("unsafe_change", ["multi_file", "nonlegacy_single", "alias", "screening"])

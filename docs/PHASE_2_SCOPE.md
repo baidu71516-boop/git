@@ -204,7 +204,7 @@ Bulk Job 系统失败必须保存 `failed_stage=preview|confirm`。自动重试�
 - `failed`
 - `excluded`
 
-Blocking file 精确定义为非 excluded 的 `uploaded`、`parsing`、`mapping_required`、`failed`，以及“跨历史 Job 复用 SHA 但 acquisition time 尚未经用户显式确认”的文件；只有所有 included files 都为 `ready` 且没有 acquisition confirmation blocker 才可请求统一 Preview，否则返回 409。
+Blocking file 精确定义为非 excluded 的 `uploaded`、`parsing`、`mapping_required`、`failed`，以及 `source_acquired_at_confirmation_required=true` 的文件；只有所有 included files 都为 `ready` 且没有 acquisition confirmation blocker 才可请求统一 Preview，否则返回 409。
 
 Batch 必须至少包含一个 included + ready file；全部 excluded 的空 Batch 也必须返回 409。
 
@@ -269,7 +269,7 @@ Web 可以一次拖入多个文件，但 API 每个请求只流式上传一个�
 - 可以复用 `StoredImportFile` blob。
 - 必须重新 Parse、Normalize、Match 和 Preview。
 - 禁止复用历史 Preview 或历史 Plan Hash。
-- 若 SHA 在更早 Job 已存在，初次上传未显式提供 acquisition time 时，新 occurrence 先使用服务器接受时间且 origin 为 `server_default`，并作为 blocking file；必须在 Preview 前通过显式 PATCH 确认/修正时间（即使数值不变）使 origin 变为 `user_confirmed`。初次上传已显式提供合法 acquisition time 时直接记为 `user_confirmed`。两种确认路径都写 Audit，避免旧 Blob 静默冒充新观察。
+- 若 SHA 在更早 Job 已存在，初次上传未显式提供 acquisition time 时，新 occurrence 使用服务器接受时间、origin=`server_default`、`source_acquired_at_confirmation_required=true`，并作为 blocking file；必须在 Preview 前通过显式 PATCH 确认/修正时间（即使数值不变），使 origin 变为 `user_confirmed` 且 confirmation required 变为 false。初次上传已显式提供合法 acquisition time 时直接记为 origin=`user_confirmed`、confirmation required=false；未复用历史 SHA 的普通 server-default 上传也为 false。该 occurrence-level Boolean 是待确认状态的唯一权威持久化事实源，禁止通过动态查询其他 Job、`error_code`、Redis、Audit JSON 或内存状态推导/保存该事实。两种确认路径都写 Audit，但 Audit 不是事实源。
 
 ### 6.3 损坏、替换、排除和重试
 
@@ -314,7 +314,7 @@ Preview 不写 Influencer、PlatformAccount、Contact、Metrics 或 Snapshot 业
 
 - import_job_id / preview_revision
 - ordered `file_id + position + StoredImportFile.sha256`
-- 每文件 `mapping_hash + source_acquired_at + source_acquired_at_origin + status/included`
+- 每文件 `mapping_hash + source_acquired_at + source_acquired_at_origin + source_acquired_at_confirmation_required + status/included`
 - originating collection_job_id + screening rule_hash
 - optional refresh_queue_id（只在 `0005` 部署后进入 manifest；`0004`/Task 2 阶段不接受该字段）
 
@@ -529,7 +529,7 @@ PlatformAccount + Source
 - Action 只包括 `create`、`update`、`no_change`。
 - `skip`（包括 Batch Duplicate）、`error`、`manual_review` 以及 cancelled/failed Job 均不形成 observation。
 
-`last_huitun_imported_at` 是上述成功行集合中 `committed_at` 的最大值；它即使存在也不能填充 observed time。`last_huitun_observed_at` 是关联 included file 的非空 `source_acquired_at` 最大值。跨历史 Job 复用 SHA 时只有 `source_acquired_at_origin=user_confirmed` 才可推进 observed time；Legacy 回填 occurrence 的 acquisition time 为 NULL，因此只能得到 imported time。
+`last_huitun_imported_at` 是上述成功行集合中 `committed_at` 的最大值；它即使存在也不能填充 observed time。`last_huitun_observed_at` 只能取关联 included file 中 `source_acquired_at` 非空且 `source_acquired_at_confirmation_required=false` 的最大值。confirmation required=true 不得推进 observed time；Legacy 回填 occurrence 的 acquisition time 为 NULL，因此只能得到 imported time。
 
 ### 11.1 source_acquired_at
 
@@ -765,8 +765,8 @@ queue_item.baseline_last_observed_at
 - 有有效业务变化的成功 owner row：acquisition 非空且 baseline 为空（首次可靠 observation）或严格晚于 baseline 时进入 `fulfilled_changed`；小于或等于非空 baseline 时进入 `stale_return`。
 - `baseline_last_observed_at IS NULL` 时无法证明“严格晚于”，NO_CHANGE 不自动 fulfill，Item 进入 `unresolved`。
 - acquisition time 为 NULL 时进入 `unresolved`；小于或等于非空 baseline 时进入 `stale_return`。
-- 跨历史 Job 复用 SHA 且 acquisition origin 不是 `user_confirmed` 时视为旧 Blob replay，进入 `unresolved`，不得自动 fulfill。
-- acquisition 严格较新，且历史 SHA 已按 Preview 前规则显式确认（或 SHA 从未复用）的 NO_CHANGE 才进入 `fulfilled_no_change`。
+- `source_acquired_at_confirmation_required=true` 时视为尚未确认的旧 Blob replay 风险，进入 `unresolved`，不得自动 fulfill。
+- acquisition 严格较新且 `source_acquired_at_confirmation_required=false` 的 NO_CHANGE 才进入 `fulfilled_no_change`。
 - ERROR、SKIP、MANUAL_REVIEW 不 fulfill，记录 Last Return 并进入/保持 `unresolved`。
 
 上述 acquisition/SHA 规则只判断 Refresh observation，不参与 Phase 1B SourceState/CurrentMetrics 的 Newer/Same/Older Merge。
@@ -859,6 +859,7 @@ Influencer / PlatformAccount
 - status
 - source_acquired_at nullable
 - source_acquired_at_origin（server_default/user_confirmed/legacy_unknown）
+- source_acquired_at_confirmation_required BOOLEAN NOT NULL DEFAULT false
 - detected_fields JSONB
 - field_mapping JSONB
 - mapping_hash
@@ -875,6 +876,8 @@ Influencer / PlatformAccount
 - unique(import_job_id, stored_file_id)
 - unique(id, import_job_id)
 - position >= 1
+- `source_acquired_at_confirmation_required=true` 时，`source_acquired_at` 必须非空且 origin 必须为 `server_default`
+- 为 false 时不增加额外组合限制：仍允许冻结的 server_default、user_confirmed 和 legacy_unknown 时间语义
 
 `import_job_file_client_ids`：
 
@@ -903,7 +906,7 @@ Influencer / PlatformAccount
 `0004` 的 NOT NULL Row FK 必须与单文件兼容桥同一个 Task 1 交付，不允许只部署 Migration：
 
 - 现有 `POST /import-jobs` 创建新 Legacy single-file Job 时同时创建 position=1 的 ImportJobFile，但不创建或伪造 client-ID alias。
-- 该兼容 occurrence 的 `source_acquired_at=NULL`、origin=`legacy_unknown`，因为旧 API 没有 Draft 期 acquisition 确认；它不得推进 `last_huitun_observed_at`。
+- 该兼容 occurrence 的 `source_acquired_at=NULL`、origin=`legacy_unknown`、`source_acquired_at_confirmation_required=false`，因为旧 API 没有 Draft 期 acquisition 确认；它不得推进 `last_huitun_observed_at`。
 - 现有 Parse/Mapping/Preview 路径同步该 occurrence 的最小文件状态/Mapping，新 ImportRow 必须写入该 `import_job_file_id`。
 - Phase 1B 单文件全回归必须在 `0004` head 通过，然后 Task 1 才可独立部署/验收。
 
@@ -920,7 +923,7 @@ Influencer / PlatformAccount
 - 新增 `screening_rules JSONB`，其内 `schema_version=1`
 - 新增 `screening_rules_revision INT NOT NULL DEFAULT 1`，并 CHECK `>=1`
 
-Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 created_at、mtime 或 filename 回填。
+Legacy `source_acquired_at` 必须保持 NULL 且 confirmation required=false，不得在 Migration 中用 created_at、mtime 或 filename 回填。
 
 ### 17.2 0005 所需结构
 
@@ -958,7 +961,7 @@ Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 creat
 
 1. 新建 ImportJobFile 与 `import_job_file_client_ids` alias 结构；alias 表使用 Job 内 client ID 唯一约束和 `(import_job_file_id, import_job_id)` 复合 FK，ImportJobFile 本身不保存 `client_file_id`。
 2. 预检并安全拒绝仍处于 uploaded/parsing/previewing/confirm_queued/importing 的活动 Legacy Job；部署前先让任务完成或人工处理。
-3. 每个历史 ImportJob 回填 position=1 的 occurrence，但不回填任何 alias；`source_acquired_at=NULL`、`source_acquired_at_origin=legacy_unknown`；completed/preview_ready/preview_stale 映射 ready，mapping_required 映射 mapping_required，failed 映射 failed，cancelled 映射 excluded。
+3. 每个历史 ImportJob 回填 position=1 的 occurrence，但不回填任何 alias；`source_acquired_at=NULL`、`source_acquired_at_origin=legacy_unknown`、`source_acquired_at_confirmation_required=false`；completed/preview_ready/preview_stale 映射 ready，mapping_required 映射 mapping_required，failed 映射 failed，cancelled 映射 excluded。
 4. 每个历史 ImportRow 关联该 occurrence。
 5. 删除 `uq_import_rows_job_number(import_job_id, row_number)`，建立 `unique(import_job_file_id, row_number)`、复合 FK 与索引。
 6. 将 Row file FK 变为 non-null。
@@ -967,7 +970,7 @@ Legacy `source_acquired_at` 必须保持 NULL，不得在 Migration 中用 creat
 9. 为历史 CollectionJob 回填空规则 `{"schema_version":1,"platforms":[],"source_tags_exact_any":[]}` 与 `screening_rules_revision=1`。
 10. 增加 Draft/File status、failed_stage 与 Batch Audit enum。
 11. 同版本交付 Legacy single-file 兼容桥；不得在旧 create/parse/preview 仍会生成无 file FK Row 时单独上线 Migration。
-12. `0004` 尚未发布，alias 补充直接完善同一 `0004_phase2_bulk_import`；不得创建 `0005`，`0005` 仍专用于 Refresh Queue。
+12. `0004` 尚未发布，alias 与 occurrence-level acquisition confirmation Boolean/CHECK 直接完善同一 `0004_phase2_bulk_import`；不得另建 Migration，`0005` 仍专用于 Refresh Queue。
 
 ### 18.2 0005
 
@@ -1292,7 +1295,7 @@ MVP 最终交付：
 | Task | Scope | Schema/API/Worker/Web 影响 | 关键测试与完成标准 | 依赖 | 风险 |
 |---|---|---|---|---|---|
 | 0 Design Freeze | 本文及根文档同步 | Docs only | 无冲突、唯一 Phase 2 UNKNOWN、独立 commit | 无 | 高 |
-| 1 Bulk Domain | ImportJobFile、client-ID alias、Row FK、Draft/File status、Legacy single-file 兼容桥 | `0004`；无 Web | 历史 backfill、alias 复合 FK/unique、fresh/repeat/check；Legacy 无伪造 alias；`0004` head 的 Phase 1B 单文件回归 | 0 | 高 |
+| 1 Bulk Domain | ImportJobFile、client-ID alias、acquisition confirmation Boolean/CHECK、Row FK、Draft/File status、Legacy single-file 兼容桥 | `0004`；无 Web | 历史 backfill、alias 复合 FK/unique、confirmation 合法/非法组合、fresh/repeat/check；Legacy 无伪造 alias 且 confirmation=false；`0004` head 的 Phase 1B 单文件回归 | 0 | 高 |
 | 2 Multi-file Upload | Draft、单文件上传、replace/exclude/retry | API/Service；文件 Worker 入口 | 完整 SHA/client-ID 真值表、A+X/A+X、A+X/B+X、A+X/A+Y 并发、断网、损坏、RBAC | 1 | 中 |
 | 3 Parse/Normalize/Dedup | 每文件 Mapping、统一 Batch Context | Processor/Planner/Worker | 4×500、跨文件 hard duplicate、Email 边界 | 2 | 高 |
 | 4 Bulk Repository | 批量预取和写入 | Repository/Planner/Processor | SQL query-count、2k 性能 | 3 | 最高 |
@@ -1365,7 +1368,7 @@ Gate 数据：
 7. 新增 per-file source_acquired_at，Preview 后冻结。
 8. Freshness 阈值 7/30/90，使用 Settings，无 Policy 表。
 9. Refresh Queue 部门级、Influencer 候选公司级。
-10. NO_CHANGE 仅在非空 acquisition 严格晚于非空 baseline，且历史 SHA 已显式确认或 SHA 从未复用时 fulfill；baseline 为空时 unresolved。
+10. NO_CHANGE 仅在非空 acquisition 严格晚于非空 baseline 且 `source_acquired_at_confirmation_required=false` 时 fulfill；baseline 为空或 confirmation required=true 时 unresolved。
 11. 被 lineage 引用的原始文件不得物理删除。
 12. Daily quota 只是 Queue 参数。
 13. Migration 拆分为 0004 和 0005。
@@ -1374,6 +1377,7 @@ Gate 数据：
 16. Same-time Metrics 完全保持 Phase 1B。
 17. 粉丝人类化可随 Web Task 完成；视觉重构延期。
 18. client-ID alias 表是 Job 范围幂等的唯一权威事实源；一个 occurrence 可有多个 aliases，Legacy occurrence 不伪造 alias，直接完善尚未发布的 0004。
+19. `source_acquired_at_confirmation_required` 是历史 SHA acquisition 待确认状态的唯一 occurrence-level 持久化事实源；历史 SHA + server-default 为 true，普通首次上传、显式时间、PATCH 确认与 Legacy 均为 false，并由 0004 CHECK 约束 true 的合法组合。
 
 ---
 

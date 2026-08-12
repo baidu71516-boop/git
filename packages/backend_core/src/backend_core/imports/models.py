@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Enum,
@@ -225,6 +226,12 @@ class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "AND source_acquired_at IS NOT NULL)",
             name="ck_import_job_file_acquisition_origin",
         ),
+        CheckConstraint(
+            "NOT source_acquired_at_confirmation_required "
+            "OR (source_acquired_at IS NOT NULL "
+            "AND source_acquired_at_origin = 'server_default')",
+            name="ck_import_job_file_acquisition_confirmation",
+        ),
     )
 
     import_job_id: Mapped[UUID] = mapped_column(
@@ -251,6 +258,12 @@ class ImportJobFile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             values_callable=enum_values,
         ),
         nullable=False,
+    )
+    source_acquired_at_confirmation_required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
     )
     detected_fields: Mapped[list[str] | None] = mapped_column(JSON_DOCUMENT, nullable=True)
     field_mapping: Mapped[dict[str, str] | None] = mapped_column(JSON_DOCUMENT, nullable=True)

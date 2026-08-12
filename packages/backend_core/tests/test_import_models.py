@@ -31,10 +31,18 @@ def test_import_job_file_occurrence_constraints_are_registered() -> None:
         "uq_import_job_file_stored_file",
     }
     assert _constraint_names(ImportJobFile, CheckConstraint) == {
+        "ck_import_job_file_acquisition_confirmation",
         "ck_import_job_file_acquisition_origin",
         "ck_import_job_file_counts_nonnegative",
         "ck_import_job_file_position",
     }
+
+    confirmation_required = ImportJobFile.__table__.c.source_acquired_at_confirmation_required
+    assert confirmation_required.nullable is False
+    assert confirmation_required.default is not None
+    assert confirmation_required.default.arg is False
+    assert confirmation_required.server_default is not None
+    assert str(confirmation_required.server_default.arg).lower() == "false"
 
     foreign_keys = {
         foreign_key.target_fullname for foreign_key in ImportJobFile.__table__.foreign_keys

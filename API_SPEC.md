@@ -118,7 +118,7 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/retry`
 - `POST /import-jobs/{id}/cancel`
 
-`0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
+`0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`、`source_acquired_at_confirmation_required=false`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
 `0004`/Task 2 阶段的 `POST /import-jobs/bulk` JSON 只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 部署后才 additive 接受可选 `refresh_queue_id`；Queue 必须属于目标 Department 且状态为 open/exported，completed/cancelled 返回 409。一个 Job 最多关联一个 Queue，但一个未完成 Queue 可以接收多个回流 Job。
 
@@ -148,7 +148,9 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 
 任何幂等重试都不得刷新第一次记录的 `source_acquired_at`。人工修改 acquisition time 只能在 Draft/首次 Preview 前完成，并产生专用 Audit。
 
-初次上传显式提供合法 `source_acquired_at` 时 origin 为 `user_confirmed`；缺省值时 origin 为 `server_default`。跨历史 Job 复用 SHA 且未显式提供 acquisition time 时，文件响应标记 acquisition confirmation blocker；用户必须显式 PATCH 确认/修正时间后 origin 变为 `user_confirmed`，即使时间值不变也要留下 Audit，之后才可 Preview。
+文件响应必须返回 `source_acquired_at_confirmation_required`。初次上传显式提供合法 `source_acquired_at` 时 origin=`user_confirmed`、confirmation required=false；普通首次上传缺省值时 origin=`server_default`、confirmation required=false。跨历史 Job 复用 SHA 且未显式提供 acquisition time 时，新 occurrence 为 origin=`server_default`、confirmation required=true；用户必须显式 PATCH 确认/修正时间后变为 origin=`user_confirmed`、confirmation required=false，即使时间值不变也要留下 Audit，之后才可 Preview。
+
+`source_acquired_at_confirmation_required` 是 occurrence 待确认状态的唯一权威持久化事实源。API/Service 不得通过动态查询其他 Job、`error_code`、Redis、Audit JSON 或内存状态推导或保存该事实；Audit 只记录动作，不充当当前状态。
 
 `source_acquired_at` 必须带时区，不得晚于服务器接受时间加 validated clock-skew（默认 5 分钟）。
 

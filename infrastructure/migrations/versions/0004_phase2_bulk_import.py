@@ -257,6 +257,12 @@ def upgrade() -> None:
             postgresql.ENUM(name="source_acquired_at_origin", create_type=False),
             nullable=False,
         ),
+        sa.Column(
+            "source_acquired_at_confirmation_required",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.false(),
+        ),
         sa.Column("detected_fields", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("field_mapping", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         sa.Column("mapping_hash", sa.String(length=64), nullable=True),
@@ -293,6 +299,12 @@ def upgrade() -> None:
             "AND source_acquired_at IS NOT NULL)",
             name="ck_import_job_file_acquisition_origin",
         ),
+        sa.CheckConstraint(
+            "NOT source_acquired_at_confirmation_required "
+            "OR (source_acquired_at IS NOT NULL "
+            "AND source_acquired_at_origin = 'server_default')",
+            name="ck_import_job_file_acquisition_confirmation",
+        ),
         sa.ForeignKeyConstraint(["import_job_id"], ["import_jobs.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
             ["stored_file_id"], ["stored_import_files.id"], ondelete="RESTRICT"
@@ -311,6 +323,7 @@ def upgrade() -> None:
             id, import_job_id, stored_file_id, position,
             original_filename, declared_mime, status,
             source_acquired_at, source_acquired_at_origin,
+            source_acquired_at_confirmation_required,
             detected_fields, field_mapping, mapping_hash,
             raw_rows, warning_rows, error_rows, error_code, error_message,
             parse_task_id, parse_attempts, created_at, updated_at
@@ -332,6 +345,7 @@ def upgrade() -> None:
             END)::import_job_file_status,
             NULL,
             'legacy_unknown'::source_acquired_at_origin,
+            FALSE,
             job.detected_fields,
             job.field_mapping,
             job.mapping_hash,

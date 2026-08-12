@@ -65,6 +65,7 @@
 
 - [ ] 一个 `ImportJob` 可承载多个 `ImportJobFile`；不创建 `ImportBatch` 或 `BatchRow`。
 - [ ] 每个文件保留 Stored File、SHA-256、文件 occurrence、Mapping、`source_acquired_at` 和原始行号的可追溯关系。
+- [ ] `ImportJobFile.source_acquired_at_confirmation_required` 是历史 SHA acquisition 待确认状态的唯一 occurrence-level 持久化事实源；禁止以动态跨 Job 查询、`error_code`、Redis、Audit JSON 或内存状态替代。
 - [ ] `import_job_file_client_ids` 是 `(import_job_id, client_file_id) → import_job_file_id` 的唯一权威持久化幂等映射；Job 内 client ID 唯一，复合 FK 保证 alias occurrence 属于同一 Job，一个 occurrence 可有多个 aliases，Redis/Audit/内存不得充当事实源。
 - [ ] 同一 Job 内相同 SHA 重复上传幂等返回已有 occurrence；不同 client ID 命中同 SHA 必须为已有 occurrence 持久化新 alias；不同 Job 可复用 Storage Blob，但必须重新 Parse 和 Preview。
 - [ ] 幂等真值全部通过：A+X 首次创建；A+X 重放返回同 occurrence；A+Y 返回 409 且不改绑定；B+X 返回同 occurrence并持久化 B alias；之后 B+Y 稳定返回 409。
@@ -85,20 +86,21 @@
 
 ### Freshness 与 Refresh Queue
 
-- [ ] 新 Bulk Draft 上传文件的 `source_acquired_at` 默认服务器接受时间，可在首次 Preview 前人工修改，之后冻结；不得从文件名、mtime 或未知来源字段推断。Legacy 单文件兼容路径保持 acquisition unknown。
+- [ ] 新 Bulk Draft 上传文件的 `source_acquired_at` 默认服务器接受时间，可在首次 Preview 前人工修改，之后冻结；普通 server-default 上传为 confirmation required=false，历史 SHA + server-default 的新 occurrence 为 true，显式时间或 PATCH 确认后为 false；不得从文件名、mtime 或未知来源字段推断。Legacy 单文件兼容路径保持 NULL/legacy_unknown/false。
 - [ ] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
 - [ ] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
 - [ ] Refresh Queue 由 Department 拥有，候选来自公司级 Influencer Library；Owner 或导入部门不改变公司级读取语义。
 - [ ] Queue quota 仅为创建参数，系统不宣称知道灰豚真实剩余额度；不创建 DailyQuotaPlan。
-- [ ] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline，且历史复用 SHA 已经人工确认 acquisition time（或 SHA 从未复用）时可 fulfill；baseline 为空或未确认旧 Blob replay 均 unresolved。
+- [ ] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline 且 `source_acquired_at_confirmation_required=false` 时可 fulfill；baseline 为空或 confirmation required=true 均 unresolved。
 - [ ] Queue 导出只包含数据库真实存在的 Identity；在灰豚批量定位能力完成真人验证前，不宣称导出 CSV 可被灰豚直接消费。
 - [ ] 仍被 ImportJobFile lineage 引用的 StoredImportFile 不得自动物理删除；MVP 不实现 archive/delete lifecycle。
 
 ### Migration、Worker 与性能
 
-- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
+- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias 与 acquisition confirmation Boolean/CHECK）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
 - [ ] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
 - [ ] `0004` alias Migration Gate 在 PostgreSQL 16 覆盖 fresh DB、0003 realistic data、repeat upgrade、safe downgrade→0003→0004、dangerous multi-file downgrade guard、`alembic check`、metadata drift、Legacy lineage 和 alias unique/composite FK；Legacy occurrence 保持 0 alias。
+- [ ] `0004` confirmation CHECK Gate 覆盖 Legacy NULL/legacy_unknown/false、普通 timestamp/server_default/false、历史 SHA timestamp/server_default/true、显式 timestamp/user_confirmed/false，并由数据库拒绝 NULL/server_default/true、timestamp/user_confirmed/true、NULL/legacy_unknown/true。
 - [ ] 当前七服务拓扑不变；Celery Worker concurrency=2，Heavy Preview/Confirm 同时最多 1 个。
 - [ ] File Parse task、Job failed_stage/retry、Broker dispatch reconciliation 与 Worker crash recovery 均由持久状态恢复，不依赖进程内状态。
 - [ ] 2000 行 Parse、Normalize、Dedup、Preview、Confirm 稳定且没有逐行 N+1，作为 MVP 发布 blocker。
