@@ -65,6 +65,8 @@ class CollectionJobPublic(BaseModel):
 
 
 class ImportMappingUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     mapping: dict[str, str] = Field(min_length=1)
 
 
@@ -171,6 +173,7 @@ class ImportRowPublic(BaseModel):
 
     id: UUID
     import_job_id: UUID
+    import_job_file_id: UUID
     row_number: int
     raw_data: dict[str, Any]
     normalized_data: dict[str, Any] | None

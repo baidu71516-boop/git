@@ -22,6 +22,7 @@ celery_app.conf.update(
     task_default_queue="default",
     task_routes={
         "imports.parse_import_job": {"queue": "import"},
+        "imports.parse_import_job_file": {"queue": "import"},
         "imports.confirm_import_job": {"queue": "import"},
     },
     task_queues=(
@@ -33,6 +34,7 @@ celery_app.conf.update(
     ),
     task_serializer="json",
     timezone=settings.business_timezone,
+    worker_concurrency=2,
     worker_prefetch_multiplier=1,
     worker_hijack_root_logger=False,
 )

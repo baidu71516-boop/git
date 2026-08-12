@@ -25,7 +25,8 @@ from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
-from backend_core.imports.models import ImportJobFile, StoredImportFile
+from backend_core.imports.enums import ImportJobFileStatus, ImportJobStatus
+from backend_core.imports.models import ImportJob, ImportJobFile, StoredImportFile
 from backend_core.imports.storage import LocalStorageAdapter
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient, Response
@@ -105,14 +106,31 @@ class BulkHttpHarness:
     storage: LocalStorageAdapter
     contexts: dict[str, AuthContext]
     current: dict[str, AuthContext]
+    dispatcher: "NoopDispatcher"
 
 
 class NoopDispatcher:
     def __init__(self) -> None:
         self.parse_calls: list[tuple[UUID, str]] = []
+        self.parse_file_calls: list[tuple[UUID, UUID, str]] = []
+        self.file_dispatch_had_open_transaction: list[bool] = []
+        self.fail_parse_file = False
+        self.session: AsyncSession | None = None
 
     async def parse(self, import_job_id: UUID, task_id: str) -> None:
         self.parse_calls.append((import_job_id, task_id))
+
+    async def parse_file(
+        self,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+        task_id: str,
+    ) -> None:
+        self.parse_file_calls.append((import_job_id, import_job_file_id, task_id))
+        if self.session is not None:
+            self.file_dispatch_had_open_transaction.append(self.session.in_transaction())
+        if self.fail_parse_file:
+            raise RuntimeError("synthetic file broker failure")
 
     async def confirm(self, import_job_id: UUID, preview_revision: int, task_id: str) -> None:
         _ = (import_job_id, preview_revision, task_id)
@@ -129,6 +147,7 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
         storage = LocalStorageAdapter(Path(directory))
         dispatcher = NoopDispatcher()
         async with factory() as session:
+            dispatcher.session = session
             operator_context = await seed_context(
                 session,
                 department_name="Bulk HTTP Operator",
@@ -193,6 +212,7 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
                                 "super_admin": super_admin_context,
                             },
                             current=current,
+                            dispatcher=dispatcher,
                         )
             finally:
                 app.dependency_overrides.clear()
@@ -328,13 +348,21 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
             first_file, first_idempotent = upload_result(first)
             assert first_idempotent is False
             assert first_file["position"] == 1
-            assert first_file["status"] == "uploaded"
+            assert first_file["status"] == "parsing"
+            assert first_file["parse_task_id"] is not None
             assert first_file["source_acquired_at"] is not None
             assert first_file["source_acquired_at_origin"] == "server_default"
             assert first_file["source_acquired_at_confirmation_required"] is False
             assert_no_storage_key(first.json())
             first_file_id = UUID(first_file["id"])
             original_acquisition = first_file["source_acquired_at"]
+            assert len(harness.dispatcher.parse_file_calls) == 1
+            assert harness.dispatcher.parse_file_calls[0] == (
+                import_job_id,
+                first_file_id,
+                first_file["parse_task_id"],
+            )
+            assert harness.dispatcher.file_dispatch_had_open_transaction == [False]
 
             replay = await upload_file(
                 harness.client,
@@ -351,6 +379,7 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
             assert UUID(replay_file["id"]) == first_file_id
             assert replay_file["source_acquired_at"] == original_acquisition
             assert replay_file["source_acquired_at_confirmation_required"] is False
+            assert len(harness.dispatcher.parse_file_calls) == 1
 
             sha_alias = await upload_file(
                 harness.client,
@@ -364,6 +393,7 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
             alias_file, alias_idempotent = upload_result(sha_alias)
             assert alias_idempotent is True
             assert UUID(alias_file["id"]) == first_file_id
+            assert len(harness.dispatcher.parse_file_calls) == 1
 
             alias_conflict = await upload_file(
                 harness.client,
@@ -445,6 +475,13 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
             )
             assert future_time.status_code == 422, future_time.text
 
+            fourth_occurrence = await harness.session.get(
+                ImportJobFile,
+                UUID(fourth_file["id"]),
+            )
+            assert fourth_occurrence is not None
+            fourth_occurrence.status = ImportJobFileStatus.READY
+            await harness.session.commit()
             excluded = await harness.client.post(
                 f"/api/v1/import-jobs/{import_job_id}/files/{fourth_file['id']}/exclude"
             )
@@ -496,6 +533,109 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
                 select(func.count()).select_from(StoredImportFile)
             )
             assert stored_count == 4
+
+    asyncio.run(scenario())
+
+
+def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="Bulk File Parse")
+            bulk = await create_bulk(harness.client, collection_id)
+            assert bulk.status_code == 201, bulk.text
+            import_job_id = UUID(bulk.json()["data"]["id"])
+
+            uploaded = await upload_file(
+                harness.client,
+                import_job_id,
+                client_file_id="mapping-file",
+                filename="mapping.csv",
+                content=valid_csv("mapping"),
+                content_type="text/csv",
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            uploaded_file, _ = upload_result(uploaded)
+            import_job_file_id = UUID(uploaded_file["id"])
+            assert uploaded_file["status"] == "parsing"
+            assert harness.dispatcher.parse_file_calls[-1][:2] == (
+                import_job_id,
+                import_job_file_id,
+            )
+
+            occurrence = await harness.session.get(ImportJobFile, import_job_file_id)
+            assert occurrence is not None
+            occurrence.status = ImportJobFileStatus.MAPPING_REQUIRED
+            occurrence.detected_fields = ["达人名称", "达人官方地址"]
+            await harness.session.commit()
+
+            mapped = await harness.client.put(
+                f"/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/mapping",
+                json={
+                    "mapping": {
+                        "达人名称": "nickname",
+                        "达人官方地址": "profile_url",
+                    }
+                },
+            )
+            assert mapped.status_code == 202, mapped.text
+            assert mapped.json()["data"]["status"] == "parsing"
+            assert mapped.json()["data"]["field_mapping"] == {
+                "达人名称": "nickname",
+                "达人官方地址": "profile_url",
+            }
+            assert len(harness.dispatcher.parse_file_calls) == 2
+            assert harness.dispatcher.parse_file_calls[-1][:2] == (
+                import_job_id,
+                import_job_file_id,
+            )
+
+            await harness.session.refresh(occurrence)
+            occurrence.status = ImportJobFileStatus.FAILED
+            occurrence.error_code = "INVALID_CSV"
+            occurrence.error_message = "synthetic deterministic failure"
+            await harness.session.commit()
+            retried = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/retry"
+            )
+            assert retried.status_code == 202, retried.text
+            assert retried.json()["data"]["status"] == "parsing"
+            assert retried.json()["data"]["error_code"] is None
+            assert len(harness.dispatcher.parse_file_calls) == 3
+            assert harness.dispatcher.parse_file_calls[-1][:2] == (
+                import_job_id,
+                import_job_file_id,
+            )
+
+            failed_bulk = await create_bulk(harness.client, collection_id)
+            assert failed_bulk.status_code == 201, failed_bulk.text
+            failed_job_id = UUID(failed_bulk.json()["data"]["id"])
+            harness.dispatcher.fail_parse_file = True
+            dispatch_failed = await upload_file(
+                harness.client,
+                failed_job_id,
+                client_file_id="dispatch-failure",
+                filename="dispatch-failure.csv",
+                content=valid_csv("dispatch-failure"),
+                content_type="text/csv",
+            )
+            assert_error_envelope(
+                dispatch_failed,
+                status_code=503,
+                code="TASK_DISPATCH_FAILED",
+            )
+            harness.dispatcher.fail_parse_file = False
+
+            failed_job = await harness.session.get(ImportJob, failed_job_id)
+            assert failed_job is not None
+            assert failed_job.status is ImportJobStatus.DRAFT
+            failed_occurrences = (
+                await harness.session.scalars(
+                    select(ImportJobFile).where(ImportJobFile.import_job_id == failed_job_id)
+                )
+            ).all()
+            assert len(failed_occurrences) == 1
+            assert failed_occurrences[0].status is ImportJobFileStatus.FAILED
+            assert failed_occurrences[0].error_code == "TASK_DISPATCH_FAILED"
 
     asyncio.run(scenario())
 
@@ -552,6 +692,15 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
                 f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/exclude"
             )
             assert_error_envelope(viewer_exclude, status_code=403, code="PERMISSION_DENIED")
+            viewer_mapping = await harness.client.put(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/mapping",
+                json={"mapping": {"达人名称": "nickname"}},
+            )
+            assert_error_envelope(viewer_mapping, status_code=403, code="PERMISSION_DENIED")
+            viewer_retry = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/retry"
+            )
+            assert_error_envelope(viewer_retry, status_code=403, code="PERMISSION_DENIED")
 
             set_context(harness, "no_operator")
             no_operator_create = await create_bulk(harness.client, collection_id)
@@ -567,6 +716,23 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
             )
             assert no_operator_upload.status_code == 409
             assert no_operator_upload.json()["error"]["code"] == "OPERATOR_REQUIRED"
+            no_operator_mapping = await harness.client.put(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/mapping",
+                json={"mapping": {"达人名称": "nickname"}},
+            )
+            assert_error_envelope(
+                no_operator_mapping,
+                status_code=409,
+                code="OPERATOR_REQUIRED",
+            )
+            no_operator_retry = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/retry"
+            )
+            assert_error_envelope(
+                no_operator_retry,
+                status_code=409,
+                code="OPERATOR_REQUIRED",
+            )
             no_operator_read = await harness.client.get(
                 f"/api/v1/import-jobs/{import_job_id}/files"
             )
@@ -593,6 +759,23 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
                 f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/exclude"
             )
             assert_error_envelope(cross_exclude, status_code=404, code="IMPORT_JOB_NOT_FOUND")
+            cross_mapping = await harness.client.put(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/mapping",
+                json={"mapping": {"达人名称": "nickname"}},
+            )
+            assert_error_envelope(
+                cross_mapping,
+                status_code=404,
+                code="IMPORT_JOB_NOT_FOUND",
+            )
+            cross_retry = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/files/{manager_file_id}/retry"
+            )
+            assert_error_envelope(
+                cross_retry,
+                status_code=404,
+                code="IMPORT_JOB_NOT_FOUND",
+            )
 
             set_context(harness, "manager")
             wrong_parent_patch = await harness.client.patch(
@@ -612,7 +795,28 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
                 status_code=404,
                 code="IMPORT_JOB_FILE_NOT_FOUND",
             )
+            wrong_parent_mapping = await harness.client.put(
+                f"/api/v1/import-jobs/{other_job_id}/files/{manager_file_id}/mapping",
+                json={"mapping": {"达人名称": "nickname"}},
+            )
+            assert_error_envelope(
+                wrong_parent_mapping,
+                status_code=404,
+                code="IMPORT_JOB_FILE_NOT_FOUND",
+            )
+            wrong_parent_retry = await harness.client.post(
+                f"/api/v1/import-jobs/{other_job_id}/files/{manager_file_id}/retry"
+            )
+            assert_error_envelope(
+                wrong_parent_retry,
+                status_code=404,
+                code="IMPORT_JOB_FILE_NOT_FOUND",
+            )
 
+            manager_occurrence = await harness.session.get(ImportJobFile, manager_file_id)
+            assert manager_occurrence is not None
+            manager_occurrence.status = ImportJobFileStatus.READY
+            await harness.session.commit()
             set_context(harness, "super_admin")
             admin_read = await harness.client.get(f"/api/v1/import-jobs/{import_job_id}/files")
             assert admin_read.status_code == 200
@@ -639,6 +843,7 @@ def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
         fake_redis = FakeRedis(decode_responses=True)
         with TemporaryDirectory() as directory:
             storage = LocalStorageAdapter(Path(directory))
+            dispatcher = NoopDispatcher()
             async with factory() as session:
                 context = await seed_context(
                     session,
@@ -655,9 +860,13 @@ def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
                 def override_storage() -> LocalStorageAdapter:
                     return storage
 
+                def override_dispatcher() -> NoopDispatcher:
+                    return dispatcher
+
                 app.dependency_overrides[get_database_session] = override_database_session
                 app.dependency_overrides[get_redis] = override_redis
                 app.dependency_overrides[get_import_storage] = override_storage
+                app.dependency_overrides[get_import_task_dispatcher] = override_dispatcher
                 try:
                     async with app.router.lifespan_context(app):
                         transport = ASGITransport(app=app)
@@ -767,6 +976,20 @@ def test_bulk_import_mutation_requires_authentication_and_csrf() -> None:
                                     f"/api/v1/import-jobs/{import_job_id}/files/"
                                     f"{import_job_file_id}",
                                     json={"source_acquired_at": "2026-08-10T10:00:00+08:00"},
+                                ),
+                                await client.put(
+                                    f"/api/v1/import-jobs/{import_job_id}/files/"
+                                    f"{import_job_file_id}/mapping",
+                                    json={
+                                        "mapping": {
+                                            "达人名称": "nickname",
+                                            "达人官方地址": "profile_url",
+                                        }
+                                    },
+                                ),
+                                await client.post(
+                                    f"/api/v1/import-jobs/{import_job_id}/files/"
+                                    f"{import_job_file_id}/retry"
                                 ),
                                 await client.post(
                                     f"/api/v1/import-jobs/{import_job_id}/files/"
@@ -950,7 +1173,7 @@ def _schema_property_names(
     return names
 
 
-def test_bulk_openapi_has_typed_envelopes_for_all_task_2_responses() -> None:
+def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
     document = app.openapi()
     paths = document["paths"]
     bulk_create = paths["/api/v1/import-jobs/bulk"]["post"]
@@ -958,6 +1181,12 @@ def test_bulk_openapi_has_typed_envelopes_for_all_task_2_responses() -> None:
     list_files = paths["/api/v1/import-jobs/{import_job_id}/files"]["get"]
     patch_file = paths["/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}"]["patch"]
     exclude_file = paths["/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/exclude"][
+        "post"
+    ]
+    mapping_file = paths["/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/mapping"][
+        "put"
+    ]
+    retry_file = paths["/api/v1/import-jobs/{import_job_id}/files/{import_job_file_id}/retry"][
         "post"
     ]
 
@@ -989,14 +1218,32 @@ def test_bulk_openapi_has_typed_envelopes_for_all_task_2_responses() -> None:
         file_data = _resolve_openapi_schema(document, file_envelope["properties"]["data"])
         assert "source_acquired_at_confirmation_required" in file_data["properties"]
 
+    for operation in (mapping_file, retry_file):
+        file_envelope = _response_schema(document, operation, 202)
+        file_data = _resolve_openapi_schema(document, file_envelope["properties"]["data"])
+        assert "parse_task_id" in file_data["properties"]
+        assert "field_mapping" in file_data["properties"]
+        assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(
+            operation["responses"]
+        )
+
     validation_envelope = _response_schema(document, upload, 422)
     assert {"success", "data", "error", "request_id"} <= set(validation_envelope["properties"])
     error_body = _resolve_openapi_schema(document, validation_envelope["properties"]["error"])
     assert {"code", "message", "details"} <= set(error_body["properties"])
 
-    assert {"200", "201", "401", "403", "404", "409", "413", "415", "422"} <= set(
-        upload["responses"]
-    )
+    assert {
+        "200",
+        "201",
+        "401",
+        "403",
+        "404",
+        "409",
+        "413",
+        "415",
+        "422",
+        "503",
+    } <= set(upload["responses"])
     for operation, success_status in (
         (bulk_create, 201),
         (upload, 200),
@@ -1004,6 +1251,8 @@ def test_bulk_openapi_has_typed_envelopes_for_all_task_2_responses() -> None:
         (list_files, 200),
         (patch_file, 200),
         (exclude_file, 200),
+        (mapping_file, 202),
+        (retry_file, 202),
     ):
         assert "storage_key" not in _schema_property_names(
             document,

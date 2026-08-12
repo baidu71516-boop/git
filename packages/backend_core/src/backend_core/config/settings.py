@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     import_max_file_bytes: int = Field(default=25 * 1024 * 1024, ge=1024)
     import_max_batch_files: int = Field(default=20, ge=1)
     import_max_batch_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
+    import_max_batch_rows: int = Field(default=10_000, ge=1)
     import_source_acquired_clock_skew_seconds: int = Field(default=300, ge=0)
     import_max_xlsx_uncompressed_bytes: int = Field(default=100 * 1024 * 1024, ge=1024)
     import_max_xlsx_entries: int = Field(default=10_000, ge=1)

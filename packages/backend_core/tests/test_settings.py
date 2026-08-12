@@ -10,6 +10,7 @@ def test_default_business_timezone() -> None:
     assert settings.session_remember_days == 30
     assert settings.login_max_failures == 5
     assert settings.login_lock_seconds == 300
+    assert settings.import_max_batch_rows == 10_000
     assert not settings.secure_cookies
 
 

@@ -13,6 +13,7 @@ from backend_core.auth.models import Department, Operator
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.adapters import HuitunCsvAdapter
+from backend_core.imports.batch_processor import BatchImportProcessor
 from backend_core.imports.enums import (
     CollectionJobStatus,
     ImportJobFileStatus,
@@ -21,6 +22,7 @@ from backend_core.imports.enums import (
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
+from backend_core.imports.hashing import hash_document
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
 from backend_core.imports.models import (
     CollectionJob,
@@ -36,8 +38,11 @@ from backend_core.imports.storage import LocalStorageAdapter
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
+    InfluencerCurrentMetrics,
     InfluencerMetricSnapshot,
     InfluencerPlatformAccount,
+    InfluencerSourceState,
+    PlatformAccountSourceIdentity,
 )
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -198,9 +203,13 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                     }
                     rows = list(
                         await session.scalars(
-                            select(ImportRow).where(ImportRow.import_job_id == job.id)
+                            select(ImportRow)
+                            .where(ImportRow.import_job_id == job.id)
+                            .order_by(ImportRow.row_number)
                         )
                     )
+                    legacy_row_numbers = [row.row_number for row in rows]
+                    legacy_normalized_hashes = [hash_document(row.normalized_data) for row in rows]
                     assert len(rows) == 50
                     assert {row.import_job_file_id for row in rows} == {occurrence.id}
                     await session.refresh(occurrence)
@@ -211,6 +220,90 @@ def test_real_huitun_sample_preview_confirm_and_aggregate_facts() -> None:
                         is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
                     )
                     assert await session.scalar(select(func.count()).select_from(Influencer)) == 0
+
+                    bulk_job = ImportJob(
+                        collection_job_id=collection.id,
+                        department_id=department.id,
+                        operator_id=operator.id,
+                        source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                        status=ImportJobStatus.DRAFT,
+                        preview_revision=0,
+                    )
+                    session.add(bulk_job)
+                    await session.flush()
+                    bulk_occurrence = ImportJobFile(
+                        import_job_id=bulk_job.id,
+                        stored_file_id=stored_file.id,
+                        position=1,
+                        original_filename=SAMPLE_PATH.name,
+                        declared_mime="text/csv",
+                        status=ImportJobFileStatus.PARSING,
+                        source_acquired_at=datetime.now(UTC),
+                        source_acquired_at_origin=SourceAcquiredAtOrigin.SERVER_DEFAULT,
+                        source_acquired_at_confirmation_required=False,
+                        parse_task_id="real-sample-bulk-parse",
+                        parse_attempts=1,
+                        parse_started_at=datetime.now(UTC),
+                    )
+                    session.add(bulk_occurrence)
+                    await session.commit()
+
+                    batch_processor = BatchImportProcessor(
+                        session,
+                        storage,
+                        parser_limits=ParserLimits(),
+                        max_batch_rows=10_000,
+                    )
+                    bulk_result = await batch_processor.parse_file(
+                        bulk_job.id,
+                        bulk_occurrence.id,
+                        "real-sample-bulk-parse",
+                    )
+                    assert bulk_result == {
+                        "import_job_id": str(bulk_job.id),
+                        "import_job_file_id": str(bulk_occurrence.id),
+                        "status": ImportJobFileStatus.READY.value,
+                        "raw_rows": 50,
+                    }
+                    persisted_bulk_job = await session.get(ImportJob, bulk_job.id)
+                    persisted_bulk_occurrence = await session.get(ImportJobFile, bulk_occurrence.id)
+                    assert persisted_bulk_job is not None
+                    assert persisted_bulk_job.status is ImportJobStatus.DRAFT
+                    assert persisted_bulk_job.preview_revision == 0
+                    assert persisted_bulk_job.preview_summary is None
+                    assert persisted_bulk_occurrence is not None
+                    assert persisted_bulk_occurrence.status is ImportJobFileStatus.READY
+                    bulk_rows = list(
+                        await session.scalars(
+                            select(ImportRow)
+                            .where(ImportRow.import_job_id == bulk_job.id)
+                            .order_by(ImportRow.row_number)
+                        )
+                    )
+                    assert len(bulk_rows) == 50
+                    assert {row.import_job_file_id for row in bulk_rows} == {bulk_occurrence.id}
+                    assert {row.preview_revision for row in bulk_rows} == {0}
+                    assert [row.row_number for row in bulk_rows] == legacy_row_numbers
+                    assert [
+                        hash_document(row.normalized_data) for row in bulk_rows
+                    ] == legacy_normalized_hashes
+                    assert all(
+                        row.committed_action is None and row.committed_at is None
+                        for row in bulk_rows
+                    )
+                    for business_model in (
+                        Influencer,
+                        InfluencerPlatformAccount,
+                        PlatformAccountSourceIdentity,
+                        InfluencerSourceState,
+                        InfluencerContact,
+                        InfluencerCurrentMetrics,
+                        InfluencerMetricSnapshot,
+                    ):
+                        assert (
+                            await session.scalar(select(func.count()).select_from(business_model))
+                            == 0
+                        )
 
                     refreshed.status = ImportJobStatus.CONFIRM_QUEUED
                     refreshed.confirmed_revision = 1

@@ -247,6 +247,11 @@ class ImportPlanner:
             candidates=candidate_summary,
         )
 
+    async def match(self, record: CanonicalInfluencerRecord) -> MatchResult:
+        """Expose the frozen Phase 1B matcher to batch component coordination."""
+
+        return await self._match(record)
+
     @staticmethod
     def _incoming_account_values(record: CanonicalInfluencerRecord) -> dict[str, Any]:
         identity = record.platform_identity
@@ -272,6 +277,8 @@ class ImportPlanner:
         initial_errors: list[dict[str, Any]] | None = None,
         duplicate_owner_row: int | None = None,
         possible_duplicate_emails: set[str] | None = None,
+        row_locator: dict[str, Any] | None = None,
+        match_override: MatchResult | None = None,
     ) -> PlannedImportRow:
         warnings = list(initial_warnings or [])
         errors = list(initial_errors or [])
@@ -298,6 +305,7 @@ class ImportPlanner:
                 warnings=warnings,
                 errors=errors,
                 preconditions={},
+                row_locator=row_locator,
             )
         if duplicate_owner_row is not None:
             warnings.append(
@@ -321,9 +329,10 @@ class ImportPlanner:
                 warnings=warnings,
                 errors=errors,
                 preconditions={"duplicate_owner_row": duplicate_owner_row},
+                row_locator=row_locator,
             )
 
-        match = await self._match(record)
+        match = match_override or await self._match(record)
         warnings.extend(issue.as_dict() for issue in match.warnings)
         if match.manual_review:
             return self._finalize(
@@ -340,6 +349,7 @@ class ImportPlanner:
                 warnings=warnings,
                 errors=errors,
                 preconditions={"identity_candidates": match.candidates},
+                row_locator=row_locator,
             )
 
         account = match.account
@@ -557,6 +567,69 @@ class ImportPlanner:
             warnings=warnings,
             errors=errors,
             preconditions=preconditions,
+            row_locator=row_locator,
+        )
+
+    def plan_batch_duplicate(
+        self,
+        *,
+        job_id: UUID,
+        row_number: int,
+        normalized_data: dict[str, Any],
+        mapping_hash: str,
+        row_locator: dict[str, Any],
+        merge_plan: dict[str, Any],
+        warnings: list[dict[str, Any]],
+        errors: list[dict[str, Any]],
+    ) -> PlannedImportRow:
+        """Create a deterministic revision-zero plan for a retained duplicate row."""
+
+        return self._finalize(
+            job_id=job_id,
+            row_number=row_number,
+            normalized_data=normalized_data,
+            mapping_hash=mapping_hash,
+            preview_revision=0,
+            match_type=ImportMatchType.NONE,
+            action=ImportRowAction.SKIP,
+            matched_influencer_id=None,
+            matched_platform_account_id=None,
+            merge_plan=merge_plan,
+            warnings=warnings,
+            errors=errors,
+            preconditions={},
+            row_locator=row_locator,
+        )
+
+    def plan_batch_manual_review(
+        self,
+        *,
+        job_id: UUID,
+        row_number: int,
+        normalized_data: dict[str, Any],
+        mapping_hash: str,
+        row_locator: dict[str, Any],
+        merge_plan: dict[str, Any],
+        warnings: list[dict[str, Any]],
+        errors: list[dict[str, Any]],
+    ) -> PlannedImportRow:
+        """Create a deterministic non-sensitive plan for a conflicted component."""
+
+        return self._finalize(
+            job_id=job_id,
+            row_number=row_number,
+            normalized_data=normalized_data,
+            mapping_hash=mapping_hash,
+            preview_revision=0,
+            match_type=ImportMatchType.NONE,
+            action=ImportRowAction.MANUAL_REVIEW,
+            matched_influencer_id=None,
+            matched_platform_account_id=None,
+            merge_plan=merge_plan,
+            warnings=warnings,
+            errors=errors,
+            preconditions={},
+            row_locator=row_locator,
         )
 
     async def _plan_metrics(
@@ -801,6 +874,7 @@ class ImportPlanner:
         warnings: list[dict[str, Any]],
         errors: list[dict[str, Any]],
         preconditions: dict[str, Any],
+        row_locator: dict[str, Any] | None = None,
     ) -> PlannedImportRow:
         payload = {
             "job_id": job_id,
@@ -815,6 +889,8 @@ class ImportPlanner:
             "mapping_hash": mapping_hash,
             "preview_revision": preview_revision,
         }
+        if row_locator is not None:
+            payload["row_locator"] = row_locator
         return PlannedImportRow(
             matched_influencer_id=matched_influencer_id,
             matched_platform_account_id=matched_platform_account_id,

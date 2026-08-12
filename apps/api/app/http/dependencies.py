@@ -88,6 +88,7 @@ def get_import_service(
         retention_days=settings.import_retention_days,
         max_batch_files=settings.import_max_batch_files,
         max_batch_bytes=settings.import_max_batch_bytes,
+        max_batch_rows=settings.import_max_batch_rows,
         source_acquired_clock_skew_seconds=(settings.import_source_acquired_clock_skew_seconds),
     )
 

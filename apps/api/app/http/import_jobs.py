@@ -6,7 +6,7 @@ from typing import Annotated, Any, overload
 from uuid import UUID, uuid4
 
 from backend_core.auth.service import AuthContext
-from backend_core.imports.enums import ImportRowAction
+from backend_core.imports.enums import ImportJobFileStatus, ImportRowAction
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.repository import ImportJobFileRecord
 from backend_core.imports.schemas import (
@@ -145,6 +145,30 @@ async def _compensate_dispatch_failure(
     )
 
 
+async def _compensate_file_dispatch_failure(
+    *,
+    service: ImportService,
+    context: AuthContext,
+    import_job_id: UUID,
+    import_job_file_id: UUID,
+    task_id: str,
+    request: Request,
+) -> None:
+    await service.mark_file_dispatch_failed(
+        context,
+        import_job_id,
+        import_job_file_id,
+        task_id,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+    raise ImportDomainError(
+        "TASK_DISPATCH_FAILED",
+        "Background file task could not be queued; the file was marked failed",
+        status_code=503,
+    )
+
+
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_import_file(
     request: Request,
@@ -216,7 +240,7 @@ async def create_bulk_import_job(
             "model": SuccessEnvelope[ImportJobFileUploadResult],
             "description": "Idempotent upload replay",
         },
-        **_error_responses(401, 403, 404, 409, 413, 415, 422),
+        **_error_responses(401, 403, 404, 409, 413, 415, 422, 503),
     },
 )
 async def upload_bulk_import_file(
@@ -226,6 +250,7 @@ async def upload_bulk_import_file(
     file: Annotated[UploadFile, File()],
     context: Annotated[AuthContext, Depends(require_import_mutation)],
     service: Annotated[ImportService, Depends(get_import_service)],
+    dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
     source_acquired_at: Annotated[datetime | None, Form()] = None,
 ) -> JSONResponse:
     async def chunks() -> AsyncIterator[bytes]:
@@ -246,6 +271,39 @@ async def upload_bulk_import_file(
         )
     finally:
         await file.close()
+    if decision.record.occurrence.status in {
+        ImportJobFileStatus.UPLOADED,
+        ImportJobFileStatus.PARSING,
+    }:
+        task_id = uuid4().hex
+        queue_decision = await service.queue_import_job_file(
+            context,
+            import_job_id,
+            decision.record.occurrence.id,
+            task_id,
+            ip=get_client_ip(request),
+            user_agent=get_user_agent(request),
+        )
+        decision = FileUploadDecision(
+            queue_decision.record,
+            idempotent=decision.idempotent,
+        )
+        if queue_decision.should_dispatch:
+            try:
+                await dispatcher.parse_file(
+                    import_job_id,
+                    queue_decision.record.occurrence.id,
+                    queue_decision.task_id,
+                )
+            except Exception:
+                await _compensate_file_dispatch_failure(
+                    service=service,
+                    context=context,
+                    import_job_id=import_job_id,
+                    import_job_file_id=queue_decision.record.occurrence.id,
+                    task_id=queue_decision.task_id,
+                    request=request,
+                )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_201_CREATED
     return JSONResponse(
         status_code=response_status,
@@ -290,6 +348,104 @@ async def update_bulk_import_file(
         user_agent=get_user_agent(request),
     )
     return envelope(request, data=_file_public(record))
+
+
+@router.put(
+    "/{import_job_id}/files/{import_job_file_id}/mapping",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SuccessEnvelope[ImportJobFilePublic],
+    responses={
+        status.HTTP_200_OK: {
+            "model": SuccessEnvelope[ImportJobFilePublic],
+            "description": "Idempotent mapping request",
+        },
+        **_error_responses(401, 403, 404, 409, 422, 503),
+    },
+)
+async def update_bulk_import_file_mapping(
+    import_job_id: UUID,
+    import_job_file_id: UUID,
+    payload: ImportMappingUpdate,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    service: Annotated[ImportService, Depends(get_import_service)],
+    dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
+) -> JSONResponse:
+    task_id = uuid4().hex
+    decision = await service.update_import_job_file_mapping(
+        context,
+        import_job_id,
+        import_job_file_id,
+        payload.mapping,
+        task_id,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+    if decision.should_dispatch:
+        try:
+            await dispatcher.parse_file(import_job_id, import_job_file_id, decision.task_id)
+        except Exception:
+            await _compensate_file_dispatch_failure(
+                service=service,
+                context=context,
+                import_job_id=import_job_id,
+                import_job_file_id=import_job_file_id,
+                task_id=decision.task_id,
+                request=request,
+            )
+    response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
+    return JSONResponse(
+        status_code=response_status,
+        content=jsonable_encoder(envelope(request, data=_file_public(decision.record))),
+    )
+
+
+@router.post(
+    "/{import_job_id}/files/{import_job_file_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=SuccessEnvelope[ImportJobFilePublic],
+    responses={
+        status.HTTP_200_OK: {
+            "model": SuccessEnvelope[ImportJobFilePublic],
+            "description": "Idempotent retry request",
+        },
+        **_error_responses(401, 403, 404, 409, 422, 503),
+    },
+)
+async def retry_bulk_import_file(
+    import_job_id: UUID,
+    import_job_file_id: UUID,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    service: Annotated[ImportService, Depends(get_import_service)],
+    dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
+) -> JSONResponse:
+    task_id = uuid4().hex
+    decision = await service.retry_import_job_file(
+        context,
+        import_job_id,
+        import_job_file_id,
+        task_id,
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+    if decision.should_dispatch:
+        try:
+            await dispatcher.parse_file(import_job_id, import_job_file_id, decision.task_id)
+        except Exception:
+            await _compensate_file_dispatch_failure(
+                service=service,
+                context=context,
+                import_job_id=import_job_id,
+                import_job_file_id=import_job_file_id,
+                task_id=decision.task_id,
+                request=request,
+            )
+    response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
+    return JSONResponse(
+        status_code=response_status,
+        content=jsonable_encoder(envelope(request, data=_file_public(decision.record))),
+    )
 
 
 @router.post(

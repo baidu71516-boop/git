@@ -5,10 +5,15 @@ from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend_core.imports.enums import ImportRowAction, SourceAcquiredAtOrigin
+from backend_core.imports.enums import (
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportRowAction,
+    SourceAcquiredAtOrigin,
+)
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.hashing import advisory_lock_key
 from backend_core.imports.models import (
@@ -88,6 +93,15 @@ class ImportRepository:
         if for_update:
             statement = statement.with_for_update()
         return cast(ImportJobFile | None, await self.session.scalar(statement))
+
+    async def get_platform_account(
+        self,
+        platform_account_id: UUID,
+    ) -> InfluencerPlatformAccount | None:
+        return cast(
+            InfluencerPlatformAccount | None,
+            await self.session.get(InfluencerPlatformAccount, platform_account_id),
+        )
 
     async def get_import_job_file_record(
         self,
@@ -260,8 +274,16 @@ class ImportRepository:
         criteria = [ImportRow.import_job_id == import_job_id]
         if action is not None:
             criteria.append(ImportRow.action == action)
+        visible_staging = or_(
+            ImportJob.status != ImportJobStatus.DRAFT,
+            ImportJobFile.status == ImportJobFileStatus.READY,
+        )
         count = await self.session.scalar(
-            select(func.count()).select_from(ImportRow).where(*criteria)
+            select(func.count())
+            .select_from(ImportRow)
+            .join(ImportJobFile, ImportJobFile.id == ImportRow.import_job_file_id)
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .where(*criteria, visible_staging)
         )
         result = await self.session.scalars(
             select(ImportRow)
@@ -269,7 +291,8 @@ class ImportRepository:
                 ImportJobFile,
                 ImportJobFile.id == ImportRow.import_job_file_id,
             )
-            .where(*criteria)
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .where(*criteria, visible_staging)
             .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
             .offset(offset)
             .limit(limit)
@@ -283,10 +306,36 @@ class ImportRepository:
                 ImportJobFile,
                 ImportJobFile.id == ImportRow.import_job_file_id,
             )
-            .where(ImportRow.import_job_id == import_job_id)
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .where(
+                ImportRow.import_job_id == import_job_id,
+                or_(
+                    ImportJob.status != ImportJobStatus.DRAFT,
+                    ImportJobFile.status == ImportJobFileStatus.READY,
+                ),
+            )
             .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
         )
         return list(result)
+
+    async def list_batch_staging_rows(self, import_job_id: UUID) -> list[ImportRow]:
+        """Return only rows belonging to included, successfully parsed occurrences."""
+
+        result = await self.session.scalars(
+            select(ImportRow)
+            .join(ImportJobFile, ImportJobFile.id == ImportRow.import_job_file_id)
+            .where(
+                ImportRow.import_job_id == import_job_id,
+                ImportJobFile.status == ImportJobFileStatus.READY,
+            )
+            .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
+        )
+        return list(result)
+
+    async def delete_import_rows_for_file(self, import_job_file_id: UUID) -> None:
+        await self.session.execute(
+            delete(ImportRow).where(ImportRow.import_job_file_id == import_job_file_id)
+        )
 
     async def accounts_by_platform_id(
         self, platform: Platform, platform_account_id: str

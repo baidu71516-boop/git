@@ -76,6 +76,14 @@ class FileUploadDecision:
         return self.record.occurrence.source_acquired_at_confirmation_required
 
 
+@dataclass(frozen=True)
+class FileQueueDecision:
+    record: ImportJobFileRecord
+    task_id: str
+    should_dispatch: bool
+    idempotent: bool = False
+
+
 def sanitize_original_filename(filename: str, suffix: str) -> str:
     normalized = filename.replace("\\", "/")
     basename = PurePosixPath(normalized).name
@@ -104,6 +112,7 @@ class ImportService:
         retention_days: int,
         max_batch_files: int = 20,
         max_batch_bytes: int = 100 * 1024 * 1024,
+        max_batch_rows: int = 10_000,
         source_acquired_clock_skew_seconds: int = 300,
         clock: Clock | None = None,
     ) -> None:
@@ -116,6 +125,7 @@ class ImportService:
         self.retention_days = retention_days
         self.max_batch_files = max_batch_files
         self.max_batch_bytes = max_batch_bytes
+        self.max_batch_rows = max_batch_rows
         self.source_acquired_clock_skew_seconds = source_acquired_clock_skew_seconds
         self.clock = clock or SystemClock()
 
@@ -747,6 +757,235 @@ class ImportService:
         job = await self._get_file_scoped_import_job(context, import_job_id)
         return await self.repository.list_import_job_file_records(job.id)
 
+    async def _bulk_file_for_mutation(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+    ) -> tuple[ImportJob, ImportJobFileRecord]:
+        self._require_mutation(context)
+        job = await self._get_file_scoped_import_job(context, import_job_id, for_update=True)
+        self._require_bulk_draft(job)
+        record = await self.repository.get_import_job_file_record(job.id, import_job_file_id)
+        if record is None:
+            raise ImportDomainError(
+                "IMPORT_JOB_FILE_NOT_FOUND", "Import job file not found", status_code=404
+            )
+        return job, record
+
+    def _queue_file_parse(
+        self,
+        occurrence: ImportJobFile,
+        task_id: str,
+    ) -> None:
+        now = _as_utc(self.clock.now())
+        occurrence.status = ImportJobFileStatus.PARSING
+        occurrence.parse_task_id = task_id
+        occurrence.parse_attempts += 1
+        occurrence.parse_started_at = now
+        occurrence.parse_completed_at = None
+        occurrence.error_code = None
+        occurrence.error_message = None
+        occurrence.updated_at = now
+
+    @staticmethod
+    def _current_file_task_id(occurrence: ImportJobFile) -> str:
+        if occurrence.parse_task_id is None:
+            raise ImportDomainError(
+                "IMPORT_FILE_BUSY",
+                "The file is already parsing",
+                status_code=409,
+            )
+        return occurrence.parse_task_id
+
+    async def queue_import_job_file(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+        task_id: str,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> FileQueueDecision:
+        """Persist the initial per-file parse token before broker dispatch."""
+
+        _ = (ip, user_agent)
+        _, record = await self._bulk_file_for_mutation(context, import_job_id, import_job_file_id)
+        occurrence = record.occurrence
+        if occurrence.status is ImportJobFileStatus.PARSING:
+            persisted_task_id = self._current_file_task_id(occurrence)
+            await self.session.commit()
+            return FileQueueDecision(
+                record=record,
+                task_id=persisted_task_id,
+                should_dispatch=False,
+                idempotent=True,
+            )
+        if occurrence.status is not ImportJobFileStatus.UPLOADED:
+            raise ImportDomainError(
+                "INVALID_FILE_STATE",
+                "Only an uploaded file can be queued for its initial parse",
+                status_code=409,
+            )
+        self._queue_file_parse(occurrence, task_id)
+        await self.session.commit()
+        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+
+    @staticmethod
+    def _validated_file_mapping(
+        occurrence: ImportJobFile,
+        mapping: dict[str, str],
+    ) -> dict[str, str]:
+        if occurrence.detected_fields is None:
+            raise ImportDomainError(
+                "MAPPING_UNAVAILABLE",
+                "File fields have not been detected",
+                status_code=409,
+            )
+        try:
+            return validate_mapping(occurrence.detected_fields, mapping)
+        except ImportDomainError as error:
+            error.status_code = 422
+            raise
+
+    async def update_import_job_file_mapping(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+        mapping: dict[str, str],
+        task_id: str,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> FileQueueDecision:
+        job, record = await self._bulk_file_for_mutation(context, import_job_id, import_job_file_id)
+        occurrence = record.occurrence
+        if occurrence.status is ImportJobFileStatus.EXCLUDED:
+            raise ImportDomainError(
+                "INVALID_FILE_STATE",
+                "An excluded file cannot be remapped",
+                status_code=409,
+            )
+        if occurrence.status not in {
+            ImportJobFileStatus.PARSING,
+            ImportJobFileStatus.MAPPING_REQUIRED,
+            ImportJobFileStatus.READY,
+            ImportJobFileStatus.FAILED,
+        }:
+            raise ImportDomainError(
+                "INVALID_FILE_STATE",
+                "File mapping cannot be changed in this state",
+                status_code=409,
+            )
+        validated = self._validated_file_mapping(occurrence, mapping)
+        mapping_hash = hash_document(validated)
+        mapping_unchanged = (
+            occurrence.field_mapping == validated and occurrence.mapping_hash == mapping_hash
+        )
+        if occurrence.status is ImportJobFileStatus.PARSING:
+            if not mapping_unchanged:
+                raise ImportDomainError(
+                    "IMPORT_FILE_BUSY",
+                    "A file mapping cannot be changed while parsing",
+                    status_code=409,
+                )
+            persisted_task_id = self._current_file_task_id(occurrence)
+            await self.session.commit()
+            return FileQueueDecision(
+                record=record,
+                task_id=persisted_task_id,
+                should_dispatch=False,
+                idempotent=True,
+            )
+        if occurrence.status is ImportJobFileStatus.READY and mapping_unchanged:
+            await self.session.commit()
+            return FileQueueDecision(
+                record=record,
+                task_id=task_id,
+                should_dispatch=False,
+                idempotent=True,
+            )
+
+        before_mapping_hash = occurrence.mapping_hash
+        occurrence.field_mapping = validated
+        occurrence.mapping_hash = mapping_hash
+        self._queue_file_parse(occurrence, task_id)
+        if not mapping_unchanged:
+            self.audit.add(
+                action=AuditAction.IMPORT_FILE_MAPPING_UPDATED,
+                result=AuditResult.SUCCESS,
+                department_id=job.department_id,
+                operator_id=self._operator_id(context),
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="import_job_file",
+                entity_id=occurrence.id,
+                before={
+                    "import_job_id": str(job.id),
+                    "mapping_hash": before_mapping_hash,
+                },
+                after={
+                    "import_job_id": str(job.id),
+                    "mapping_hash": mapping_hash,
+                    "parse_attempt": occurrence.parse_attempts,
+                },
+            )
+        await self.session.commit()
+        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+
+    async def retry_import_job_file(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+        task_id: str,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> FileQueueDecision:
+        job, record = await self._bulk_file_for_mutation(context, import_job_id, import_job_file_id)
+        occurrence = record.occurrence
+        if occurrence.status not in {
+            ImportJobFileStatus.FAILED,
+            ImportJobFileStatus.MAPPING_REQUIRED,
+        }:
+            raise ImportDomainError(
+                "INVALID_FILE_STATE",
+                "Only a failed file or a file with resolved mapping can be retried",
+                status_code=409,
+            )
+        if occurrence.status is ImportJobFileStatus.MAPPING_REQUIRED:
+            if occurrence.field_mapping is None:
+                raise ImportDomainError(
+                    "MAPPING_REQUIRED",
+                    "A valid mapping is required before retry",
+                    status_code=409,
+                )
+            self._validated_file_mapping(occurrence, occurrence.field_mapping)
+
+        previous_status = occurrence.status
+        self._queue_file_parse(occurrence, task_id)
+        self.audit.add(
+            action=AuditAction.IMPORT_FILE_RETRIED,
+            result=AuditResult.SUCCESS,
+            department_id=job.department_id,
+            operator_id=self._operator_id(context),
+            ip=ip,
+            user_agent=user_agent,
+            entity_type="import_job_file",
+            entity_id=occurrence.id,
+            before={"import_job_id": str(job.id), "status": previous_status.value},
+            after={
+                "import_job_id": str(job.id),
+                "status": occurrence.status.value,
+                "parse_attempt": occurrence.parse_attempts,
+            },
+        )
+        await self.session.commit()
+        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+
     async def update_import_job_file_source_acquired_at(
         self,
         context: AuthContext,
@@ -832,9 +1071,20 @@ class ImportService:
                 "A file cannot be excluded while parsing",
                 status_code=409,
             )
+        await self.repository.delete_import_rows_for_file(occurrence.id)
         occurrence.status = ImportJobFileStatus.EXCLUDED
         occurrence.excluded_at = _as_utc(self.clock.now())
         occurrence.updated_at = occurrence.excluded_at
+        # An excluded owner can change every remaining component decision.  Keep
+        # the revision-zero stage and the occurrence transition in one commit.
+        from backend_core.imports.batch_processor import BatchImportProcessor
+
+        await BatchImportProcessor(
+            self.session,
+            self.storage,
+            parser_limits=self.parser_limits,
+            max_batch_rows=self.max_batch_rows,
+        ).rebuild_ready_staging(job.id, commit=False)
         self.audit.add(
             action=AuditAction.IMPORT_FILE_EXCLUDED,
             result=AuditResult.SUCCESS,
@@ -848,6 +1098,54 @@ class ImportService:
         )
         await self.session.commit()
         return record
+
+    async def mark_file_dispatch_failed(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+        task_id: str,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> None:
+        """Fail only the queued occurrence when its persisted token still matches."""
+
+        _ = (ip, user_agent)
+        job = await self.repository.get_import_job(import_job_id, for_update=True)
+        if job is None or not self._file_scope_visible(context, job.department_id):
+            await self.session.rollback()
+            return
+        if job.status is not ImportJobStatus.DRAFT or job.preview_revision != 0:
+            await self.session.rollback()
+            return
+        record = await self.repository.get_import_job_file_record(job.id, import_job_file_id)
+        if record is None:
+            await self.session.rollback()
+            return
+        occurrence = record.occurrence
+        if (
+            occurrence.status is not ImportJobFileStatus.PARSING
+            or occurrence.parse_task_id != task_id
+        ):
+            await self.session.rollback()
+            return
+        now = _as_utc(self.clock.now())
+        occurrence.status = ImportJobFileStatus.FAILED
+        occurrence.parse_completed_at = now
+        occurrence.error_code = "TASK_DISPATCH_FAILED"
+        occurrence.error_message = "Background file task could not be queued"
+        occurrence.updated_at = now
+        await self.repository.delete_import_rows_for_file(occurrence.id)
+        from backend_core.imports.batch_processor import BatchImportProcessor
+
+        await BatchImportProcessor(
+            self.session,
+            self.storage,
+            parser_limits=self.parser_limits,
+            max_batch_rows=self.max_batch_rows,
+        ).rebuild_ready_staging(job.id, commit=False)
+        await self.session.commit()
 
     async def list_import_jobs(self, context: AuthContext) -> list[ImportJob]:
         department_id = None if context.role == Role.SUPER_ADMIN else context.department.id
