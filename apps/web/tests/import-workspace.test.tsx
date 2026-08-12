@@ -25,9 +25,14 @@ describe("ImportWorkspace", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByText("Viewer 为只读角色，不能上传或确认导入。"),
+        screen.getByText("只读角色不能上传或确认导入。"),
       ).toBeInTheDocument(),
     );
+    expect(
+      screen.getByText(
+        "上传灰豚导出的 CSV / XLSX 文件，系统会先生成数据预览，确认无误后再写入达人库。",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /新建采集任务/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: /上传并预览/ })).toBeDisabled();
   });

@@ -220,11 +220,11 @@ body {
   z-index: 10;
   top: 0;
   display: flex;
-  min-height: 68px;
+  min-height: 64px;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  padding: 12px 28px;
+  padding: 10px 28px;
   border-bottom: 1px solid var(--app-border);
   background: rgb(255 255 255 / 94%);
   backdrop-filter: blur(8px);
@@ -279,7 +279,8 @@ body {
 }
 
 .user-menu-copy {
-  display: grid;
+  display: inline-flex;
+  align-items: center;
   min-width: 72px;
   text-align: left;
 }

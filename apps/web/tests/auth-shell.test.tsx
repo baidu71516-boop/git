@@ -84,6 +84,7 @@ describe("AuthShell", () => {
     expect(screen.getByLabelText("部门")).toBeInTheDocument();
     expect(screen.getByLabelText("密码")).toBeInTheDocument();
     expect(screen.getByText("30 天内保持登录")).toBeInTheDocument();
+    expect(screen.queryByText("INTERNAL")).not.toBeInTheDocument();
   });
 
   it("lets a Viewer without an Operator read the influencer library", async () => {
@@ -117,7 +118,9 @@ describe("AuthShell", () => {
     expect(
       await screen.findByRole("heading", { name: "达人库", level: 3 }),
     ).toBeInTheDocument();
-    expect(screen.getByText("待选择")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("complementary")).getByText("待选择"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) =>
@@ -214,8 +217,12 @@ describe("AuthShell", () => {
       "page",
     );
     expect(
-      within(screen.getByRole("complementary")).getByText("Viewer"),
+      within(screen.getByRole("complementary")).getByText("只读成员"),
     ).toBeInTheDocument();
+    const userMenu = screen.getByRole("button", { name: "打开用户菜单" });
+    expect(userMenu).toHaveTextContent("查看人");
+    expect(userMenu).not.toHaveTextContent("只读成员");
+    expect(userMenu).not.toHaveTextContent("只读部");
     expect(screen.queryByText("Campaign")).not.toBeInTheDocument();
     expect(screen.queryByText("Inbox")).not.toBeInTheDocument();
   });
@@ -262,7 +269,9 @@ describe("AuthShell", () => {
     renderAuthenticatedShell("influencers", "influencer-1");
 
     expect(await screen.findByText("详情达人")).toBeInTheDocument();
-    expect(screen.getByText("待选择")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("complementary")).getByText("待选择"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) =>

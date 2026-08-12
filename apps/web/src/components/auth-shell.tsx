@@ -12,7 +12,6 @@ import {
   Select,
   Space,
   Spin,
-  Tag,
   Typography,
 } from "antd";
 import { useCallback, useEffect, useState } from "react";
@@ -55,10 +54,10 @@ type LoginValues = {
 };
 
 const roleLabels: Record<Role, string> = {
-  super_admin: "Super Admin",
-  manager: "Manager",
-  operator: "Operator",
-  viewer: "Viewer",
+  super_admin: "超级管理员",
+  manager: "管理员",
+  operator: "操作员",
+  viewer: "只读成员",
 };
 
 type AuthWorkspace = "imports" | "influencers";
@@ -172,7 +171,6 @@ export function AuthShell({
         <Card className="login-card" bordered={false}>
           <Space direction="vertical" size="large" className="full-width">
             <div>
-              <Tag color="blue">INTERNAL</Tag>
               <Title level={2}>达人智能触达系统</Title>
               <Paragraph type="secondary">请使用部门密码登录。</Paragraph>
             </div>

@@ -47,8 +47,7 @@ export function UserMenu({
       >
         <Avatar size="small" icon={<UserOutlined />} />
         <span className="user-menu-copy">
-          <Text strong>{operator ?? department}</Text>
-          <Text type="secondary">{role}</Text>
+          <Text strong>{operator ?? "待选择"}</Text>
         </span>
         <DownOutlined />
       </button>
