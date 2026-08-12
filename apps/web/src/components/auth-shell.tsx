@@ -1,12 +1,11 @@
 "use client";
 
-import { LockOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { LockOutlined, TeamOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
   Card,
   Checkbox,
-  Descriptions,
   Form,
   Input,
   Modal,
@@ -16,15 +15,15 @@ import {
   Tag,
   Typography,
 } from "antd";
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
+import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 import { ImportWorkspace } from "@/components/import-workspace";
 
-const { Paragraph, Text, Title } = Typography;
+const { Paragraph, Title } = Typography;
 
 type Role = "super_admin" | "manager" | "operator" | "viewer";
 
@@ -225,54 +224,19 @@ export function AuthShell({
     );
   }
 
+  const title =
+    workspace === "imports" ? "数据采集" : influencerId ? "达人详情" : "达人库";
+
   return (
-    <main className="auth-shell app-authenticated">
-      <Card className="identity-card" bordered={false}>
-        <Space direction="vertical" size="large" className="full-width">
-          <div className="workspace-heading">
-            <div>
-              <Tag color="success">登录成功</Tag>
-              <Title level={3}>当前身份</Title>
-            </div>
-            <Button onClick={() => void handleLogout()} loading={submitting}>
-              退出登录
-            </Button>
-          </div>
-          {error ? <Alert type="error" showIcon message={error} /> : null}
-          <Descriptions bordered column={1}>
-            <Descriptions.Item label="当前部门">
-              {auth.department.name}
-            </Descriptions.Item>
-            <Descriptions.Item label="当前操作人">
-              {auth.operator?.name ?? "待选择"}
-            </Descriptions.Item>
-            <Descriptions.Item label="当前角色">
-              <Tag color="blue">{roleLabels[auth.role]}</Tag>
-            </Descriptions.Item>
-          </Descriptions>
-          <Text type="secondary">
-            <UserOutlined /> 选择操作人仅改变操作归属，不会改变 Session 权限。
-          </Text>
-        </Space>
-      </Card>
-
-      <nav className="workspace-nav" aria-label="工作区导航">
-        <Space>
-          <Link
-            href="/"
-            aria-current={workspace === "imports" ? "page" : undefined}
-          >
-            导入工作区
-          </Link>
-          <Link
-            href="/influencers"
-            aria-current={workspace === "influencers" ? "page" : undefined}
-          >
-            达人库
-          </Link>
-        </Space>
-      </nav>
-
+    <AppShell
+      title={title}
+      department={auth.department.name}
+      operator={auth.operator?.name ?? null}
+      role={roleLabels[auth.role]}
+      onLogout={() => void handleLogout()}
+      logoutLoading={submitting}
+    >
+      {error ? <Alert type="error" showIcon message={error} /> : null}
       {workspace === "influencers" ? (
         influencerId ? (
           <InfluencerDetailWorkspace influencerId={influencerId} />
@@ -312,6 +276,6 @@ export function AuthShell({
           }))}
         />
       </Modal>
-    </main>
+    </AppShell>
   );
 }
