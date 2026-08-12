@@ -1,5 +1,6 @@
 "use client";
 
+import { ClearOutlined, SearchOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
@@ -77,9 +78,9 @@ export function InfluencerFilterBar({
 
   return (
     <Card className="influencer-filter-card" variant="borderless">
-      <Space orientation="vertical" size="middle" className="full-width">
+      <Space orientation="vertical" size="small" className="full-width">
         <Row gutter={[12, 12]}>
-          <Col xs={24} lg={10}>
+          <Col xs={24} lg={8}>
             <Space.Compact className="full-width">
               <Input
                 aria-label="昵称搜索"
@@ -89,20 +90,24 @@ export function InfluencerFilterBar({
                 onChange={(event) => setSearchDraft(event.target.value)}
                 onPressEnter={submitSearch}
               />
-              <Button type="primary" onClick={submitSearch}>
+              <Button
+                type="primary"
+                icon={<SearchOutlined aria-hidden="true" />}
+                onClick={submitSearch}
+              >
                 搜索
               </Button>
             </Space.Compact>
           </Col>
-          <Col xs={24} sm={12} lg={7}>
+          <Col xs={24} sm={12} lg={4}>
             <Select
-              aria-label="赛道筛选"
+              aria-label="标签筛选"
               className="full-width"
               allowClear
               showSearch
               disabled={filterControlsDisabled}
               loading={optionsLoading}
-              placeholder="选择赛道"
+              placeholder="选择标签"
               value={query.tag}
               onChange={(value: string | undefined) => onChange({ tag: value })}
               options={(options?.tags ?? []).map((tag) => ({
@@ -117,7 +122,25 @@ export function InfluencerFilterBar({
               }))}
             />
           </Col>
-          <Col xs={24} sm={12} lg={7}>
+          <Col xs={24} sm={12} lg={4}>
+            <Select
+              aria-label="CRM 阶段筛选"
+              className="full-width"
+              allowClear
+              disabled={filterControlsDisabled}
+              loading={optionsLoading}
+              placeholder="选择 CRM 阶段"
+              value={query.crm_stage}
+              onChange={(value: string | undefined) =>
+                onChange({ crm_stage: value })
+              }
+              options={(options?.crm_stages ?? []).map((stage) => ({
+                value: stage,
+                label: stage,
+              }))}
+            />
+          </Col>
+          <Col xs={24} sm={12} lg={5}>
             <Select
               aria-label="负责人筛选"
               className="full-width"
@@ -135,27 +158,18 @@ export function InfluencerFilterBar({
               }))}
             />
           </Col>
+          <Col xs={24} sm={12} lg={3}>
+            <Button
+              className="full-width"
+              icon={<ClearOutlined aria-hidden="true" />}
+              onClick={onClear}
+            >
+              清除筛选
+            </Button>
+          </Col>
         </Row>
 
-        <Row gutter={[12, 12]} align="middle">
-          <Col xs={24} sm={12} lg={6}>
-            <Select
-              aria-label="CRM Stage 筛选"
-              className="full-width"
-              allowClear
-              disabled={filterControlsDisabled}
-              loading={optionsLoading}
-              placeholder="选择 CRM Stage"
-              value={query.crm_stage}
-              onChange={(value: string | undefined) =>
-                onChange({ crm_stage: value })
-              }
-              options={(options?.crm_stages ?? []).map((stage) => ({
-                value: stage,
-                label: stage,
-              }))}
-            />
-          </Col>
+        <Row gutter={[12, 12]} align="middle" className="follower-filter-row">
           <Col xs={24} sm={12} lg={5}>
             <Input
               aria-label="粉丝下限"
@@ -174,11 +188,10 @@ export function InfluencerFilterBar({
               onChange={(event) => setMaximumDraft(event.target.value)}
             />
           </Col>
-          <Col xs={24} sm={12} lg={8}>
-            <Space wrap>
-              <Button onClick={applyFollowers}>应用粉丝范围</Button>
-              <Button onClick={onClear}>清除筛选</Button>
-            </Space>
+          <Col xs={24} sm={12} lg={5}>
+            <Button className="full-width" onClick={applyFollowers}>
+              应用粉丝范围
+            </Button>
           </Col>
         </Row>
 

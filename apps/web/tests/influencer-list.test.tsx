@@ -43,7 +43,7 @@ const listData = {
           profile_url: "https://example.invalid/a",
           source: "huitun",
           is_active: true,
-          source_tags: ["动画", "超长标签".repeat(41)],
+          source_tags: ["动画", "二次元", "生活方式", "超长标签".repeat(41)],
         },
         {
           id: "account-2",
@@ -61,8 +61,8 @@ const listData = {
         {
           platform_account_id: "account-1",
           source: "huitun",
-          source_updated_at: null,
-          followers_count: 0,
+          source_updated_at: "2026-08-03T06:28:00Z",
+          followers_count: 206572,
         },
         {
           platform_account_id: "account-2",
@@ -178,19 +178,28 @@ describe("InfluencerWorkspace", () => {
       });
     });
     const first = renderWorkspace();
+    expect(
+      screen.getByText("公司共享达人资源 · 统一查看、筛选和管理"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /导入达人/ })).toHaveAttribute(
+      "href",
+      "/",
+    );
     expect(screen.getByText("正在加载达人列表")).toBeInTheDocument();
     expect(screen.getByText("正在加载筛选选项")).toBeInTheDocument();
     resolveOptions?.(envelope(filterOptions));
     resolveList?.(envelope({ items: [], page: 1, page_size: 50, total: 0 }));
-    expect(await screen.findByText("没有符合条件的达人")).toBeInTheDocument();
+    expect(
+      await screen.findByText("达人库暂无数据，可以先从数据采集导入达人。"),
+    ).toBeInTheDocument();
     first.unmount();
 
     const fetchMock = mockApi(envelope(null, 500));
     renderWorkspace();
     expect(
-      await screen.findByText("达人列表加载失败", {}, { timeout: 3000 }),
+      await screen.findByText("达人数据加载失败", {}, { timeout: 3000 }),
     ).toBeInTheDocument();
-    const retry = screen.getByRole("button", { name: "重试达人列表" });
+    const retry = screen.getByRole("button", { name: "重新加载" });
     const callsBeforeRetry = fetchMock.mock.calls.length;
     fireEvent.click(retry);
     await waitFor(() =>
@@ -208,18 +217,29 @@ describe("InfluencerWorkspace", () => {
       document.querySelectorAll<HTMLTableRowElement>(".influencer-row");
     expect(rows).toHaveLength(1);
     const row = rows[0] as HTMLTableRowElement;
-    expect(within(row).getByText("账号甲")).toBeInTheDocument();
-    expect(within(row).getAllByText("账号乙").length).toBeGreaterThan(0);
-    expect(within(row).getByText("0")).toBeInTheDocument();
-    expect(within(row).getAllByText("—").length).toBeGreaterThan(0);
-    expect(within(row).getByText(/email · \*\*\*/)).toBeInTheDocument();
-    expect(within(row).getByText(/phone · 12345678901/)).toBeInTheDocument();
-    expect(within(row).getByText("疑似重复联系方式")).toBeInTheDocument();
+    expect(within(row).getByText(/账号甲/)).toBeInTheDocument();
+    expect(within(row).getByText("小红书")).toBeInTheDocument();
+    expect(within(row).getByText("动画")).toBeInTheDocument();
+    expect(within(row).getByText("二次元")).toBeInTheDocument();
+    expect(within(row).getByText("+2")).toBeInTheDocument();
+    expect(within(row).getByText("20.66万")).toBeInTheDocument();
+    expect(within(row).getByText("高意向")).toBeInTheDocument();
+    expect(within(row).getByText("邮箱 · 手机")).toBeInTheDocument();
+    expect(within(row).getByText("需核对")).toBeInTheDocument();
+    expect(within(row).queryByText("***")).not.toBeInTheDocument();
+    expect(within(row).queryByText("12345678901")).not.toBeInTheDocument();
+    expect(within(row).getByText("08-03")).toBeInTheDocument();
+    fireEvent.mouseOver(within(row).getByText("20.66万"));
+    expect(await screen.findByText("206,572")).toBeInTheDocument();
     expect(screen.getByText("共 120 位达人")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "下一页" })).toBeEnabled();
     expect(
       screen.getByRole("link", { name: "零粉多账号达人" }),
     ).toHaveAttribute(
+      "href",
+      "/influencers/00000000-0000-0000-0000-000000000101",
+    );
+    expect(within(row).getByRole("link", { name: "查看" })).toHaveAttribute(
       "href",
       "/influencers/00000000-0000-0000-0000-000000000101",
     );
@@ -233,6 +253,7 @@ describe("InfluencerWorkspace", () => {
 
     const search = await screen.findByRole("textbox", { name: "昵称搜索" });
     expect(search).toHaveValue("旧搜索");
+    expect(search).toHaveAttribute("placeholder", "搜索达人昵称或账号名");
     expect(search).toHaveAttribute("maxlength", "160");
     fireEvent.change(search, { target: { value: "  新搜索  " } });
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
@@ -258,6 +279,16 @@ describe("InfluencerWorkspace", () => {
     expect(await screen.findByText("粉丝下限不能大于上限")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "清除筛选" }));
     expect(navigation.replace).toHaveBeenLastCalledWith("/influencers");
+  });
+
+  it("explains an empty result when filters are active", async () => {
+    navigation.search = "q=%E5%9B%BD%E9%A3%8E";
+    mockApi({ items: [], page: 1, page_size: 50, total: 0 });
+    renderWorkspace();
+
+    expect(
+      await screen.findByText("没有符合条件的达人。试试调整或清除筛选条件。"),
+    ).toBeInTheDocument();
   });
 
   it("keeps list browsing available when filter options fail", async () => {
@@ -311,7 +342,7 @@ describe("InfluencerWorkspace", () => {
     renderWorkspace();
     await screen.findByRole("link", { name: "零粉多账号达人" });
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "赛道筛选" }));
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "标签筛选" }));
     await screen.findByRole("option", { name: "动画" });
     const longTagOption = screen.getByRole("option", {
       name: "超长标签".repeat(41),
@@ -341,9 +372,7 @@ describe("InfluencerWorkspace", () => {
       ),
     );
 
-    fireEvent.mouseDown(
-      screen.getByRole("combobox", { name: "CRM Stage 筛选" }),
-    );
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "CRM 阶段筛选" }));
     await screen.findByRole("option", { name: "高意向" });
     const visibleCrmOption = Array.from(
       document.querySelectorAll<HTMLElement>(".ant-select-item-option"),

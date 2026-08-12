@@ -313,8 +313,25 @@ body {
 
 .influencer-workspace {
   display: grid;
-  gap: 18px;
+  gap: 14px;
   width: 100%;
+}
+
+.influencer-page-heading {
+  padding: 2px 0 4px;
+}
+
+.influencer-page-heading .app-page-header {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.influencer-page-heading .app-page-header h2 {
+  font-size: 22px;
+}
+
+.influencer-page-heading .app-page-header-extra {
+  flex: none;
 }
 
 .influencer-heading-card,
@@ -324,6 +341,115 @@ body {
 .influencer-detail-actions {
   border: 1px solid var(--app-border);
   box-shadow: var(--app-shadow);
+}
+
+.influencer-filter-card,
+.influencer-list-card {
+  box-shadow: none;
+}
+
+.influencer-filter-card .ant-card-body {
+  padding: 16px;
+}
+
+.influencer-list-card .ant-card-body {
+  padding: 0;
+}
+
+.influencer-list-card > .ant-card-body > .ant-alert {
+  margin: 16px;
+}
+
+.influencer-list-card .ant-table-thead > tr > th {
+  padding: 11px 12px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.influencer-list-card .ant-table-tbody > tr > td {
+  padding: 14px 12px;
+  border-bottom-color: #edf1f6;
+  font-size: 13px;
+}
+
+.influencer-list-card .ant-table-tbody > tr.ant-table-row:hover > td {
+  background: #f7faff;
+}
+
+.influencer-primary-cell,
+.influencer-platform-tags,
+.influencer-contact-cell,
+.influencer-owner-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.influencer-name-link {
+  overflow: hidden;
+  color: var(--app-text);
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.influencer-name-link:hover {
+  color: var(--app-primary);
+}
+
+.influencer-account-line {
+  display: block;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.influencer-tag-line {
+  display: flex;
+  min-height: 22px;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.influencer-tag-line .ant-tag {
+  margin-inline-end: 0;
+}
+
+.influencer-tag-line .platform-tag {
+  border-color: #ffd6d6;
+  background: #fff5f5;
+  color: #c24141;
+}
+
+.influencer-tag-line .source-tag {
+  max-width: 72px;
+}
+
+.source-tag-more {
+  flex: none;
+  color: var(--app-text-secondary);
+}
+
+.influencer-follower-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.influencer-contact-cell,
+.influencer-owner-cell {
+  align-content: center;
+}
+
+.influencer-contact-cell .ant-typography:last-child,
+.influencer-owner-cell .ant-tag {
+  width: fit-content;
+  margin: 0;
+  font-size: 11px;
 }
 
 .influencer-heading-card h3 {
@@ -356,6 +482,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  padding: 12px 16px 16px;
 }
 
 .influencer-detail-actions {

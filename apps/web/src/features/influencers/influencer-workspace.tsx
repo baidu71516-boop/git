@@ -1,9 +1,13 @@
 "use client";
 
-import { Alert, Button, Card, Empty, Space, Spin, Typography } from "antd";
+import { ImportOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Space } from "antd";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useMemo } from "react";
 
+import { AppEmpty } from "@/components/ui/app-empty";
+import { AppLoading } from "@/components/ui/app-loading";
+import { PageHeader } from "@/components/ui/page-header";
 import { ApiClientError } from "@/lib/api/client";
 
 import { INFLUENCER_QUERY_PARAMETERS } from "./api";
@@ -15,8 +19,6 @@ import { InfluencerPagination } from "./components/influencer-pagination";
 import { InfluencerTable } from "./components/influencer-table";
 import { useInfluencerFilterOptions, useInfluencerList } from "./queries";
 import type { InfluencerListQueryParams } from "./types";
-
-const { Paragraph, Title } = Typography;
 
 function readQuery(search: URLSearchParams): InfluencerListQueryParams {
   const query: InfluencerListQueryParams = {};
@@ -39,7 +41,7 @@ function listErrorMessage(error: Error | null): string {
   if (error instanceof ApiClientError && error.status === 422) {
     return "筛选条件无效，请清除筛选后重试。";
   }
-  return "达人列表加载失败";
+  return "达人数据加载失败";
 }
 
 export function InfluencerWorkspace() {
@@ -93,20 +95,32 @@ export function InfluencerWorkspace() {
 
   const page = displayInteger(query.page, 1);
   const pageSize = displayInteger(query.page_size, 50);
+  const hasActiveFilters = Boolean(
+    query.q ||
+    query.tag ||
+    query.followers_min ||
+    query.followers_max ||
+    query.owner_operator_id ||
+    query.crm_stage,
+  );
 
   return (
-    <section
-      className="influencer-workspace"
-      aria-labelledby="influencer-title"
-    >
-      <Card variant="borderless" className="influencer-heading-card">
-        <Title level={3} id="influencer-title">
-          达人库
-        </Title>
-        <Paragraph type="secondary">
-          公司级共享达人资源；筛选状态保存在当前 URL 中。
-        </Paragraph>
-      </Card>
+    <section className="influencer-workspace" aria-label="达人库">
+      <div className="influencer-page-heading">
+        <PageHeader
+          title="达人库"
+          description="公司共享达人资源 · 统一查看、筛选和管理"
+          extra={
+            <Button
+              type="primary"
+              icon={<ImportOutlined aria-hidden="true" />}
+              href="/"
+            >
+              导入达人
+            </Button>
+          }
+        />
+      </div>
 
       <InfluencerFilterBar
         key={searchString}
@@ -123,19 +137,18 @@ export function InfluencerWorkspace() {
       <Card variant="borderless" className="influencer-list-card">
         {validationMessage ? null : listQuery.isPending ? (
           <div className="influencer-list-state">
-            <Spin size="large" />
-            <span>正在加载达人列表</span>
+            <AppLoading label="正在加载达人列表" />
           </div>
         ) : listQuery.isError ? (
           <Alert
             type="error"
             showIcon
             message={listErrorMessage(listQuery.error)}
-            description="网络错误不会被当作空列表。"
+            description="请检查网络连接后重新加载。"
             action={
               <Space>
                 <Button onClick={() => void listQuery.refetch()}>
-                  重试达人列表
+                  重新加载
                 </Button>
                 {listQuery.error instanceof ApiClientError &&
                 listQuery.error.status === 422 ? (
@@ -147,7 +160,13 @@ export function InfluencerWorkspace() {
             }
           />
         ) : listQuery.data && listQuery.data.items.length === 0 ? (
-          <Empty description="没有符合条件的达人" />
+          <AppEmpty
+            description={
+              hasActiveFilters
+                ? "没有符合条件的达人。试试调整或清除筛选条件。"
+                : "达人库暂无数据，可以先从数据采集导入达人。"
+            }
+          />
         ) : listQuery.data ? (
           <Space orientation="vertical" size="middle" className="full-width">
             <InfluencerTable items={listQuery.data.items} />

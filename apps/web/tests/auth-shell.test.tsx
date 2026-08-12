@@ -115,9 +115,11 @@ describe("AuthShell", () => {
 
     renderAuthenticatedShell("influencers");
 
-    expect(
-      await screen.findByRole("heading", { name: "达人库", level: 3 }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("heading", { name: "达人库", level: 2 }),
+      ).toHaveLength(2);
+    });
     expect(
       within(screen.getByRole("complementary")).getByText("待选择"),
     ).toBeInTheDocument();
@@ -201,9 +203,11 @@ describe("AuthShell", () => {
 
     renderAuthenticatedShell("influencers");
 
-    expect(
-      await screen.findByRole("heading", { name: "达人库", level: 3 }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getAllByRole("heading", { name: "达人库", level: 2 }),
+      ).toHaveLength(2);
+    });
     expect(screen.getByRole("link", { name: /数据采集/ })).toHaveAttribute(
       "href",
       "/",
