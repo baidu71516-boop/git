@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 2 — Multi-file Upload & Storage
+
+#### Added
+
+- 新增 Bulk Draft 与四个文件接口：创建 `ImportJob` Draft、逐文件上传、文件列表、Preview 前 acquisition time 修正和 Draft 文件排除；一次请求只接收一个 CSV/XLSX，不启动多文件 Parse、Preview 或 Confirm。
+- 同一 Job 通过持久 client-ID alias 和 SHA 约束实现完整幂等真值；不同 Job 可复用同一 `StoredImportFile` blob，但各自创建独立 occurrence，且不复用历史 Row、Mapping 或 Preview。
+- 新 occurrence 记录稳定 position、来源取得时间及 occurrence-level acquisition confirmation 状态；历史 SHA 的 server-default 时间必须人工确认，显式时间和 PATCH 确认保持可审计。
+- 新增 validated Settings：每 Batch 最多 20 个 occurrence、累计 100 MiB，source acquisition 允许最多 5 分钟时钟偏差；单文件仍沿用 25 MiB 和 Phase 1B 安全解析限制。
+
+#### Security and Reliability
+
+- Bulk Mutation 继续强制 Session、selected Operator、CSRF、后端 RBAC 和 Department scope；Viewer 只读，新嵌套资源对不可见 scope 返回 404，API 不返回 Storage Key 或服务器路径。
+- 上传在消费文件流前完成 Job/scope/Draft 预检，写入前再次锁定 Job；PostgreSQL Job 行锁与数据库 unique/FK 约束共同保证并发 position、SHA occurrence 和 alias 收敛。
+- 原子存储补偿覆盖上传中断、验证失败、批级限制、数据库失败和 rename 后异常；排除 occurrence 不删除 blob。提交结果不确定时使用 shielded commit 和独立事务核验，优先保留可能已被 lineage 引用的 canonical blob，所有异常路径执行 rollback。
+- 空文件和损坏但受支持的 CSV/XLSX 返回 422，扩展名/MIME mismatch 返回 415，大小超限返回 413；完整错误使用统一 request-ID envelope，OpenAPI 同时描述首次上传 201 与幂等上传 200。
+
+#### Verification
+
+- `make test` 通过：backend_core/integration/smoke 159 passed、5 个外部门控按设计跳过；API 15 passed；Worker 5 passed；Web 29 passed。
+- PostgreSQL 16 显式门禁 24 passed，覆盖最终 `0004` Migration、client-ID/SHA/position 并发、Phase 1B Confirm 并发和达人查询；仓库外真实 50 行灰豚附件回归另 1 passed。
+- `make lint` 覆盖 Ruff、Black、backend_core/API/Worker mypy、ESLint、TypeScript 和 Prettier；Alembic head 保持 `0004_phase2_bulk_import`，未创建 `0005` 或其他 Migration。
+
 ### Phase 2 Task 0 — Design Freeze
 
 #### Documentation

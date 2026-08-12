@@ -62,6 +62,7 @@ class LocalStorageAdapter:
         temporary = self._resolve(f".{storage_key}.upload")
         digest = hashlib.sha256()
         size = 0
+        promoted = False
         completed = False
         try:
             with temporary.open("xb") as handle:
@@ -83,11 +84,14 @@ class LocalStorageAdapter:
             if size == 0:
                 raise ImportDomainError("EMPTY_FILE", "Import file is empty")
             temporary.replace(target)
+            promoted = True
             target.chmod(0o600)
             completed = True
         finally:
             if not completed:
                 temporary.unlink(missing_ok=True)
+                if promoted:
+                    target.unlink(missing_ok=True)
         return StoredObject(storage_key=storage_key, sha256=digest.hexdigest(), size=size)
 
     async def read(

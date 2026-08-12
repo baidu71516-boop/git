@@ -273,6 +273,61 @@ def test_local_storage_failure_removes_partial_files(
     asyncio.run(scenario())
 
 
+def test_local_storage_accepts_payload_at_exact_size_limit(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        root = tmp_path / "imports"
+        storage = LocalStorageAdapter(root)
+        content = b"12345678"
+
+        stored = await storage.store(chunks(content), suffix=".csv", max_bytes=len(content))
+
+        assert stored.size == len(content)
+        assert (root / stored.storage_key).read_bytes() == content
+        assert not list(root.glob(".*.upload"))
+
+    asyncio.run(scenario())
+
+
+def test_local_storage_generator_failure_removes_partial_files(tmp_path: Path) -> None:
+    async def interrupted_chunks() -> AsyncIterator[bytes]:
+        yield b"partial"
+        raise ConnectionError("upload interrupted")
+
+    async def scenario() -> None:
+        root = tmp_path / "imports"
+        storage = LocalStorageAdapter(root)
+
+        with pytest.raises(ConnectionError, match="upload interrupted"):
+            await storage.store(interrupted_chunks(), suffix=".csv", max_bytes=512)
+
+        assert list(root.iterdir()) == []
+
+    asyncio.run(scenario())
+
+
+def test_local_storage_post_promotion_failure_removes_target_and_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        root = tmp_path / "imports"
+        storage = LocalStorageAdapter(root)
+        original_chmod = Path.chmod
+
+        def fail_target_chmod(path: Path, mode: int, *args: object, **kwargs: object) -> None:
+            if path.parent == root and path.suffix == ".csv" and not path.name.startswith("."):
+                raise OSError("simulated target chmod failure")
+            original_chmod(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "chmod", fail_target_chmod)
+
+        with pytest.raises(OSError, match="simulated target chmod failure"):
+            await storage.store(chunks(b"complete"), suffix=".csv", max_bytes=512)
+
+        assert list(root.iterdir()) == []
+
+    asyncio.run(scenario())
+
+
 def test_local_storage_rejects_unsupported_suffix_without_creating_file(tmp_path: Path) -> None:
     async def scenario() -> None:
         root = tmp_path / "imports"

@@ -1,6 +1,7 @@
 """Persistence operations for collection and two-phase import services."""
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import cast
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
     ImportJobFile,
+    ImportJobFileClientId,
     ImportRow,
     StoredImportFile,
 )
@@ -26,6 +28,12 @@ from backend_core.influencers.models import (
     InfluencerSourceState,
     PlatformAccountSourceIdentity,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ImportJobFileRecord:
+    occurrence: ImportJobFile
+    stored_file: StoredImportFile
 
 
 class ImportRepository:
@@ -80,6 +88,131 @@ class ImportRepository:
         if for_update:
             statement = statement.with_for_update()
         return cast(ImportJobFile | None, await self.session.scalar(statement))
+
+    async def get_import_job_file_record(
+        self,
+        import_job_id: UUID,
+        import_job_file_id: UUID,
+    ) -> ImportJobFileRecord | None:
+        row = (
+            await self.session.execute(
+                select(ImportJobFile, StoredImportFile)
+                .join(StoredImportFile, StoredImportFile.id == ImportJobFile.stored_file_id)
+                .where(
+                    ImportJobFile.id == import_job_file_id,
+                    ImportJobFile.import_job_id == import_job_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        occurrence, stored_file = row
+        return ImportJobFileRecord(occurrence, stored_file)
+
+    async def get_import_job_file_by_stored_file(
+        self,
+        import_job_id: UUID,
+        stored_file_id: UUID,
+    ) -> ImportJobFile | None:
+        return cast(
+            ImportJobFile | None,
+            await self.session.scalar(
+                select(ImportJobFile).where(
+                    ImportJobFile.import_job_id == import_job_id,
+                    ImportJobFile.stored_file_id == stored_file_id,
+                )
+            ),
+        )
+
+    async def get_import_job_file_by_sha256(
+        self,
+        import_job_id: UUID,
+        sha256: str,
+    ) -> ImportJobFileRecord | None:
+        row = (
+            await self.session.execute(
+                select(ImportJobFile, StoredImportFile)
+                .join(StoredImportFile, StoredImportFile.id == ImportJobFile.stored_file_id)
+                .where(
+                    ImportJobFile.import_job_id == import_job_id,
+                    StoredImportFile.sha256 == sha256,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        occurrence, stored_file = row
+        return ImportJobFileRecord(occurrence, stored_file)
+
+    async def get_file_client_id_alias(
+        self,
+        import_job_id: UUID,
+        client_file_id: str,
+    ) -> ImportJobFileRecord | None:
+        row = (
+            await self.session.execute(
+                select(ImportJobFile, StoredImportFile)
+                .join(
+                    ImportJobFileClientId,
+                    ImportJobFileClientId.import_job_file_id == ImportJobFile.id,
+                )
+                .join(StoredImportFile, StoredImportFile.id == ImportJobFile.stored_file_id)
+                .where(
+                    ImportJobFileClientId.import_job_id == import_job_id,
+                    ImportJobFileClientId.client_file_id == client_file_id,
+                )
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        occurrence, stored_file = row
+        return ImportJobFileRecord(occurrence, stored_file)
+
+    async def has_other_job_file_reference(
+        self,
+        stored_file_id: UUID,
+        import_job_id: UUID,
+    ) -> bool:
+        value = await self.session.scalar(
+            select(ImportJobFile.id).where(
+                ImportJobFile.stored_file_id == stored_file_id,
+                ImportJobFile.import_job_id != import_job_id,
+            )
+        )
+        return value is not None
+
+    async def import_job_file_usage(self, import_job_id: UUID) -> tuple[int, int, int]:
+        count, total_bytes, max_position = (
+            await self.session.execute(
+                select(
+                    func.count(ImportJobFile.id),
+                    func.coalesce(func.sum(StoredImportFile.size), 0),
+                    func.coalesce(func.max(ImportJobFile.position), 0),
+                )
+                .select_from(ImportJobFile)
+                .join(StoredImportFile, StoredImportFile.id == ImportJobFile.stored_file_id)
+                .where(ImportJobFile.import_job_id == import_job_id)
+            )
+        ).one()
+        return int(count), int(total_bytes), int(max_position)
+
+    async def list_import_job_file_records(
+        self,
+        import_job_id: UUID,
+    ) -> list[ImportJobFileRecord]:
+        rows = list(
+            (
+                await self.session.execute(
+                    select(ImportJobFile, StoredImportFile)
+                    .join(StoredImportFile, StoredImportFile.id == ImportJobFile.stored_file_id)
+                    .where(ImportJobFile.import_job_id == import_job_id)
+                    .order_by(ImportJobFile.position, ImportJobFile.id)
+                )
+            ).all()
+        )
+        if not rows:
+            return []
+        return [ImportJobFileRecord(occurrence, stored_file) for occurrence, stored_file in rows]
 
     async def list_import_job_files(
         self, import_job_id: UUID, *, for_update: bool = False

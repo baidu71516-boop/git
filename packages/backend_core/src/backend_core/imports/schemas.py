@@ -4,14 +4,17 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend_core.imports.enums import (
     CollectionJobStatus,
+    ImportJobFileStatus,
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
     ImportSourceType,
+    SourceAcquiredAtOrigin,
+    StoredFileType,
 )
 
 
@@ -69,6 +72,25 @@ class ImportConfirmInput(BaseModel):
     preview_revision: int = Field(ge=1)
 
 
+class BulkImportJobCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    collection_job_id: UUID
+
+
+class SourceAcquiredAtUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_acquired_at: datetime
+
+    @field_validator("source_acquired_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("source_acquired_at must include a timezone")
+        return value
+
+
 class ImportJobPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,14 +98,16 @@ class ImportJobPublic(BaseModel):
     collection_job_id: UUID
     department_id: UUID
     operator_id: UUID
-    original_filename: str
-    mime_type: str
-    file_size: int
-    sha256: str
+    stored_file_id: UUID | None
+    original_filename: str | None
+    mime_type: str | None
+    file_size: int | None
+    sha256: str | None
     source_type: ImportSourceType
     status: ImportJobStatus
     detected_fields: list[str] | None
     field_mapping: dict[str, str] | None
+    mapping_hash: str | None
     preview_revision: int
     preview_summary: dict[str, Any] | None
     result: dict[str, Any] | None
@@ -103,6 +127,43 @@ class ImportJobPublic(BaseModel):
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ImportJobFilePublic(BaseModel):
+    id: UUID
+    import_job_id: UUID
+    stored_file_id: UUID
+    position: int
+    original_filename: str
+    declared_mime: str | None
+    status: ImportJobFileStatus
+    source_acquired_at: datetime | None
+    source_acquired_at_origin: SourceAcquiredAtOrigin
+    source_acquired_at_confirmation_required: bool
+    detected_type: StoredFileType
+    detected_mime: str
+    file_size: int
+    sha256: str
+    detected_fields: list[str] | None
+    field_mapping: dict[str, str] | None
+    mapping_hash: str | None
+    raw_rows: int
+    warning_rows: int
+    error_rows: int
+    error_code: str | None
+    error_message: str | None
+    parse_task_id: str | None
+    parse_attempts: int
+    parse_started_at: datetime | None
+    parse_completed_at: datetime | None
+    excluded_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ImportJobFileUploadResult(BaseModel):
+    file: ImportJobFilePublic
+    idempotent: bool
 
 
 class ImportRowPublic(BaseModel):
