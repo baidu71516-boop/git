@@ -160,7 +160,9 @@ export function InfluencerFilterBar({
           </Col>
           <Col xs={24} sm={12} lg={3}>
             <Button
-              className="full-width"
+              type="text"
+              className="influencer-clear-filter-button"
+              block
               icon={<ClearOutlined aria-hidden="true" />}
               onClick={onClear}
             >
@@ -169,29 +171,40 @@ export function InfluencerFilterBar({
           </Col>
         </Row>
 
-        <Row gutter={[12, 12]} align="middle" className="follower-filter-row">
-          <Col xs={24} sm={12} lg={5}>
-            <Input
-              aria-label="粉丝下限"
-              inputMode="numeric"
-              placeholder="粉丝下限"
-              value={minimumDraft}
-              onChange={(event) => setMinimumDraft(event.target.value)}
-            />
-          </Col>
-          <Col xs={24} sm={12} lg={5}>
-            <Input
-              aria-label="粉丝上限"
-              inputMode="numeric"
-              placeholder="粉丝上限"
-              value={maximumDraft}
-              onChange={(event) => setMaximumDraft(event.target.value)}
-            />
-          </Col>
-          <Col xs={24} sm={12} lg={5}>
-            <Button className="full-width" onClick={applyFollowers}>
-              应用粉丝范围
-            </Button>
+        <Row gutter={[12, 12]} className="follower-filter-row">
+          <Col xs={24}>
+            <div className="influencer-follower-filter-compact">
+              <span className="influencer-follower-filter-label">粉丝区间</span>
+              <Input
+                aria-label="粉丝下限"
+                className="influencer-follower-input"
+                inputMode="numeric"
+                placeholder="最低粉丝"
+                value={minimumDraft}
+                onChange={(event) => setMinimumDraft(event.target.value)}
+              />
+              <span
+                className="influencer-follower-filter-separator"
+                aria-hidden="true"
+              >
+                —
+              </span>
+              <Input
+                aria-label="粉丝上限"
+                className="influencer-follower-input"
+                inputMode="numeric"
+                placeholder="最高粉丝"
+                value={maximumDraft}
+                onChange={(event) => setMaximumDraft(event.target.value)}
+              />
+              <Button
+                className="influencer-follower-apply-button"
+                aria-label="应用粉丝范围"
+                onClick={applyFollowers}
+              >
+                应用
+              </Button>
+            </div>
           </Col>
         </Row>
 

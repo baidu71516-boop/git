@@ -47,6 +47,10 @@ function accountTooltip(item: InfluencerListItem): string {
     .join("\n");
 }
 
+function platformTagClass(platform: string) {
+  return `platform-tag-${platform.toLowerCase().replace(/[^a-z0-9]/g, "-")}`;
+}
+
 function followerValue(item: InfluencerListItem): number | null {
   const values = item.current_metrics.flatMap((metric) =>
     metric.followers_count === null ? [] : [metric.followers_count],
@@ -92,7 +96,7 @@ const columns: ColumnsType<InfluencerListItem> = [
   {
     title: "平台 / 标签",
     key: "platform_tags",
-    width: 210,
+    width: 196,
     render: (_, item) => {
       const platforms = unique(
         item.platform_accounts.map((account) => account.platform),
@@ -107,7 +111,10 @@ const columns: ColumnsType<InfluencerListItem> = [
           <div className="influencer-tag-line">
             {platforms.length ? (
               platforms.map((platform) => (
-                <Tag className="platform-tag" color="red" key={platform}>
+                <Tag
+                  className={`platform-tag ${platformTagClass(platform)}`}
+                  key={platform}
+                >
                   {platformLabel(platform)}
                 </Tag>
               ))
@@ -167,7 +174,7 @@ const columns: ColumnsType<InfluencerListItem> = [
   {
     title: "联系方式",
     key: "contacts",
-    width: 130,
+    width: 124,
     render: (_, item) => (
       <div className="influencer-contact-cell">
         <Text>{contactSummary(item)}</Text>
@@ -199,7 +206,9 @@ const columns: ColumnsType<InfluencerListItem> = [
       const timestamp = latestMetricsTimestamp(item.current_metrics);
       return timestamp ? (
         <AppTooltip title={formatMetricsTimestampTooltip(timestamp)}>
-          <Text>{formatMetricsTimestamp(timestamp)}</Text>
+          <Text className="influencer-metrics-time">
+            {formatMetricsTimestamp(timestamp)}
+          </Text>
         </AppTooltip>
       ) : (
         "—"
@@ -211,7 +220,11 @@ const columns: ColumnsType<InfluencerListItem> = [
     key: "actions",
     width: 70,
     fixed: "right",
-    render: (_, item) => <Link href={`/influencers/${item.id}`}>查看</Link>,
+    render: (_, item) => (
+      <Link className="influencer-view-link" href={`/influencers/${item.id}`}>
+        查看
+      </Link>
+    ),
   },
 ];
 

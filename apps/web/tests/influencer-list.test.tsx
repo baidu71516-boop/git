@@ -316,7 +316,7 @@ describe("InfluencerWorkspace", () => {
     const maximum = screen.getByRole("textbox", { name: "粉丝上限" });
     fireEvent.change(minimum, { target: { value: "0" } });
     fireEvent.change(maximum, { target: { value: "100" } });
-    fireEvent.click(screen.getByRole("button", { name: "应用粉丝范围" }));
+    fireEvent.click(screen.getByRole("button", { name: /应用/ }));
     expect(navigation.replace).toHaveBeenLastCalledWith(
       expect.stringContaining("followers_min=0&followers_max=100"),
     );
