@@ -311,6 +311,146 @@ body {
   width: 100%;
 }
 
+.data-collection-workspace {
+  width: 100%;
+}
+
+.data-collection-workspace > .ant-tabs > .ant-tabs-nav {
+  margin-bottom: 16px;
+}
+
+.bulk-workspace-card {
+  border: 1px solid var(--app-border);
+  box-shadow: none;
+}
+
+.bulk-workspace-card > .ant-card-body {
+  padding: 0;
+}
+
+.bulk-workspace-card > .ant-card-body > .ant-empty,
+.bulk-workspace-card > .ant-card-body > .ant-alert,
+.bulk-workspace-card > .ant-card-body > .app-loading {
+  margin: 32px 20px;
+}
+
+.bulk-workspace-card > .ant-card-body > .ant-space {
+  gap: 0 !important;
+}
+
+.bulk-job-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 20px;
+}
+
+.bulk-job-summary-copy {
+  min-width: 0;
+}
+
+.bulk-job-summary h4,
+.bulk-file-section-heading h5 {
+  margin: 4px 0;
+}
+
+.bulk-workspace-card .ant-alert {
+  margin: 0 20px 16px;
+}
+
+.bulk-file-section {
+  border-top: 1px solid #edf1f6;
+}
+
+.bulk-file-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 20px 14px;
+}
+
+.bulk-file-uploader {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.bulk-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.bulk-upload-queue {
+  display: grid;
+  width: min(420px, 100%);
+  gap: 6px;
+}
+
+.bulk-upload-queue-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #edf1f6;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.bulk-upload-queue-item > div,
+.bulk-file-name-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bulk-file-name-cell .ant-typography {
+  max-width: 210px;
+}
+
+.bulk-file-table .ant-table-thead > tr > th {
+  height: 42px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bulk-file-table .ant-table-tbody > tr > td {
+  padding: 12px;
+  vertical-align: middle;
+  border-bottom-color: #edf1f6;
+  font-size: 13px;
+}
+
+.bulk-file-table .ant-btn-link {
+  height: auto;
+  padding-inline: 0;
+}
+
+.bulk-preview-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  min-height: 64px;
+  padding: 14px 20px;
+  border-top: 1px solid #edf1f6;
+  background: #fbfcfe;
+}
+
 .influencer-workspace {
   display: grid;
   gap: 14px;
@@ -1019,6 +1159,18 @@ body {
 
   .workspace-heading {
     flex-direction: column;
+  }
+
+  .bulk-job-summary,
+  .bulk-file-section-heading,
+  .bulk-preview-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bulk-file-uploader {
+    align-items: flex-start;
+    justify-content: flex-start;
   }
 
   .mapping-row {

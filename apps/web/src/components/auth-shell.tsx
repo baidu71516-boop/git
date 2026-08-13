@@ -18,9 +18,9 @@ import { useCallback, useEffect, useState } from "react";
 
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
+import { DataCollectionWorkspace } from "@/features/imports/data-collection-workspace";
 import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
-import { ImportWorkspace } from "@/components/import-workspace";
 
 const { Paragraph, Title } = Typography;
 
@@ -228,6 +228,11 @@ export function AuthShell({
   return (
     <AppShell
       title={title}
+      description={
+        workspace === "imports"
+          ? "上传达人数据，完成文件检查后生成数据预览。"
+          : undefined
+      }
       department={auth.department.name}
       operator={auth.operator?.name ?? null}
       role={roleLabels[auth.role]}
@@ -242,7 +247,7 @@ export function AuthShell({
           <InfluencerWorkspace />
         )
       ) : auth.operator ? (
-        <ImportWorkspace role={auth.role} />
+        <DataCollectionWorkspace role={auth.role} />
       ) : null}
 
       <Modal
