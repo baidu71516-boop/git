@@ -42,6 +42,7 @@ from backend_core.imports.enums import (
     ImportMatchType,
     ImportRowAction,
     ImportSourceType,
+    ImportTaskState,
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
@@ -52,6 +53,7 @@ from backend_core.imports.models import (
     ImportJob,
     ImportJobFile,
     ImportRow,
+    ImportTaskRequest,
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits
@@ -277,12 +279,17 @@ async def _one_chunk(content: bytes) -> AsyncIterator[bytes]:
     yield content
 
 
-def _csv_bytes(rows: Iterable[dict[str, str]]) -> bytes:
+def _csv_bytes(
+    rows: Iterable[dict[str, str]],
+    *,
+    headers: Iterable[str] = CSV_HEADERS,
+) -> bytes:
+    ordered_headers = tuple(headers)
     stream = io.StringIO(newline="")
-    writer = csv.DictWriter(stream, fieldnames=CSV_HEADERS)
+    writer = csv.DictWriter(stream, fieldnames=ordered_headers)
     writer.writeheader()
     for row in rows:
-        writer.writerow({header: row.get(header, "") for header in CSV_HEADERS})
+        writer.writerow({header: row.get(header, "") for header in ordered_headers})
     return stream.getvalue().encode()
 
 
@@ -313,9 +320,13 @@ async def _store_csv(
     session: AsyncSession,
     storage: LocalStorageAdapter,
     rows: Iterable[dict[str, str]],
+    *,
+    headers: Iterable[str] = CSV_HEADERS,
 ) -> StoredImportFile:
     stored = await storage.store(
-        _one_chunk(_csv_bytes(rows)), suffix=".csv", max_bytes=25 * 1024 * 1024
+        _one_chunk(_csv_bytes(rows, headers=headers)),
+        suffix=".csv",
+        max_bytes=25 * 1024 * 1024,
     )
     model = StoredImportFile(
         sha256=stored.sha256,
@@ -335,8 +346,13 @@ async def _seed_batch(
     files: Iterable[Iterable[dict[str, str]]],
     *,
     screening: bool = False,
+    source_type: ImportSourceType = ImportSourceType.GENERIC_CSV,
+    field_mapping: dict[str, str] | None = None,
+    csv_headers: Iterable[str] | None = None,
 ) -> SeededBatch:
     rows_by_file = [list(rows) for rows in files]
+    selected_mapping = dict(MAPPING if field_mapping is None else field_mapping)
+    selected_headers = tuple(CSV_HEADERS if csv_headers is None else csv_headers)
     async with harness.factory() as session:
         department = Department(
             name=f"Unified Preview fixture {uuid4().hex}",
@@ -375,7 +391,7 @@ async def _seed_batch(
             target_count=max(sum(map(len, rows_by_file)), 1),
             department_id=department.id,
             owner_operator_id=operator.id,
-            source_type=ImportSourceType.GENERIC_CSV,
+            source_type=source_type,
             status=CollectionJobStatus.ACTIVE,
             screening_rules=(
                 {
@@ -397,7 +413,7 @@ async def _seed_batch(
             collection_job_id=collection.id,
             department_id=department.id,
             operator_id=operator.id,
-            source_type=ImportSourceType.GENERIC_CSV,
+            source_type=source_type,
             status=ImportJobStatus.DRAFT,
             preview_revision=0,
         )
@@ -405,7 +421,12 @@ async def _seed_batch(
         await session.flush()
         occurrences: list[ImportJobFile] = []
         for position, rows in enumerate(rows_by_file, start=1):
-            stored_file = await _store_csv(session, harness.storage, rows)
+            stored_file = await _store_csv(
+                session,
+                harness.storage,
+                rows,
+                headers=selected_headers,
+            )
             task_id = f"parse-{job.id}-{position}"
             occurrence = ImportJobFile(
                 import_job_id=job.id,
@@ -417,7 +438,7 @@ async def _seed_batch(
                 source_acquired_at=SOURCE_TIME,
                 source_acquired_at_origin=SourceAcquiredAtOrigin.USER_CONFIRMED,
                 source_acquired_at_confirmation_required=False,
-                field_mapping=dict(MAPPING),
+                field_mapping=dict(selected_mapping),
                 parse_task_id=task_id,
                 parse_attempts=1,
                 parse_started_at=datetime.now(UTC),
@@ -496,12 +517,27 @@ async def _build(
     task_id: str,
 ) -> dict[str, Any]:
     async with harness.factory() as session:
-        return await UnifiedPreviewProcessor(
+        result = await UnifiedPreviewProcessor(
             session,
             harness.storage,
             parser_limits=ParserLimits(max_rows=10_000, max_columns=100, max_cells=1_000_000),
             max_batch_rows=10_000,
         ).build(job_id, task_id)
+        # This Task 5 compatibility helper calls the processor directly instead
+        # of going through the Task 6 worker claim.  Retire the durable request
+        # after a successful build so explicit rebuild tests do not leave a
+        # synthetic active task.  Worker/recovery gates exercise the real
+        # claim+completion-in-business-transaction path.
+        task = await session.scalar(
+            select(ImportTaskRequest).where(ImportTaskRequest.task_token == UUID(task_id))
+        )
+        if task is not None and task.state is not ImportTaskState.COMPLETED:
+            task.state = ImportTaskState.COMPLETED
+            task.completed_at = datetime.now(UTC)
+            task.next_retry_at = None
+            task.lease_expires_at = None
+            await session.commit()
+        return result
 
 
 async def _job_rows(session: AsyncSession, job_id: UUID) -> list[ImportRow]:
@@ -724,7 +760,7 @@ def test_same_token_double_request_and_double_worker_converge_one_revision() -> 
             )
             assert sorted(item[0] for item in requests) == [False, True]
             assert sorted(item[1] for item in requests) == [False, True]
-            assert {item[2] for item in requests} == {task_id}
+            assert {UUID(item[2]) for item in requests} == {UUID(task_id)}
 
             results = await asyncio.wait_for(
                 asyncio.gather(
@@ -852,17 +888,16 @@ def test_freshness_uses_confirmed_account_source_history_and_survives_rebuild() 
 
             delayed_task = uuid4().hex
             delayed = await _request_preview(harness, seeded, delayed_task)
-            assert delayed == (False, True, first_task)
+            assert delayed[:2] == (False, True)
+            assert UUID(delayed[2]) == UUID(first_task)
             async with harness.factory() as session:
                 job = await session.get(ImportJob, seeded.job_id)
                 assert job is not None and job.preview_revision == 1
 
             rebuild_task = uuid4().hex
-            assert (await _request_preview(harness, seeded, rebuild_task, rebuild=True)) == (
-                True,
-                False,
-                rebuild_task,
-            )
+            rebuild = await _request_preview(harness, seeded, rebuild_task, rebuild=True)
+            assert rebuild[:2] == (True, False)
+            assert UUID(rebuild[2]) == UUID(rebuild_task)
             await _build(harness, seeded.job_id, rebuild_task)
             second = await freshness_by_account()
             assert second == first
@@ -898,7 +933,7 @@ def test_failed_rebuild_rolls_back_and_keeps_previous_complete_revision(
                 raise RuntimeError("injected Task 5 atomicity failure")
 
             monkeypatch.setattr(
-                "backend_core.imports.preview_processor.hash_batch_plan", fail_before_commit
+                "backend_core.imports.unified_plan.hash_batch_plan", fail_before_commit
             )
             with pytest.raises(ImportDomainError) as raised:
                 await _build(harness, seeded.job_id, second_task)

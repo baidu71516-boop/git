@@ -55,6 +55,23 @@ class Settings(BaseSettings):
     import_max_cell_chars: int = Field(default=100_000, ge=1)
     import_max_warnings: int = Field(default=10_000, ge=1)
 
+    # PostgreSQL is the authoritative import-task clock and attempt ledger.
+    # Celery/Redis delivery may be duplicated or lost and is reconciled from
+    # these bounded policies instead of Celery retry metadata.
+    import_task_reconcile_interval_seconds: int = Field(default=15, ge=1)
+    import_task_reconcile_batch_size: int = Field(default=100, ge=1, le=1_000)
+    import_task_dispatch_max_attempts: int = Field(default=8, ge=1)
+    import_task_dispatch_backoff_base_seconds: int = Field(default=5, ge=1)
+    import_task_dispatch_backoff_max_seconds: int = Field(default=300, ge=1)
+    import_task_run_backoff_base_seconds: int = Field(default=5, ge=1)
+    import_task_run_backoff_max_seconds: int = Field(default=300, ge=1)
+    import_task_lease_seconds: int = Field(default=120, ge=2)
+    import_task_heartbeat_seconds: int = Field(default=30, ge=1)
+    import_task_legacy_parse_max_run_attempts: int = Field(default=3, ge=1)
+    import_task_file_parse_max_run_attempts: int = Field(default=3, ge=1)
+    import_task_preview_max_run_attempts: int = Field(default=3, ge=1)
+    import_task_confirm_max_run_attempts: int = Field(default=3, ge=1)
+
     @property
     def secure_cookies(self) -> bool:
         return self.app_env == "production"
@@ -69,6 +86,23 @@ class Settings(BaseSettings):
     def require_production_master_key(self) -> "Settings":
         if self.app_env == "production" and self.app_master_key is None:
             raise ValueError("APP_MASTER_KEY is required in production")
+        if self.import_task_heartbeat_seconds >= self.import_task_lease_seconds:
+            raise ValueError(
+                "IMPORT_TASK_HEARTBEAT_SECONDS must be less than IMPORT_TASK_LEASE_SECONDS"
+            )
+        if (
+            self.import_task_dispatch_backoff_base_seconds
+            > self.import_task_dispatch_backoff_max_seconds
+        ):
+            raise ValueError(
+                "IMPORT_TASK_DISPATCH_BACKOFF_BASE_SECONDS must not exceed "
+                "IMPORT_TASK_DISPATCH_BACKOFF_MAX_SECONDS"
+            )
+        if self.import_task_run_backoff_base_seconds > self.import_task_run_backoff_max_seconds:
+            raise ValueError(
+                "IMPORT_TASK_RUN_BACKOFF_BASE_SECONDS must not exceed "
+                "IMPORT_TASK_RUN_BACKOFF_MAX_SECONDS"
+            )
         return self
 
 

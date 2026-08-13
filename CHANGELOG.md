@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 6 — Atomic Bulk Confirm / Revalidation / Recovery
+
+#### Added
+
+- 完善尚未发布的 `0004_phase2_bulk_import`，新增 durable `import_task_requests`：四类 task target/state CHECK、UUID token、四个 active partial unique、dispatch/run attempts、retry time、generation/lease 所需时间戳、复合 Job/File FK 和 reconciliation indexes；有 durable task record 时危险 `0004 → 0003` downgrade 安全拒绝，未创建 `0005`。
+- 新增统一 `UnifiedPlanBuilder`，让 Preview 与 Confirm 共用 manifest、Storage SHA、Mapping/acquisition、Canonical normalize、duplicate owner、identity locks、Matcher/Planner、Screening、Change Summary、row plan hash 与 batch summary 的唯一算法；Confirm 使用 non-pruning revalidation，避免重算时删除 revision 已绑定的持久 Row。
+- 新增 Atomic Bulk Confirm processor：精确绑定 Job/revision/task token，重建并逐项比较完整 Plan；任一变化整批 `preview_stale`，一致时在一个 PostgreSQL transaction 内完成所有 included files 的 Merge、ImportRow lineage、Job result、task completed 与成功 Audit。
+- 抽取 Legacy/Bulk 共用的 `ImportMergeApplier`，保持 Phase 1B Hard Match、non-destructive update、manual Contact protection、SourceIdentity/SourceState、CurrentMetrics 和 immutable MetricSnapshot 唯一写入语义；`MANUAL_REVIEW/ERROR/SKIP` 只提交 lineage，不自动 Merge。
+- API/Worker/Scheduler 接入 PostgreSQL task lifecycle：DB-before-publish reservation、ID-only Broker payload、exact claim、持久 run generation/lease/heartbeat、bounded retry/exhaustion、completed replay 和 deterministic `FOR UPDATE SKIP LOCKED` reconciliation。
+
+#### Security and Reliability
+
+- Confirm 双击和 completed replay 返回同一 revision 的已持久 token；不同 revision、manifest/SHA/Mapping/acquisition/Screening/normalized row、owner、identity/current-state、plan hash 或 summary 变化均拒绝旧 Preview，不允许“重算后顺便确认”。
+- Heavy Preview/Confirm 在 claim 前使用同一 PostgreSQL session advisory-lock family 串行化；锁竞争不消耗 run attempt，New Identity 与 Existing Account 并发路径通过稳定 identity/account locks 防重复提交和 lost update。
+- Broker publish 失败保留 PostgreSQL reservation；Scheduler 在 publish 前提交新的 reservation，Worker crash/lease expiry、Redis/API restart 和 business commit 后 Broker ACK 前的 gap 都从持久 task state 恢复，不依赖 Celery retry count、Audit 或进程内状态。
+- Cancel 只允许 requested/retry_wait task 与 Job 同事务取消；running task 返回 409 `IMPORT_TASK_RUNNING`，避免已开始的数据库 transaction 与 cancelled Job 分叉。Audit/日志不记录 raw row、Contact、Storage path、secret 或完整 plan；task token 仅作为必要 task identity 白名单字段使用。
+
+#### Verification
+
+- PostgreSQL 16 Atomic Confirm + durable recovery 组合 Gate 为 25 passed：覆盖 exact frozen payload/Mapping/Screening/SHA stale、completed replay、Row 1999 rollback→lease recovery→generation 2 完成、同/跨 identity-basis 并发、Existing Account 防 lost update、heartbeat/generation/DB-clock fencing、`SKIP LOCKED`、NOWAIT lock inversion rollback 与 cancel race。
+- 2000-row mixed correctness run 为 76 SQL（55 SELECT、21 DML、7 advisory lock）、4.005935s、RSS high-water 309,641,216 bytes；最终为 1998 Influencer/Account、1 SourceIdentity、1996 SourceState、2 Contact、1995 CurrentMetrics/Snapshot，逐行 committed lineage 与 Preview 一致。
+- 正式 37 列灰豚兼容 all-new 性能数据使用 1 次预热 + 5 次测量：wall P95=4.483997s、CPU P95=3.918085s、55 SQL、RSS high-water P95=343,638,016 bytes；5000-row capacity 为 11.811850s、106 SQL、RSS high-water 673,726,464 bytes。mixed new/existing/changed/no-change/error/manual/duplicate 正确性由独立 2000-row Gate 覆盖。
+- 显式 PostgreSQL 16 的最终 `make test` 通过：Backend/Integration/Smoke 368 passed（仅真实附件与已另行实跑的 opt-in 默认跳过）、API 24、Worker 20（含独立 heartbeat 真实 PG）、Web 29；Task 4/5 的 5k/10k opt-in capacity 也实际通过。`make lint`、`make compose-validate`、Alembic head/current/check 均通过，head 保持 `0004_phase2_bulk_import`。
+- 最终隔离 Compose v4 使用与宿主 94 个生产/迁移源文件完全一致的镜像（pre/post/run digest `c144764375dd9830c22314f41c05671178f5cdf212b697f153b24ec253e17f1c`），在 PostgreSQL 16.14 / Redis 7.4.10 上验证 Redis 停止时持久 Confirm request、真实 API 进程重启、Redis 恢复后 Beat reconciliation 和 Worker completion：同 token 从 requested/dispatch1/run0 收敛为 completed/dispatch2/run1，业务实体与 lineage 各一次，容器内 `alembic check` 无 drift；隔离容器、网络、卷、镜像与临时文件已清理。
+
 ### Phase 2 Task 2 — Multi-file Upload & Storage
 
 #### Added

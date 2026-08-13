@@ -6,6 +6,8 @@
 
 本文是 Phase 2 的唯一权威实施与验收协议。旧的 Phase 2 Browser Automation 方案以及“Phase 2 = SOP + Campaign + AI”的排期均已人工废弃。本次设计冻结不代表代码、Schema、Migration、API、Worker 或 Web 已实现，也不授权自动开始 Task 1。
 
+实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 6 Atomic Bulk Confirm / Revalidation / Recovery；Task 0 的冻结范围和任务顺序没有改变。Task 7 Freshness 及后续任务尚未开始，也未由 Task 6 获得实现授权。
+
 若本文与旧版 Phase 2 描述冲突，以本文和已确认的 Phase 1A–1C 决策为准。Phase 1A–1C 的认证、权限、导入、去重、非破坏性合并、Contact 保护和不可变 Snapshot 语义不得被 Phase 2 改写。
 
 ---
@@ -1096,13 +1098,22 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 - Celery worker concurrency = 2。
 - worker prefetch = 1。
 - 同时最多一个 Heavy Import Preview/Confirm。
-- Heavy gate 使用 PostgreSQL session-level advisory lock 的固定命名 key；任务未取得锁时进入可重试等待，不并发执行。连接/Worker 退出自动释放，并在 finally 主动释放；不得只用进程内 semaphore 或会因 Redis 重启失效的裸锁。
+- Heavy gate 使用 PostgreSQL session-level advisory lock 的固定命名 key family；Preview/Confirm 在 task claim 前先取得同一把 heavy gate，锁竞争不增加持久 run attempt。连接/Worker 退出自动释放，并在 finally 主动释放；不得只用进程内 semaphore 或会因 Redis 重启失效的裸锁。
 - Import tasks 继续 acks_late + reject_on_worker_lost。
-- task payload 只传 Job/File ID、revision 和 persisted task token，数据库是事实源。
-- API 业务状态与 `import_task_requests` 必须同事务提交；业务完成与 task completed 必须同事务提交。
-- API 状态提交后 Broker dispatch 丢失由 scheduler 对 persisted requested/retry_wait/expired-running task 使用 bounded `FOR UPDATE SKIP LOCKED` reconciliation 修复。
-- Worker claim 使用 token/state guard，持久增加 run attempts 并设置/续租 lease；Redis 重启后 retry exhaustion 仍由 PostgreSQL 决定。
+- task payload 只传 canonical UUID 形式的 Job/File ID、revision 和 persisted task token，数据库是事实源；kind/target 不匹配在进入业务执行前拒绝。
+- API 业务状态、`import_task_requests` 和首次 dispatch reservation 必须同事务提交；该事务完成后才发布 Broker。业务完成、ImportRow committed lineage、Job result、task completed 与成功 Audit 必须同一 business transaction 提交。
+- Worker claim 使用 token/kind/target/state guard，持久增加 run attempts，以 run attempt 作为 generation 并设置/续租 lease；heartbeat 使用独立线程/事件循环/数据库连接，且 heartbeat/complete 都先取得 task 行锁、再读取 PostgreSQL wall clock 校验 lease。只有当前 generation 且 lease 未失效的 Worker 可完成任务；Redis 重启后 retry exhaustion 仍由 PostgreSQL 决定。
+- 确定性错误进入 terminal；瞬时错误进入 retry_wait。Dispatch/run attempts、退避上限和 exhaustion 只由 PostgreSQL/Settings 决定，Celery retry metadata 不得充当 run count。
+- API 状态提交后 Broker dispatch 丢失由 scheduler 对 persisted requested/retry_wait/expired-running task 使用 bounded、deterministic 的 `FOR UPDATE SKIP LOCKED` reconciliation 修复；reservation 在 publish 前提交，publish 失败时保留下一次到期恢复机会。
+- Cancel 只允许尚未执行的 requested/retry_wait task 与 Job 同事务取消；存在 running task 时返回 409，不尝试 kill 已开始的数据库事务。
 - 已由人工 Confirm 的 revision 重投属于恢复，不是 Auto Confirm。
+
+Preview/Confirm 唯一计划和写入边界：
+
+- `UnifiedPlanBuilder` 是 manifest、Storage SHA、Mapping、acquisition、Screening rule、normalize、duplicate owner、identity lock、Matcher/Planner、row plan hash 与 summary 的唯一算法。Preview 使用 replace-staging 模式；Confirm 使用 preserve-staging 模式，重算时不得先删除 revision 已绑定的持久 Row。
+- Confirm 必须逐项比较 current revision、完整 manifest、locator、normalized data、action/category、matched IDs、row plan hash 和 canonical batch summary；任何差异整批转为 `preview_stale`，不能把重算结果顺便当作新 Preview Confirm。
+- `ImportMergeApplier` 是 Legacy/Bulk 共用的唯一 Phase 1B Merge materialization。Bulk 只增加批量预取、稳定 identity/account 锁、分阶段 flush 和一次事务，不改变 Hard Match、manual Contact protection、Source、CurrentMetrics 或 immutable Snapshot 语义。
+- `MANUAL_REVIEW`、`ERROR`、`SKIP` 行写入 committed lineage 以保留确认审计，但不自动 Merge；Screening `MATCH/NOT_MATCH/UNKNOWN` 只解释筛选，不成为 identity 或自动阻塞条件。
 
 必须移除 2000 行路径中的逐行 N+1：
 
@@ -1171,7 +1182,7 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 - Influencer 继续公司级读取；Owner/Import Department/Queue Department 不是 Influencer ACL。
 - Queue 不导出 Contact。
 - CSV 防公式注入。
-- Audit 不记录原始文件内容、完整行、Contact、Token 或 Secret。
+- Audit 不记录原始文件内容、完整行、Contact、Session/Auth/Access Token 或 Secret；Task 6 的 persisted import task token 只可作为必要 task identity 白名单字段，不得携带或替代业务数据。
 - Export 必须 Audit。
 
 新增 AuditAction 至少覆盖：
@@ -1214,6 +1225,8 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 | 同 Email 不同达人 | 不 hard merge，只标 possible duplicate |
 | 同昵称不同账号 | 各自保留 |
 | Metrics 缺失/非法 | 不伪造、不覆盖合法值，保留 Warning/Error |
+| MANUAL_REVIEW / ERROR / SKIP | 保留 committed lineage，不自动 Merge；有效计划仍可整批原子 Confirm |
+| Screening NOT_MATCH / UNKNOWN | 不改变 identity/action，不因 Screening 单独阻塞 Confirm |
 | Confirm 重复点击 | 同 revision 幂等 |
 | Preview 后 DB 变化 | 整批 preview_stale |
 | Worker 崩溃 | 事务回滚，安全重投 |
@@ -1222,6 +1235,8 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 | 上传中断 | 临时文件清理；已完成 occurrence 保持 Draft |
 | Commit 后 ACK 前崩溃 | 重投读取 completed revision 幂等结束 |
 | Job 级任务重试耗尽 | 保存 failed_stage；人工 retry 只回到对应 previewing/confirm_queued 状态 |
+| Cancel 命中 requested/retry_wait | Job/task 同事务 cancelled，不再 dispatch |
+| Cancel 命中 running | 409 `IMPORT_TASK_RUNNING`，不制造取消/提交分叉 |
 
 Confirm 的 PostgreSQL 事务覆盖所有 included files 的业务写入。禁止逐文件 Commit。
 
@@ -1323,6 +1338,8 @@ MVP 最终交付：
 
 每个 Task 必须独立人工验收，不能自动进入下一 Task。
 
+当前实施检查点：Task 6 只关闭 Atomic Confirm/Revalidation/Recovery；Task 7 Freshness、`0005`、Refresh Queue、Web 与部署仍按上表等待各自独立人工授权。
+
 ---
 
 ## 29. Test Matrix
@@ -1390,6 +1407,7 @@ Gate 数据：
 17. 粉丝人类化可随 Web Task 完成；视觉重构延期。
 18. client-ID alias 表是 Job 范围幂等的唯一权威事实源；一个 occurrence 可有多个 aliases，Legacy occurrence 不伪造 alias，直接完善尚未发布的 0004。
 19. `source_acquired_at_confirmation_required` 是历史 SHA acquisition 待确认状态的唯一 occurrence-level 持久化事实源；历史 SHA + server-default 为 true，普通首次上传、显式时间、PATCH 确认与 Legacy 均为 false，并由 0004 CHECK 约束 true 的合法组合。
+20. `import_task_requests` 是四类 Import task 的唯一 durable lifecycle/outbox 事实源；API 使用 DB-before-publish reservation，Worker 使用 generation/lease，Scheduler 使用 bounded `SKIP LOCKED` reconciliation，业务完成与 task completed 同事务。Redis、Celery metadata、Audit 和业务 `error_code` 都不是恢复真值。
 
 ---
 

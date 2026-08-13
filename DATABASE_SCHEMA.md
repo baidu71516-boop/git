@@ -125,6 +125,15 @@ PostgreSQL 是 Import task lifecycle 与 retry exhaustion 的唯一 authoritativ
 
 业务状态与 task request 必须同事务创建；业务完成写入与 task completed 必须同事务提交。Migration 不为历史 Parse/Preview/Confirm 伪造 task records。只要表中存在任何 durable task record，`0004 → 0003` downgrade 必须拒绝。
 
+Task 6 运行时状态约束：
+
+- API 在同一事务中持久化业务 queued/parsing 状态、request 和首次 dispatch reservation（增加 `dispatch_attempts`，写入 `last_dispatch_attempt_at/next_retry_at`）；该事务提交后才允许发布 Broker message。
+- Worker 只按 UUID token 和精确 kind/target claim active request。合法 claim 将 request 置为 `running`、持久增加 `run_attempts`，以当前 run attempt 作为 generation，并写入 `started_at/lease_expires_at`；Heartbeat 和 complete 都先锁 task row，再读取 PostgreSQL `clock_timestamp()`，且必须匹配当前 generation 与有效租约。Heartbeat 运行于独立线程/事件循环/数据库连接，避免同步解析阻塞续租。
+- 瞬时失败把同一 active request 置为 `retry_wait` 并写入有界 `next_retry_at`；确定性失败或 run/dispatch exhaustion 置为 `terminal_failed`。Redis/Celery counter、Job `error_code` 和 Audit 均不参与 attempts 判定。
+- Scheduler 只在有界 batch 内领取到期 `requested/retry_wait` 或 lease 已过期的 `running`，按 due/requested/id 稳定排序并使用 `FOR UPDATE SKIP LOCKED`；reservation 在 Broker publish 前提交，publish 失败后由下一次到期 reconciliation 恢复。
+- Confirm 的 Influencer/Account/Source/Contact/Metrics/Snapshot 写入、ImportRow committed lineage、Job completed/result、request completed 与成功 Audit 是一个 business transaction。`completed` 重放只读原结果，不再次 Merge。
+- Cancel 只允许 active `requested/retry_wait` request 进入 `cancelled`；若任一相关 request 已为 `running`，API 返回 409，避免在事务执行期间产生“Job 已取消但业务写入仍提交”的分叉。
+
 ### A.4 `import_jobs` / `import_rows` / `collection_jobs`（0004 additive changes）
 
 `import_jobs`：

@@ -53,7 +53,7 @@
 
 ## 4. Phase 2 — 批量获取、智能筛选、数据新鲜度与定向刷新
 
-文档状态：`DESIGN FROZEN — Task 0`。仅 Task 0 小节的已勾选项代表设计冻结；其余均为尚未实现的 MVP 验收门禁。
+文档状态：Phase 2 设计仍按 Task 0 冻结。下方原有主题清单是完整 MVP release checklist；新增的 Task 6 小节单独记录当前 Atomic Confirm/Revalidation/Recovery 的任务级验收，不代表 Task 7+ 已实现或获得授权。
 
 ### Task 0 设计冻结
 
@@ -83,6 +83,36 @@
 - [ ] 一个 ImportJob 仅绑定一个 originating CollectionJob，并只计算该 CollectionJob 的 `MATCH / NOT_MATCH / UNKNOWN`。
 - [ ] `screening_rules.schema_version` 与单调 `screening_rules_revision` 分离；MVP 只使用本次 owner ImportRow 的 Canonical incoming platform、Source Tag 原值精确 ANY 匹配和 Followers 闭区间，数据库旧值不补齐。
 - [ ] industry、subdirection、purpose、notes 不参与模糊推断；缺失或非法数据返回 UNKNOWN；不使用 AI semantic matching。
+
+### Task 6 — Atomic Confirm / Revalidation / Recovery
+
+当前证据口径：`[x]` 表示已有直接自动化测试/真实 PostgreSQL 16 Gate 通过；AC23 单独记录最终全仓质量认证。Task 6 PostgreSQL Atomic Confirm + recovery 组合 Gate 为 25 passed；2000-row mixed correctness run 为 76 SQL（55 SELECT、21 DML、7 advisory lock）、4.005935s、RSS high-water 309,641,216 bytes，最终为 1998 Influencer/Account、1 SourceIdentity、1996 SourceState、2 Contact、1995 CurrentMetrics/Snapshot。正式 37 列灰豚兼容 all-new 性能数据另以 1 次预热 + 5 次测量运行，wall P95=4.483997s、CPU P95=3.918085s、55 SQL、RSS high-water P95=343,638,016 bytes；mixed 业务正确性由前述独立 Gate 覆盖。
+
+- [x] AC1：Unified Preview 可由人工显式携带当前 revision 发起 Confirm；不存在 Auto Confirm。
+- [x] AC2：写入前完整重建并核对 manifest/SHA、Mapping、acquisition/confirmation、Screening revision/hash、normalized rows、duplicate owner、hard match、数据库 current state、row plan hash 与 canonical summary。
+- [x] AC3：revision、plan 或相关数据库事实不一致时整批 `PREVIEW_STALE`，不把重算结果当作新 Preview 自动确认。
+- [x] AC4：所有 included files 的业务写入、Row committed lineage、Job result/completed、task completed 和成功 Audit 在一个 PostgreSQL transaction 中提交。
+- [x] AC5：Legacy/Bulk 共享同一 Phase 1B Matcher/Planner/Merge materialization；Task 6 不建立第二套写入规则。
+- [x] AC6：manual Contact 保护保持不变，Confirm 不以导入值覆盖人工来源 Contact。
+- [x] AC7：Email 只产生 possible duplicate signal，永不成为 Hard Match 或自动 Merge key。
+- [x] AC8：MetricSnapshot 只按 Phase 1B frozen semantics append，禁止 update/delete/merge 旧 Snapshot。
+- [x] AC9：Confirm 双击、同 token 重投和 completed replay 幂等，不重复写入业务实体或 Snapshot。
+- [x] AC10：两个 Batch 并发创建同一 New Identity 时通过稳定锁/约束只提交一份业务实体，另一方整批 stale 或安全重试。
+- [x] AC11：Existing Account 在 Preview/Confirm 间并发变化时无 lost update；旧 Preview 不能覆盖更新后的 current state。
+- [x] AC12：真实 PostgreSQL 16 的 4×500/2000-row Confirm 通过 entity-count、SQL、wall time 与 RSS blocker。
+- [x] AC13：Confirm 最后一批 Row/业务写入注入失败时整个 business transaction 回滚，无部分达人、lineage 或 completed task。
+- [x] AC14：business commit 后、Broker ACK 前崩溃时，重投读取 completed task/result 并幂等结束。
+- [x] AC15：API DB commit 后 Broker publish 丢失由持久 reservation 和 bounded `FOR UPDATE SKIP LOCKED` reconciler 正式关闭。
+- [x] AC16：隔离 Compose Redis 7.4.10 真实服务重启后，PostgreSQL task state/attempts/lease 以同 token 恢复；Confirm 从 dispatch=1/run=0 收敛为 completed/dispatch=2/run=1，无用户重试或重复业务写入。
+- [x] AC17：Redis 停止且 dispatch 未完成时真实重启 API 进程，DB request 保持 requested；API 重启后由首次启动的 Beat/Worker reconciler 自动完成同一 Confirm。
+- [x] AC18：dispatch/run retry 均由 PostgreSQL 计数并受 Settings 上限和 bounded backoff 约束；耗尽进入 terminal。
+- [x] AC19：Cancel 只取消 requested/retry_wait；running 返回 409 `IMPORT_TASK_RUNNING`，不产生取消/提交分叉。
+- [x] AC20：Phase 1B Legacy CSV/XLSX、Preview/Confirm、duplicate confirm、Contact、Metrics 与 Snapshot 回归通过。
+- [x] AC21：Task 5 Unified Preview summary、Screening、Change Summary、category 与 persisted row 输出回归通过（91 项 Task 5 unit + PG 2000-row Preview）。
+- [x] AC22：成功 Confirm 保留未来 Freshness 所需的准确 occurrence/source acquisition/ImportRow committed lineage，但未实现 Task 7 Freshness API。
+- [x] AC23：最终 `make test` 已以显式 PostgreSQL 16 URL 通过（Backend/Integration/Smoke 368、API 24、Worker 20、Web 29）；`make lint`、`make compose-validate`、正式 Task 6 2k/5k 与 Task 4/5 5k/10k opt-in 均实际通过。
+- [x] AC24：Alembic head/current 仍为 `0004_phase2_bulk_import`，真实 PG16 `alembic check` 返回 no new operations；Task 6 未创建 `0005`。
+- [x] AC25：本次 Task 6 未实现、提交、迁移或部署 Task 7+、Web UI 或 Server changes。
 
 ### Freshness 与 Refresh Queue
 

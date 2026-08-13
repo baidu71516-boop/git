@@ -64,11 +64,15 @@ class ImportRepository:
         return list(result)
 
     async def get_import_job(
-        self, import_job_id: UUID, *, for_update: bool = False
+        self,
+        import_job_id: UUID,
+        *,
+        for_update: bool = False,
+        nowait: bool = False,
     ) -> ImportJob | None:
         statement = select(ImportJob).where(ImportJob.id == import_job_id)
         if for_update:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update(nowait=nowait)
         return cast(ImportJob | None, await self.session.scalar(statement))
 
     async def list_import_jobs(self, department_id: UUID | None) -> list[ImportJob]:

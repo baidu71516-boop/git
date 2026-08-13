@@ -25,6 +25,14 @@ celery_app.conf.update(
         "imports.parse_import_job_file": {"queue": "import"},
         "imports.preview_import_job": {"queue": "import"},
         "imports.confirm_import_job": {"queue": "import"},
+        "imports.reconcile_import_tasks": {"queue": "default"},
+    },
+    beat_schedule={
+        "reconcile-durable-import-tasks": {
+            "task": "imports.reconcile_import_tasks",
+            "schedule": settings.import_task_reconcile_interval_seconds,
+            "options": {"queue": "default"},
+        }
     },
     task_queues=(
         Queue("default"),

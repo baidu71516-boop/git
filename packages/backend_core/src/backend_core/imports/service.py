@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any, Literal, Protocol, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
@@ -20,12 +20,15 @@ from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
 from backend_core.auth.enums import Role
 from backend_core.auth.service import AuthContext
+from backend_core.config.settings import Settings
 from backend_core.imports.enums import (
     CollectionJobStatus,
     ImportJobFailedStage,
     ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
+    ImportTaskKind,
+    ImportTaskState,
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
@@ -37,6 +40,7 @@ from backend_core.imports.models import (
     ImportJob,
     ImportJobFile,
     ImportJobFileClientId,
+    ImportTaskRequest,
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits, validate_upload_type
@@ -49,6 +53,7 @@ from backend_core.imports.schemas import (
 )
 from backend_core.imports.state_machine import transition_import_job
 from backend_core.imports.storage import StorageAdapter
+from backend_core.imports.task_service import DispatchStatus, ImportTaskService
 
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 VIEWER_EMAIL_VALUE = re.compile(
@@ -77,13 +82,15 @@ class QueueDecision:
     should_dispatch: bool
     task_id: str
     idempotent: bool = False
-    task_kind: Literal["legacy_parse", "bulk_preview"] = "legacy_parse"
+    task_kind: Literal["legacy_parse", "bulk_preview", "confirm"] = "legacy_parse"
 
 
 @dataclass(frozen=True)
 class FileUploadDecision:
     record: ImportJobFileRecord
     idempotent: bool
+    task_id: str | None = None
+    should_dispatch: bool = False
 
     @property
     def source_acquired_at_confirmation_required(self) -> bool:
@@ -96,6 +103,21 @@ class FileQueueDecision:
     task_id: str
     should_dispatch: bool
     idempotent: bool = False
+
+
+def _canonical_task_token(task_id: str | UUID) -> UUID:
+    """Normalize API-generated tokens while keeping older direct callers deterministic."""
+
+    if isinstance(task_id, UUID):
+        return task_id
+    try:
+        return UUID(task_id)
+    except ValueError:
+        # Older backend_core callers used descriptive test/legacy tokens.  New
+        # HTTP requests always provide UUIDs, but a stable namespace conversion
+        # keeps the compatibility bridge deterministic without weakening the
+        # database UUID/unique contract.
+        return uuid5(NAMESPACE_URL, f"phase2-import-task:{task_id}")
 
 
 def sanitize_original_filename(filename: str, suffix: str) -> str:
@@ -140,6 +162,7 @@ class ImportService:
         max_batch_bytes: int = 100 * 1024 * 1024,
         max_batch_rows: int = 10_000,
         source_acquired_clock_skew_seconds: int = 300,
+        task_settings: Settings | None = None,
         clock: Clock | None = None,
     ) -> None:
         self.session = session
@@ -154,6 +177,55 @@ class ImportService:
         self.max_batch_rows = max_batch_rows
         self.source_acquired_clock_skew_seconds = source_acquired_clock_skew_seconds
         self.clock = clock or SystemClock()
+        self.task_service = ImportTaskService(
+            session,
+            task_settings or Settings(),
+            clock=self.clock.now if clock is not None else None,
+        )
+
+    async def _create_task_request(
+        self,
+        *,
+        task_id: str | UUID,
+        task_kind: ImportTaskKind,
+        import_job_id: UUID,
+        import_job_file_id: UUID | None = None,
+        preview_revision: int | None = None,
+    ) -> ImportTaskRequest:
+        """Stage and reserve one durable request in the business transaction."""
+
+        task = await self.task_service.create_request(
+            task_token=_canonical_task_token(task_id),
+            task_kind=task_kind,
+            import_job_id=import_job_id,
+            import_job_file_id=import_job_file_id,
+            preview_revision=preview_revision,
+        )
+        dispatch = await self.task_service.prepare_dispatch(task.task_token)
+        if dispatch.status is not DispatchStatus.RESERVED:
+            raise RuntimeError("A newly-created import task could not reserve its initial dispatch")
+        return task
+
+    async def _active_task_request(
+        self,
+        *,
+        task_kind: ImportTaskKind,
+        import_job_id: UUID,
+        import_job_file_id: UUID | None = None,
+        preview_revision: int | None = None,
+        for_update: bool = False,
+    ) -> ImportTaskRequest | None:
+        return await self.task_service.find_active(
+            task_kind=task_kind,
+            import_job_id=import_job_id,
+            import_job_file_id=import_job_file_id,
+            preview_revision=preview_revision,
+            for_update=for_update,
+        )
+
+    @staticmethod
+    def _task_id(task: ImportTaskRequest) -> str:
+        return str(task.task_token)
 
     @staticmethod
     def _require_mutation(context: AuthContext) -> None:
@@ -320,7 +392,7 @@ class ImportService:
         filename: str,
         declared_mime: str,
         chunks: AsyncIterable[bytes],
-        parse_task_id: str,
+        parse_task_id: str | UUID,
         ip: str,
         user_agent: str,
     ) -> ImportJob:
@@ -387,6 +459,7 @@ class ImportService:
             if _as_utc(stored_file.expires_at) < _as_utc(expires_at):
                 stored_file.expires_at = expires_at
 
+            projected_task_id = str(_canonical_task_token(parse_task_id))
             import_job = ImportJob(
                 collection_job_id=collection.id,
                 department_id=collection.department_id,
@@ -399,7 +472,7 @@ class ImportService:
                 source_type=collection.source_type,
                 status=ImportJobStatus.UPLOADED,
                 preview_revision=0,
-                parse_task_id=parse_task_id,
+                parse_task_id=projected_task_id,
             )
             self.session.add(import_job)
             await self.session.flush()
@@ -413,8 +486,13 @@ class ImportService:
                     status=ImportJobFileStatus.UPLOADED,
                     source_acquired_at=None,
                     source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
-                    parse_task_id=parse_task_id,
+                    parse_task_id=projected_task_id,
                 )
+            )
+            await self._create_task_request(
+                task_id=projected_task_id,
+                task_kind=ImportTaskKind.LEGACY_PARSE,
+                import_job_id=import_job.id,
             )
             await self.session.flush()
             self.audit.add(
@@ -612,6 +690,7 @@ class ImportService:
         declared_mime: str,
         chunks: AsyncIterable[bytes],
         source_acquired_at: datetime | None,
+        parse_task_id: str | UUID | None = None,
         ip: str,
         user_agent: str,
     ) -> FileUploadDecision:
@@ -694,8 +773,21 @@ class ImportService:
                     )
                 await self._delete_candidate_safely(stored_object.storage_key)
                 owns_storage_object = False
+                active = await self._active_task_request(
+                    task_kind=ImportTaskKind.FILE_PARSE,
+                    import_job_id=job.id,
+                    import_job_file_id=alias_record.occurrence.id,
+                )
                 await self._commit_upload_transaction()
-                return FileUploadDecision(alias_record, idempotent=True)
+                return FileUploadDecision(
+                    alias_record,
+                    idempotent=True,
+                    task_id=(
+                        self._task_id(active)
+                        if active is not None
+                        else alias_record.occurrence.parse_task_id
+                    ),
+                )
 
             sha_record = await self.repository.get_import_job_file_by_sha256(
                 job.id, stored_object.sha256
@@ -710,8 +802,21 @@ class ImportService:
                 )
                 await self._delete_candidate_safely(stored_object.storage_key)
                 owns_storage_object = False
+                active = await self._active_task_request(
+                    task_kind=ImportTaskKind.FILE_PARSE,
+                    import_job_id=job.id,
+                    import_job_file_id=sha_record.occurrence.id,
+                )
                 await self._commit_upload_transaction()
-                return FileUploadDecision(sha_record, idempotent=True)
+                return FileUploadDecision(
+                    sha_record,
+                    idempotent=True,
+                    task_id=(
+                        self._task_id(active)
+                        if active is not None
+                        else sha_record.occurrence.parse_task_id
+                    ),
+                )
 
             expires_at = accepted_at + timedelta(days=self.retention_days)
             stored_file = await self.repository.get_stored_file_by_sha256(stored_object.sha256)
@@ -777,13 +882,22 @@ class ImportService:
                 position=max_position + 1,
                 original_filename=sanitize_original_filename(filename, suffix),
                 declared_mime=(declared_mime[:160] or "application/octet-stream"),
-                status=ImportJobFileStatus.UPLOADED,
+                status=(
+                    ImportJobFileStatus.PARSING
+                    if parse_task_id is not None
+                    else ImportJobFileStatus.UPLOADED
+                ),
                 source_acquired_at=acquisition,
                 source_acquired_at_origin=acquisition_origin,
                 source_acquired_at_confirmation_required=(source_acquired_at_confirmation_required),
                 created_at=accepted_at,
                 updated_at=accepted_at,
             )
+            if parse_task_id is not None:
+                projected_token = str(_canonical_task_token(parse_task_id))
+                occurrence.parse_task_id = projected_token
+                occurrence.parse_attempts = 1
+                occurrence.parse_started_at = None
             self.session.add(occurrence)
             await self.session.flush()
             self.session.add(
@@ -793,6 +907,15 @@ class ImportService:
                     client_file_id=normalized_client_id,
                 )
             )
+            task_id: str | None = None
+            if parse_task_id is not None:
+                task = await self._create_task_request(
+                    task_id=parse_task_id,
+                    task_kind=ImportTaskKind.FILE_PARSE,
+                    import_job_id=job.id,
+                    import_job_file_id=occurrence.id,
+                )
+                task_id = self._task_id(task)
             self.audit.add(
                 action=AuditAction.IMPORT_FILE_UPLOADED,
                 result=AuditResult.SUCCESS,
@@ -821,6 +944,8 @@ class ImportService:
             return FileUploadDecision(
                 ImportJobFileRecord(occurrence, stored_file),
                 idempotent=False,
+                task_id=task_id,
+                should_dispatch=task_id is not None,
             )
         except BaseException:
             try:
@@ -866,13 +991,15 @@ class ImportService:
     def _queue_file_parse(
         self,
         occurrence: ImportJobFile,
-        task_id: str,
+        task_id: str | UUID,
     ) -> None:
         now = _as_utc(self.clock.now())
+        projected_task_id = str(_canonical_task_token(task_id))
         occurrence.status = ImportJobFileStatus.PARSING
-        occurrence.parse_task_id = task_id
+        occurrence.parse_task_id = projected_task_id
         occurrence.parse_attempts += 1
-        occurrence.parse_started_at = now
+        # Worker claim, not API queueing, is the authoritative execution start.
+        occurrence.parse_started_at = None
         occurrence.parse_completed_at = None
         occurrence.error_code = None
         occurrence.error_message = None
@@ -904,7 +1031,16 @@ class ImportService:
         _, record = await self._bulk_file_for_mutation(context, import_job_id, import_job_file_id)
         occurrence = record.occurrence
         if occurrence.status is ImportJobFileStatus.PARSING:
-            persisted_task_id = self._current_file_task_id(occurrence)
+            active = await self._active_task_request(
+                task_kind=ImportTaskKind.FILE_PARSE,
+                import_job_id=import_job_id,
+                import_job_file_id=import_job_file_id,
+            )
+            persisted_task_id = (
+                self._task_id(active)
+                if active is not None
+                else self._current_file_task_id(occurrence)
+            )
             await self.session.commit()
             return FileQueueDecision(
                 record=record,
@@ -919,8 +1055,18 @@ class ImportService:
                 status_code=409,
             )
         self._queue_file_parse(occurrence, task_id)
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.FILE_PARSE,
+            import_job_id=import_job_id,
+            import_job_file_id=import_job_file_id,
+        )
         await self.session.commit()
-        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+        return FileQueueDecision(
+            record=record,
+            task_id=self._task_id(task),
+            should_dispatch=True,
+        )
 
     @staticmethod
     def _validated_file_mapping(
@@ -993,7 +1139,7 @@ class ImportService:
             await self.session.commit()
             return FileQueueDecision(
                 record=record,
-                task_id=task_id,
+                task_id=occurrence.parse_task_id or str(_canonical_task_token(task_id)),
                 should_dispatch=False,
                 idempotent=True,
             )
@@ -1002,6 +1148,12 @@ class ImportService:
         occurrence.field_mapping = validated
         occurrence.mapping_hash = mapping_hash
         self._queue_file_parse(occurrence, task_id)
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.FILE_PARSE,
+            import_job_id=import_job_id,
+            import_job_file_id=import_job_file_id,
+        )
         if not mapping_unchanged:
             self.audit.add(
                 action=AuditAction.IMPORT_FILE_MAPPING_UPDATED,
@@ -1023,7 +1175,11 @@ class ImportService:
                 },
             )
         await self.session.commit()
-        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+        return FileQueueDecision(
+            record=record,
+            task_id=self._task_id(task),
+            should_dispatch=True,
+        )
 
     async def retry_import_job_file(
         self,
@@ -1057,6 +1213,12 @@ class ImportService:
 
         previous_status = occurrence.status
         self._queue_file_parse(occurrence, task_id)
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.FILE_PARSE,
+            import_job_id=import_job_id,
+            import_job_file_id=import_job_file_id,
+        )
         self.audit.add(
             action=AuditAction.IMPORT_FILE_RETRIED,
             result=AuditResult.SUCCESS,
@@ -1074,7 +1236,11 @@ class ImportService:
             },
         )
         await self.session.commit()
-        return FileQueueDecision(record=record, task_id=task_id, should_dispatch=True)
+        return FileQueueDecision(
+            record=record,
+            task_id=self._task_id(task),
+            should_dispatch=True,
+        )
 
     async def update_import_job_file_source_acquired_at(
         self,
@@ -1188,54 +1354,6 @@ class ImportService:
         )
         await self.session.commit()
         return record
-
-    async def mark_file_dispatch_failed(
-        self,
-        context: AuthContext,
-        import_job_id: UUID,
-        import_job_file_id: UUID,
-        task_id: str,
-        *,
-        ip: str,
-        user_agent: str,
-    ) -> None:
-        """Fail only the queued occurrence when its persisted token still matches."""
-
-        _ = (ip, user_agent)
-        job = await self.repository.get_import_job(import_job_id, for_update=True)
-        if job is None or not self._file_scope_visible(context, job.department_id):
-            await self.session.rollback()
-            return
-        if job.status is not ImportJobStatus.DRAFT or job.preview_revision != 0:
-            await self.session.rollback()
-            return
-        record = await self.repository.get_import_job_file_record(job.id, import_job_file_id)
-        if record is None:
-            await self.session.rollback()
-            return
-        occurrence = record.occurrence
-        if (
-            occurrence.status is not ImportJobFileStatus.PARSING
-            or occurrence.parse_task_id != task_id
-        ):
-            await self.session.rollback()
-            return
-        now = _as_utc(self.clock.now())
-        occurrence.status = ImportJobFileStatus.FAILED
-        occurrence.parse_completed_at = now
-        occurrence.error_code = "TASK_DISPATCH_FAILED"
-        occurrence.error_message = "Background file task could not be queued"
-        occurrence.updated_at = now
-        await self.repository.delete_import_rows_for_file(occurrence.id)
-        from backend_core.imports.batch_processor import BatchImportProcessor
-
-        await BatchImportProcessor(
-            self.session,
-            self.storage,
-            parser_limits=self.parser_limits,
-            max_batch_rows=self.max_batch_rows,
-        ).rebuild_ready_staging(job.id, commit=False)
-        await self.session.commit()
 
     async def list_import_jobs(self, context: AuthContext) -> list[ImportJob]:
         department_id = None if context.role == Role.SUPER_ADMIN else context.department.id
@@ -1354,7 +1472,12 @@ class ImportService:
         transition_import_job(job, ImportJobStatus.PREVIEWING)
         job.field_mapping = validated
         job.mapping_hash = hash_document(validated)
-        job.parse_task_id = task_id
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.LEGACY_PARSE,
+            import_job_id=job.id,
+        )
+        job.parse_task_id = self._task_id(task)
         job.preview_summary = None
         job.error_code = None
         job.error_message = None
@@ -1362,7 +1485,7 @@ class ImportService:
         occurrence.field_mapping = validated
         occurrence.mapping_hash = job.mapping_hash
         occurrence.status = ImportJobFileStatus.PARSING
-        occurrence.parse_task_id = task_id
+        occurrence.parse_task_id = self._task_id(task)
         occurrence.error_code = None
         occurrence.error_message = None
         self.audit.add(
@@ -1377,7 +1500,7 @@ class ImportService:
             after={"next_preview_revision": job.preview_revision + 1},
         )
         await self.session.commit()
-        return QueueDecision(job=job, should_dispatch=True, task_id=task_id)
+        return QueueDecision(job=job, should_dispatch=True, task_id=self._task_id(task))
 
     async def request_preview(
         self,
@@ -1421,12 +1544,16 @@ class ImportService:
                     status_code=409,
                 )
             if job.status is ImportJobStatus.PREVIEWING and job.parse_task_id:
+                active = await self._active_task_request(
+                    task_kind=ImportTaskKind.PREVIEW,
+                    import_job_id=job.id,
+                )
                 await self.session.commit()
                 return QueueDecision(
                     job=job,
                     should_dispatch=False,
                     idempotent=True,
-                    task_id=job.parse_task_id,
+                    task_id=self._task_id(active) if active is not None else job.parse_task_id,
                     task_kind="bulk_preview",
                 )
             if job.status is ImportJobStatus.PREVIEW_READY and not rebuild:
@@ -1493,7 +1620,12 @@ class ImportService:
                 )
             retrying = job.status is ImportJobStatus.FAILED
             transition_import_job(job, ImportJobStatus.PREVIEWING)
-            job.parse_task_id = task_id
+            task = await self._create_task_request(
+                task_id=task_id,
+                task_kind=ImportTaskKind.PREVIEW,
+                import_job_id=job.id,
+            )
+            job.parse_task_id = self._task_id(task)
             # Preserve the last complete revision while a rebuild is in flight.
             # The worker replaces summary + rows atomically on success; retaining
             # it keeps the last user-visible result available for rollback/stale
@@ -1517,7 +1649,7 @@ class ImportService:
             return QueueDecision(
                 job=job,
                 should_dispatch=True,
-                task_id=task_id,
+                task_id=self._task_id(task),
                 task_kind="bulk_preview",
             )
         occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
@@ -1536,21 +1668,26 @@ class ImportService:
                 status_code=409,
             )
         transition_import_job(job, ImportJobStatus.PREVIEWING)
-        job.parse_task_id = task_id
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.LEGACY_PARSE,
+            import_job_id=job.id,
+        )
+        job.parse_task_id = self._task_id(task)
         job.preview_summary = None
         job.error_code = None
         job.error_message = None
         occurrence.field_mapping = dict(job.field_mapping)
         occurrence.mapping_hash = job.mapping_hash
         occurrence.status = ImportJobFileStatus.PARSING
-        occurrence.parse_task_id = task_id
+        occurrence.parse_task_id = self._task_id(task)
         occurrence.error_code = None
         occurrence.error_message = None
         await self.session.commit()
         return QueueDecision(
             job=job,
             should_dispatch=True,
-            task_id=task_id,
+            task_id=self._task_id(task),
             task_kind="legacy_parse",
         )
 
@@ -1569,12 +1706,6 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
-        if job.stored_file_id is None:
-            raise ImportDomainError(
-                "BULK_CONFIRM_NOT_AVAILABLE",
-                "Bulk Confirm is not available until Phase 2 Task 6",
-                status_code=409,
-            )
         if job.status == ImportJobStatus.COMPLETED:
             if job.confirmed_revision == preview_revision:
                 await self.session.commit()
@@ -1632,9 +1763,19 @@ class ImportService:
         transition_import_job(job, ImportJobStatus.CONFIRM_QUEUED)
         job.confirmed_revision = preview_revision
         job.confirmed_at = self.clock.now()
-        job.confirm_task_id = task_id
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.CONFIRM,
+            import_job_id=job.id,
+            preview_revision=preview_revision,
+        )
+        job.confirm_task_id = self._task_id(task)
         self.audit.add(
-            action=AuditAction.IMPORT_CONFIRM_REQUESTED,
+            action=(
+                AuditAction.IMPORT_CONFIRM_REQUESTED
+                if job.stored_file_id is not None
+                else AuditAction.IMPORT_BATCH_CONFIRM_REQUESTED
+            ),
             result=AuditResult.SUCCESS,
             department_id=job.department_id,
             operator_id=self._operator_id(context),
@@ -1645,7 +1786,135 @@ class ImportService:
             after={"preview_revision": preview_revision},
         )
         await self.session.commit()
-        return QueueDecision(job=job, should_dispatch=True, task_id=task_id)
+        return QueueDecision(job=job, should_dispatch=True, task_id=self._task_id(task))
+
+    async def retry_import_job(
+        self,
+        context: AuthContext,
+        import_job_id: UUID,
+        task_id: str,
+        *,
+        ip: str,
+        user_agent: str,
+    ) -> QueueDecision:
+        """Retry exactly the durable failed Preview or Confirm stage."""
+
+        self._require_mutation(context)
+        job = await self.repository.get_import_job(import_job_id, for_update=True)
+        if job is None:
+            raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
+        self._require_scope(context, job.department_id)
+        if job.stored_file_id is not None:
+            raise ImportDomainError(
+                "INVALID_STATE_TRANSITION",
+                "Legacy import jobs do not support the Bulk retry endpoint",
+                status_code=409,
+            )
+
+        if job.status is ImportJobStatus.PREVIEWING and job.parse_task_id is not None:
+            active_preview = await self._active_task_request(
+                task_kind=ImportTaskKind.PREVIEW,
+                import_job_id=job.id,
+            )
+            await self.session.commit()
+            return QueueDecision(
+                job=job,
+                should_dispatch=False,
+                idempotent=True,
+                task_id=(
+                    self._task_id(active_preview)
+                    if active_preview is not None
+                    else job.parse_task_id
+                ),
+                task_kind="bulk_preview",
+            )
+        if job.status in {ImportJobStatus.CONFIRM_QUEUED, ImportJobStatus.IMPORTING}:
+            if job.confirm_task_id is None or job.confirmed_revision is None:
+                raise ImportDomainError(
+                    "IMPORT_TASK_MISSING",
+                    "The active Confirm has no durable task identity",
+                    status_code=409,
+                )
+            active_confirm = await self._active_task_request(
+                task_kind=ImportTaskKind.CONFIRM,
+                import_job_id=job.id,
+                preview_revision=job.confirmed_revision,
+            )
+            await self.session.commit()
+            return QueueDecision(
+                job=job,
+                should_dispatch=False,
+                idempotent=True,
+                task_id=(
+                    self._task_id(active_confirm)
+                    if active_confirm is not None
+                    else job.confirm_task_id
+                ),
+                task_kind="confirm",
+            )
+        if job.status is not ImportJobStatus.FAILED:
+            raise ImportDomainError(
+                "INVALID_STATE_TRANSITION",
+                "Only a failed Bulk Preview or Confirm can be retried",
+                status_code=409,
+            )
+        if job.failed_stage is ImportJobFailedStage.PREVIEW:
+            return await self.request_preview(
+                context,
+                import_job_id,
+                task_id,
+                ip=ip,
+                user_agent=user_agent,
+                retry_only=True,
+            )
+        if job.failed_stage is not ImportJobFailedStage.CONFIRM:
+            raise ImportDomainError(
+                "INVALID_STATE_TRANSITION",
+                "The failed import stage is not retryable",
+                status_code=409,
+            )
+        revision = job.confirmed_revision
+        if (
+            revision is None
+            or revision < 1
+            or revision != job.preview_revision
+            or not isinstance(job.preview_summary, dict)
+        ):
+            raise ImportDomainError(
+                "PREVIEW_STALE",
+                "The failed Confirm no longer has its exact frozen Preview revision",
+                status_code=409,
+            )
+
+        transition_import_job(job, ImportJobStatus.CONFIRM_QUEUED)
+        task = await self._create_task_request(
+            task_id=task_id,
+            task_kind=ImportTaskKind.CONFIRM,
+            import_job_id=job.id,
+            preview_revision=revision,
+        )
+        job.confirm_task_id = self._task_id(task)
+        job.error_code = None
+        job.error_message = None
+        job.failed_stage = None
+        self.audit.add(
+            action=AuditAction.IMPORT_BATCH_RETRIED,
+            result=AuditResult.SUCCESS,
+            department_id=job.department_id,
+            operator_id=self._operator_id(context),
+            ip=ip,
+            user_agent=user_agent,
+            entity_type="import_job",
+            entity_id=job.id,
+            after={"stage": "confirm", "preview_revision": revision},
+        )
+        await self.session.commit()
+        return QueueDecision(
+            job=job,
+            should_dispatch=True,
+            task_id=self._task_id(task),
+            task_kind="confirm",
+        )
 
     async def cancel(
         self,
@@ -1660,7 +1929,34 @@ class ImportService:
         if job is None:
             raise ImportDomainError("IMPORT_JOB_NOT_FOUND", "Import job not found", status_code=404)
         self._require_scope(context, job.department_id)
+        active_tasks = list(
+            await self.session.scalars(
+                select(ImportTaskRequest)
+                .where(
+                    ImportTaskRequest.import_job_id == job.id,
+                    ImportTaskRequest.state.in_(
+                        (
+                            ImportTaskState.REQUESTED,
+                            ImportTaskState.RUNNING,
+                            ImportTaskState.RETRY_WAIT,
+                        )
+                    ),
+                )
+                .order_by(ImportTaskRequest.requested_at, ImportTaskRequest.id)
+                .with_for_update()
+            )
+        )
+        if any(task.state is ImportTaskState.RUNNING for task in active_tasks):
+            raise ImportDomainError(
+                "IMPORT_TASK_RUNNING",
+                "The import cannot be cancelled after its database work has started",
+                status_code=409,
+            )
         transition_import_job(job, ImportJobStatus.CANCELLED)
+        for task in active_tasks:
+            cancelled = await self.task_service.cancel(task.task_token)
+            if not cancelled:
+                raise RuntimeError("A locked cancellable import task changed state")
         if job.stored_file_id is not None:
             occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
             occurrence.status = ImportJobFileStatus.EXCLUDED
@@ -1681,56 +1977,3 @@ class ImportService:
         )
         await self.session.commit()
         return job
-
-    async def mark_dispatch_failed(
-        self,
-        context: AuthContext,
-        import_job_id: UUID,
-        task_id: str,
-        *,
-        ip: str,
-        user_agent: str,
-    ) -> None:
-        job = await self.repository.get_import_job(import_job_id, for_update=True)
-        if job is None:
-            await self.session.rollback()
-            return
-        self._require_scope(context, job.department_id)
-        is_preview_dispatch = task_id == job.parse_task_id and job.status in {
-            ImportJobStatus.UPLOADED,
-            ImportJobStatus.PREVIEWING,
-        }
-        is_confirm_dispatch = (
-            task_id == job.confirm_task_id and job.status is ImportJobStatus.CONFIRM_QUEUED
-        )
-        if not (is_preview_dispatch or is_confirm_dispatch):
-            await self.session.rollback()
-            return
-        if is_preview_dispatch:
-            if job.stored_file_id is not None:
-                occurrence = await self.repository.get_legacy_import_job_file(job, for_update=True)
-                occurrence.status = ImportJobFileStatus.FAILED
-                occurrence.error_code = "TASK_DISPATCH_FAILED"
-                occurrence.error_message = "Background task could not be queued"
-            job.failed_stage = ImportJobFailedStage.PREVIEW
-        else:
-            job.failed_stage = ImportJobFailedStage.CONFIRM
-        transition_import_job(job, ImportJobStatus.FAILED)
-        job.error_code = "TASK_DISPATCH_FAILED"
-        job.error_message = "Background task could not be queued"
-        self.audit.add(
-            action=(
-                AuditAction.IMPORT_FAILED
-                if job.stored_file_id is not None
-                else AuditAction.IMPORT_BATCH_FAILED
-            ),
-            result=AuditResult.FAILED,
-            department_id=job.department_id,
-            operator_id=context.operator.id if context.operator else None,
-            ip=ip,
-            user_agent=user_agent,
-            entity_type="import_job",
-            entity_id=job.id,
-            after={"reason": "task_dispatch_failed"},
-        )
-        await self.session.commit()

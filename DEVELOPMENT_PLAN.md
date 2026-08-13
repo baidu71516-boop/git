@@ -68,6 +68,8 @@ V1 推荐 5 个阶段。
 
 旧的 Phase 2 Browser Automation 方案以及“SOP + Campaign + AI”排期已经人工废弃。Phase 2 的唯一权威范围见 `docs/PHASE_2_SCOPE.md`。
 
+当前开发检查点（2026-08-13）：Task 0–6 已完成本地实现、功能/性能、真实 Redis/API 重启、lint/Compose/Alembic 门禁；Task 6 收口后只保留本地提交，不 push、merge、tag 或 deploy。Task 7 Freshness 与后续任务未开始，每个后续 Task 仍需独立人工授权。
+
 目标：
 
 - 一个 ImportJob 支持多个灰豚 CSV/XLSX。
@@ -84,7 +86,7 @@ V1 推荐 5 个阶段。
 4. Task 3 — Parse / Normalize / Batch Dedup。
 5. Task 4 — Bulk Repository、预加载与 N+1 消除。
 6. Task 5 — Unified Preview / Change Summary / Screening。
-7. Task 6 — Atomic Confirm / Retry / Reconciliation。
+7. Task 6 — Atomic Confirm / Revalidation / Recovery：Preview/Confirm 共用唯一 Plan Builder，Legacy/Bulk 共用 Phase 1B Merge materialization；Confirm 全量 revalidation、整批单事务、持久 task reservation/generation/lease、bounded retry、`SKIP LOCKED` reconciliation、安全 Cancel 与 2000-row PostgreSQL blocker。
 8. Task 7 — Freshness Domain 与 Influencer Read API。
 9. Task 8 — Refresh Queue / Export 与 `0005_phase2_refresh_queue`。
 10. Task 9 — Refresh Return Reconciliation。

@@ -1,13 +1,13 @@
 """Thin HTTP routes for persisted two-phase import jobs."""
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Any, overload
 from uuid import UUID, uuid4
 
 from backend_core.auth.service import AuthContext
-from backend_core.imports.enums import ImportJobFileStatus, ImportRowAction
-from backend_core.imports.errors import ImportDomainError
+from backend_core.imports.enums import ImportRowAction
 from backend_core.imports.repository import ImportJobFileRecord
 from backend_core.imports.schemas import (
     BulkImportJobCreate,
@@ -41,6 +41,7 @@ from app.http.import_tasks import ImportTaskDispatcher
 from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/import-jobs", tags=["import-jobs"])
+logger = logging.getLogger(__name__)
 IMPORT_ROWS_QUERY_PARAMETERS = frozenset({"offset", "limit", "action", "category"})
 
 
@@ -157,49 +158,30 @@ def validate_import_rows_query(request: Request) -> None:
         )
 
 
-async def _compensate_dispatch_failure(
+def _log_dispatch_failure(
     *,
-    service: ImportService,
-    context: AuthContext,
     import_job_id: UUID,
     task_id: str,
-    request: Request,
 ) -> None:
-    await service.mark_dispatch_failed(
-        context,
-        import_job_id,
-        task_id,
-        ip=get_client_ip(request),
-        user_agent=get_user_agent(request),
-    )
-    raise ImportDomainError(
-        "TASK_DISPATCH_FAILED",
-        "Background task could not be queued; the import was marked failed",
-        status_code=503,
+    logger.warning(
+        "import_task_immediate_dispatch_failed",
+        extra={"import_job_id": str(import_job_id), "task_token": task_id},
     )
 
 
-async def _compensate_file_dispatch_failure(
+def _log_file_dispatch_failure(
     *,
-    service: ImportService,
-    context: AuthContext,
     import_job_id: UUID,
     import_job_file_id: UUID,
     task_id: str,
-    request: Request,
 ) -> None:
-    await service.mark_file_dispatch_failed(
-        context,
-        import_job_id,
-        import_job_file_id,
-        task_id,
-        ip=get_client_ip(request),
-        user_agent=get_user_agent(request),
-    )
-    raise ImportDomainError(
-        "TASK_DISPATCH_FAILED",
-        "Background file task could not be queued; the file was marked failed",
-        status_code=503,
+    logger.warning(
+        "import_file_task_immediate_dispatch_failed",
+        extra={
+            "import_job_id": str(import_job_id),
+            "import_job_file_id": str(import_job_file_id),
+            "task_token": task_id,
+        },
     )
 
 
@@ -212,7 +194,7 @@ async def upload_import_file(
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> dict[str, Any]:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
 
     async def chunks() -> AsyncIterator[bytes]:
         while content := await file.read(1024 * 1024):
@@ -234,12 +216,9 @@ async def upload_import_file(
     try:
         await dispatcher.parse(job.id, task_id)
     except Exception:
-        await _compensate_dispatch_failure(
-            service=service,
-            context=context,
+        _log_dispatch_failure(
             import_job_id=job.id,
             task_id=task_id,
-            request=request,
         )
     return envelope(request, data=ImportJobPublic.model_validate(job))
 
@@ -274,7 +253,7 @@ async def create_bulk_import_job(
             "model": SuccessEnvelope[ImportJobFileUploadResult],
             "description": "Idempotent upload replay",
         },
-        **_error_responses(401, 403, 404, 409, 413, 415, 422, 503),
+        **_error_responses(401, 403, 404, 409, 413, 415, 422),
     },
 )
 async def upload_bulk_import_file(
@@ -287,6 +266,8 @@ async def upload_bulk_import_file(
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
     source_acquired_at: Annotated[datetime | None, Form()] = None,
 ) -> JSONResponse:
+    task_id = str(uuid4())
+
     async def chunks() -> AsyncIterator[bytes]:
         while content := await file.read(1024 * 1024):
             yield content
@@ -300,44 +281,25 @@ async def upload_bulk_import_file(
             declared_mime=file.content_type or "application/octet-stream",
             chunks=chunks(),
             source_acquired_at=source_acquired_at,
+            parse_task_id=task_id,
             ip=get_client_ip(request),
             user_agent=get_user_agent(request),
         )
     finally:
         await file.close()
-    if decision.record.occurrence.status in {
-        ImportJobFileStatus.UPLOADED,
-        ImportJobFileStatus.PARSING,
-    }:
-        task_id = uuid4().hex
-        queue_decision = await service.queue_import_job_file(
-            context,
-            import_job_id,
-            decision.record.occurrence.id,
-            task_id,
-            ip=get_client_ip(request),
-            user_agent=get_user_agent(request),
-        )
-        decision = FileUploadDecision(
-            queue_decision.record,
-            idempotent=decision.idempotent,
-        )
-        if queue_decision.should_dispatch:
-            try:
-                await dispatcher.parse_file(
-                    import_job_id,
-                    queue_decision.record.occurrence.id,
-                    queue_decision.task_id,
-                )
-            except Exception:
-                await _compensate_file_dispatch_failure(
-                    service=service,
-                    context=context,
-                    import_job_id=import_job_id,
-                    import_job_file_id=queue_decision.record.occurrence.id,
-                    task_id=queue_decision.task_id,
-                    request=request,
-                )
+    if decision.should_dispatch and decision.task_id is not None:
+        try:
+            await dispatcher.parse_file(
+                import_job_id,
+                decision.record.occurrence.id,
+                decision.task_id,
+            )
+        except Exception:
+            _log_file_dispatch_failure(
+                import_job_id=import_job_id,
+                import_job_file_id=decision.record.occurrence.id,
+                task_id=decision.task_id,
+            )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_201_CREATED
     return JSONResponse(
         status_code=response_status,
@@ -393,7 +355,7 @@ async def update_bulk_import_file(
             "model": SuccessEnvelope[ImportJobFilePublic],
             "description": "Idempotent mapping request",
         },
-        **_error_responses(401, 403, 404, 409, 422, 503),
+        **_error_responses(401, 403, 404, 409, 422),
     },
 )
 async def update_bulk_import_file_mapping(
@@ -405,7 +367,7 @@ async def update_bulk_import_file_mapping(
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
     decision = await service.update_import_job_file_mapping(
         context,
         import_job_id,
@@ -419,13 +381,10 @@ async def update_bulk_import_file_mapping(
         try:
             await dispatcher.parse_file(import_job_id, import_job_file_id, decision.task_id)
         except Exception:
-            await _compensate_file_dispatch_failure(
-                service=service,
-                context=context,
+            _log_file_dispatch_failure(
                 import_job_id=import_job_id,
                 import_job_file_id=import_job_file_id,
                 task_id=decision.task_id,
-                request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
     return JSONResponse(
@@ -443,7 +402,7 @@ async def update_bulk_import_file_mapping(
             "model": SuccessEnvelope[ImportJobFilePublic],
             "description": "Idempotent retry request",
         },
-        **_error_responses(401, 403, 404, 409, 422, 503),
+        **_error_responses(401, 403, 404, 409, 422),
     },
 )
 async def retry_bulk_import_file(
@@ -454,7 +413,7 @@ async def retry_bulk_import_file(
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
     decision = await service.retry_import_job_file(
         context,
         import_job_id,
@@ -467,13 +426,10 @@ async def retry_bulk_import_file(
         try:
             await dispatcher.parse_file(import_job_id, import_job_file_id, decision.task_id)
         except Exception:
-            await _compensate_file_dispatch_failure(
-                service=service,
-                context=context,
+            _log_file_dispatch_failure(
                 import_job_id=import_job_id,
                 import_job_file_id=import_job_file_id,
                 task_id=decision.task_id,
-                request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
     return JSONResponse(
@@ -564,7 +520,7 @@ async def update_mapping(
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> dict[str, Any]:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
     decision = await service.request_mapping_preview(
         context,
         import_job_id,
@@ -576,12 +532,9 @@ async def update_mapping(
     try:
         await dispatcher.parse(import_job_id, decision.task_id)
     except Exception:
-        await _compensate_dispatch_failure(
-            service=service,
-            context=context,
+        _log_dispatch_failure(
             import_job_id=import_job_id,
             task_id=decision.task_id,
-            request=request,
         )
     return envelope(request, data=_dispatch_public(decision))
 
@@ -595,7 +548,7 @@ async def update_mapping(
             "model": SuccessEnvelope[ImportDispatchResult],
             "description": "Idempotent Preview request replay",
         },
-        **_error_responses(401, 403, 404, 409, 422, 503),
+        **_error_responses(401, 403, 404, 409, 422),
     },
 )
 async def regenerate_preview(
@@ -606,7 +559,7 @@ async def regenerate_preview(
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
     payload: ImportPreviewInput | None = None,
 ) -> JSONResponse:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
     decision = await service.request_preview(
         context,
         import_job_id,
@@ -622,12 +575,9 @@ async def regenerate_preview(
             else:
                 await dispatcher.parse(import_job_id, decision.task_id)
         except Exception:
-            await _compensate_dispatch_failure(
-                service=service,
-                context=context,
+            _log_dispatch_failure(
                 import_job_id=import_job_id,
                 task_id=decision.task_id,
-                request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
     return JSONResponse(
@@ -643,39 +593,44 @@ async def regenerate_preview(
     responses={
         status.HTTP_200_OK: {
             "model": SuccessEnvelope[ImportDispatchResult],
-            "description": "Idempotent failed Preview retry replay",
+            "description": "Idempotent failed Preview or Confirm retry replay",
         },
-        **_error_responses(401, 403, 404, 409, 422, 503),
+        **_error_responses(401, 403, 404, 409, 422),
     },
 )
-async def retry_import_preview(
+async def retry_import_stage(
     import_job_id: UUID,
     request: Request,
     context: Annotated[AuthContext, Depends(require_import_mutation)],
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
-    """Retry only the persisted Bulk Preview stage; Task 6 owns Confirm retry."""
+    """Retry exactly the PostgreSQL-persisted failed Preview or Confirm stage."""
 
-    task_id = uuid4().hex
-    decision = await service.request_preview(
+    task_id = str(uuid4())
+    decision = await service.retry_import_job(
         context,
         import_job_id,
         task_id,
         ip=get_client_ip(request),
         user_agent=get_user_agent(request),
-        retry_only=True,
     )
     if decision.should_dispatch:
         try:
-            await dispatcher.preview(import_job_id, decision.task_id)
+            if decision.task_kind == "confirm":
+                if decision.job.confirmed_revision is None:
+                    raise RuntimeError("Confirm retry lost its persisted revision")
+                await dispatcher.confirm(
+                    import_job_id,
+                    decision.job.confirmed_revision,
+                    decision.task_id,
+                )
+            else:
+                await dispatcher.preview(import_job_id, decision.task_id)
         except Exception:
-            await _compensate_dispatch_failure(
-                service=service,
-                context=context,
+            _log_dispatch_failure(
                 import_job_id=import_job_id,
                 task_id=decision.task_id,
-                request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
     return JSONResponse(
@@ -693,7 +648,7 @@ async def retry_import_preview(
             "model": SuccessEnvelope[ImportDispatchResult],
             "description": "Idempotent Confirm request replay",
         },
-        **_error_responses(401, 403, 404, 409, 422, 503),
+        **_error_responses(401, 403, 404, 409, 422),
     },
 )
 async def confirm_import(
@@ -704,7 +659,7 @@ async def confirm_import(
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
-    task_id = uuid4().hex
+    task_id = str(uuid4())
     decision = await service.request_confirm(
         context,
         import_job_id,
@@ -721,12 +676,9 @@ async def confirm_import(
                 decision.task_id,
             )
         except Exception:
-            await _compensate_dispatch_failure(
-                service=service,
-                context=context,
+            _log_dispatch_failure(
                 import_job_id=import_job_id,
                 task_id=decision.task_id,
-                request=request,
             )
     response_status = status.HTTP_200_OK if decision.idempotent else status.HTTP_202_ACCEPTED
     return JSONResponse(

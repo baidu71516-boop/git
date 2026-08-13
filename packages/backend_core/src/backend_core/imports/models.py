@@ -359,6 +359,9 @@ class ImportTaskRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             postgresql_where=text(
                 "task_kind = 'legacy_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
             ),
+            sqlite_where=text(
+                "task_kind = 'legacy_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
         ),
         Index(
             "uq_import_task_request_active_file_parse",
@@ -366,6 +369,9 @@ class ImportTaskRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "import_job_file_id",
             unique=True,
             postgresql_where=text(
+                "task_kind = 'file_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
                 "task_kind = 'file_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
             ),
         ),
@@ -376,6 +382,9 @@ class ImportTaskRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             postgresql_where=text(
                 "task_kind = 'preview' " "AND state IN ('requested', 'running', 'retry_wait')"
             ),
+            sqlite_where=text(
+                "task_kind = 'preview' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
         ),
         Index(
             "uq_import_task_request_active_confirm",
@@ -383,6 +392,9 @@ class ImportTaskRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "preview_revision",
             unique=True,
             postgresql_where=text(
+                "task_kind = 'confirm' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
                 "task_kind = 'confirm' " "AND state IN ('requested', 'running', 'retry_wait')"
             ),
         ),

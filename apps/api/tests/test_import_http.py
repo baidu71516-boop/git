@@ -7,7 +7,6 @@ from uuid import UUID
 
 from app.http.dependencies import (
     get_database_session,
-    get_import_service,
     get_import_storage,
     get_import_task_dispatcher,
     get_redis,
@@ -23,14 +22,14 @@ from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
-    ImportJobFailedStage,
     ImportJobFileStatus,
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
+    ImportTaskState,
     SourceAcquiredAtOrigin,
 )
-from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
+from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow, ImportTaskRequest
 from backend_core.imports.storage import LocalStorageAdapter
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
@@ -104,6 +103,17 @@ def valid_csv() -> bytes:
     return (
         "达人名称,达人官方地址\n" "脱敏达人,https://www.xiaohongshu.com/user/profile/http-fixture\n"
     ).encode("utf-8-sig")
+
+
+async def complete_task(session: AsyncSession, task_id: str) -> None:
+    task = await session.scalar(
+        select(ImportTaskRequest).where(ImportTaskRequest.task_token == UUID(task_id))
+    )
+    assert task is not None
+    task.state = ImportTaskState.COMPLETED
+    task.completed_at = datetime.now(UTC)
+    task.next_retry_at = None
+    task.lease_expires_at = None
 
 
 def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
@@ -199,6 +209,8 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                                 occurrence.source_acquired_at_origin
                                 is SourceAcquiredAtOrigin.LEGACY_UNKNOWN
                             )
+                            assert job.parse_task_id is not None
+                            await complete_task(session, job.parse_task_id)
                             job.status = ImportJobStatus.MAPPING_REQUIRED
                             job.detected_fields = ["name", "id"]
                             await session.commit()
@@ -216,6 +228,8 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             assert len(dispatcher.parse_calls) == 2
                             assert mapped.json()["data"]["task_id"] == dispatcher.parse_calls[-1][1]
 
+                            assert job.parse_task_id is not None
+                            await complete_task(session, job.parse_task_id)
                             job.status = ImportJobStatus.PREVIEW_READY
                             job.preview_revision = 1
                             job.preview_summary = {"total_rows": 1, "created_rows": 1}
@@ -258,6 +272,17 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                                 confirmed.json()["data"]["task_id"]
                                 == dispatcher.confirm_calls[-1][2]
                             )
+                            confirm_task_id = confirmed.json()["data"]["task_id"]
+                            confirm_task = await session.scalar(
+                                select(ImportTaskRequest).where(
+                                    ImportTaskRequest.task_token == UUID(confirm_task_id)
+                                )
+                            )
+                            assert confirm_task is not None
+                            assert confirm_task.state is ImportTaskState.REQUESTED
+                            assert confirm_task.dispatch_attempts == 1
+                            assert confirm_task.last_dispatch_attempt_at is not None
+                            assert confirm_task.next_retry_at is not None
                             repeated = await client.post(
                                 f"/api/v1/import-jobs/{job_id}/confirm",
                                 json={"preview_revision": 1},
@@ -270,49 +295,18 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                             )
                             assert len(dispatcher.confirm_calls) == 1
 
-                            # Late broker compensation is bound to both its
-                            # persisted token and stage.  A stale Preview token
-                            # must not overwrite a valid Confirm, nor may an old
-                            # Confirm token overwrite a later Preview.
-                            parse_task_id = str(job.parse_task_id)
-                            confirm_task_id = str(job.confirm_task_id)
-                            service = get_import_service(session, storage)
-                            await service.mark_dispatch_failed(
-                                operator_context,
-                                job_id,
-                                parse_task_id,
-                                ip="127.0.0.1",
-                                user_agent="stale-preview-compensation",
-                            )
-                            await session.refresh(job)
-                            assert job.status is ImportJobStatus.CONFIRM_QUEUED
-                            old_confirm_task_id = confirm_task_id
-                            job.status = ImportJobStatus.PREVIEWING
-                            job.parse_task_id = "new-preview-after-confirm"
+                            await complete_task(session, confirm_task_id)
+                            job.status = ImportJobStatus.COMPLETED
                             await session.commit()
-                            await service.mark_dispatch_failed(
-                                operator_context,
-                                job_id,
-                                old_confirm_task_id,
-                                ip="127.0.0.1",
-                                user_agent="stale-confirm-compensation",
+                            completed_replay = await client.post(
+                                f"/api/v1/import-jobs/{job_id}/confirm",
+                                json={"preview_revision": 1},
                             )
-                            await session.refresh(job)
-                            assert job.status is ImportJobStatus.PREVIEWING
-                            # The shared-session HTTP harness reuses ORM-backed
-                            # AuthContext objects across requests; production
-                            # reconstructs them per request.  Refresh after the
-                            # expected rollback-only stale compensations.
-                            for auth_context in (
-                                operator_context,
-                                viewer_context,
-                                admin_context,
-                                no_operator_context,
-                            ):
-                                await session.refresh(auth_context.department)
-                                await session.refresh(auth_context.auth_session)
-                                if auth_context.operator is not None:
-                                    await session.refresh(auth_context.operator)
+                            assert completed_replay.status_code == 200
+                            completed_data = completed_replay.json()["data"]
+                            assert completed_data["idempotent"] is True
+                            assert completed_data["task_id"] == confirm_task_id
+                            assert len(dispatcher.confirm_calls) == 1
 
                             dispatcher.fail_parse = True
                             dispatch_failed = await client.post(
@@ -320,12 +314,19 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                                 data={"collection_job_id": collection_id},
                                 files={"file": ("dispatch-fail.csv", valid_csv(), "text/csv")},
                             )
-                            assert dispatch_failed.status_code == 503
-                            assert dispatch_failed.json()["error"]["code"] == "TASK_DISPATCH_FAILED"
+                            assert dispatch_failed.status_code == 202
                             failed_job = await session.get(ImportJob, dispatcher.parse_calls[-1][0])
                             assert failed_job is not None
-                            assert failed_job.status == ImportJobStatus.FAILED
-                            assert failed_job.failed_stage is ImportJobFailedStage.PREVIEW
+                            assert failed_job.status is ImportJobStatus.UPLOADED
+                            assert failed_job.parse_task_id is not None
+                            durable = await session.scalar(
+                                select(ImportTaskRequest).where(
+                                    ImportTaskRequest.task_token == UUID(failed_job.parse_task_id)
+                                )
+                            )
+                            assert durable is not None
+                            assert durable.state is ImportTaskState.REQUESTED
+                            assert durable.dispatch_attempts == 1
                             dispatcher.fail_parse = False
 
                             async def viewer_auth() -> AuthContext:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from backend_core.audit.enums import AuditAction
@@ -24,6 +24,8 @@ from backend_core.imports.enums import (
     ImportJobStatus,
     ImportRowAction,
     ImportSourceType,
+    ImportTaskKind,
+    ImportTaskState,
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
@@ -34,6 +36,7 @@ from backend_core.imports.models import (
     ImportJob,
     ImportJobFile,
     ImportRow,
+    ImportTaskRequest,
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits
@@ -158,32 +161,42 @@ def assert_error(error: ImportDomainError, code: str, status_code: int) -> None:
 def test_initial_queue_is_persisted_once_and_reuses_the_existing_task_token() -> None:
     async def scenario() -> None:
         async with service_harness() as harness:
+            task_id = str(uuid4())
             first = await harness.service.queue_import_job_file(
                 harness.context,
                 harness.job.id,
                 harness.occurrence.id,
-                "initial-token",
+                task_id,
                 ip="127.0.0.1",
                 user_agent="test",
             )
             assert first.should_dispatch is True
             assert first.idempotent is False
-            assert first.task_id == "initial-token"
+            assert first.task_id == task_id
             assert first.record.occurrence.status is ImportJobFileStatus.PARSING
             assert first.record.occurrence.parse_attempts == 1
-            assert first.record.occurrence.parse_started_at is not None
+            assert first.record.occurrence.parse_started_at is None
+            task = await harness.session.scalar(
+                select(ImportTaskRequest).where(ImportTaskRequest.task_token == UUID(first.task_id))
+            )
+            assert task is not None
+            assert task.task_kind is ImportTaskKind.FILE_PARSE
+            assert task.state is ImportTaskState.REQUESTED
+            assert task.dispatch_attempts == 1
+            assert task.last_dispatch_attempt_at is not None
+            assert task.next_retry_at is not None
 
             replay = await harness.service.queue_import_job_file(
                 harness.context,
                 harness.job.id,
                 harness.occurrence.id,
-                "must-not-replace-token",
+                str(uuid4()),
                 ip="127.0.0.1",
                 user_agent="test",
             )
             assert replay.should_dispatch is False
             assert replay.idempotent is True
-            assert replay.task_id == "initial-token"
+            assert replay.task_id == task_id
             assert replay.record.occurrence.parse_attempts == 1
 
     asyncio.run(scenario())
@@ -208,12 +221,13 @@ def test_mapping_is_validated_file_scoped_and_busy_requests_are_idempotent_or_re
                 )
             assert_error(invalid.value, "MAPPING_INVALID", 422)
 
+            mapping_task_id = str(uuid4())
             mapped = await harness.service.update_import_job_file_mapping(
                 harness.context,
                 harness.job.id,
                 harness.occurrence.id,
                 VALID_MAPPING,
-                "mapping-token",
+                mapping_task_id,
                 ip="127.0.0.1",
                 user_agent="test",
             )
@@ -227,13 +241,13 @@ def test_mapping_is_validated_file_scoped_and_busy_requests_are_idempotent_or_re
                 harness.job.id,
                 harness.occurrence.id,
                 dict(reversed(tuple(VALID_MAPPING.items()))),
-                "replacement-token",
+                str(uuid4()),
                 ip="127.0.0.1",
                 user_agent="test",
             )
             assert same.idempotent is True
             assert same.should_dispatch is False
-            assert same.task_id == "mapping-token"
+            assert same.task_id == mapping_task_id
 
             with pytest.raises(ImportDomainError) as busy:
                 await harness.service.update_import_job_file_mapping(
@@ -261,7 +275,7 @@ def test_mapping_is_validated_file_scoped_and_busy_requests_are_idempotent_or_re
     asyncio.run(scenario())
 
 
-def test_retry_resets_file_error_and_dispatch_failure_is_token_guarded() -> None:
+def test_retry_resets_file_error_and_reserves_durable_dispatch() -> None:
     async def scenario() -> None:
         async with service_harness() as harness:
             job_id = harness.job.id
@@ -272,11 +286,12 @@ def test_retry_resets_file_error_and_dispatch_failure_is_token_guarded() -> None
             harness.occurrence.parse_attempts = 1
             await harness.session.commit()
 
+            task_id = str(uuid4())
             retried = await harness.service.retry_import_job_file(
                 harness.context,
                 job_id,
                 occurrence_id,
-                "retry-token",
+                task_id,
                 ip="127.0.0.1",
                 user_agent="test",
             )
@@ -286,33 +301,16 @@ def test_retry_resets_file_error_and_dispatch_failure_is_token_guarded() -> None
             assert occurrence.error_code is None
             assert occurrence.error_message is None
             assert occurrence.parse_completed_at is None
-
-            await harness.service.mark_file_dispatch_failed(
-                harness.context,
-                job_id,
-                occurrence.id,
-                "stale-token",
-                ip="127.0.0.1",
-                user_agent="test",
+            task = await harness.session.scalar(
+                select(ImportTaskRequest).where(ImportTaskRequest.task_token == UUID(task_id))
             )
-            await harness.session.refresh(occurrence)
-            assert occurrence.status is ImportJobFileStatus.PARSING
-
-            await harness.service.mark_file_dispatch_failed(
-                harness.context,
-                job_id,
-                occurrence_id,
-                "retry-token",
-                ip="127.0.0.1",
-                user_agent="test",
-            )
-            persisted_occurrence = await harness.session.get(ImportJobFile, occurrence_id)
+            assert task is not None
+            assert task.state is ImportTaskState.REQUESTED
+            assert task.dispatch_attempts == 1
+            assert task.last_dispatch_attempt_at is not None
+            assert task.next_retry_at is not None
             persisted_job = await harness.session.get(ImportJob, job_id)
-            assert persisted_occurrence is not None
             assert persisted_job is not None
-            assert persisted_occurrence.status is ImportJobFileStatus.FAILED
-            assert persisted_occurrence.error_code == "TASK_DISPATCH_FAILED"
-            assert persisted_occurrence.parse_completed_at is not None
             assert persisted_job.status is ImportJobStatus.DRAFT
 
             retry_audits = list(
@@ -398,16 +396,94 @@ def test_retry_mapping_guard_rbac_nested_404_and_exclude_removes_staging_rows() 
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("task_state", [ImportTaskState.REQUESTED, ImportTaskState.RETRY_WAIT])
+def test_cancel_atomically_cancels_non_running_durable_tasks(
+    task_state: ImportTaskState,
+) -> None:
+    async def scenario() -> None:
+        async with service_harness() as harness:
+            decision = await harness.service.queue_import_job_file(
+                harness.context,
+                harness.job.id,
+                harness.occurrence.id,
+                str(uuid4()),
+                ip="127.0.0.1",
+                user_agent="test",
+            )
+            task = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(decision.task_id)
+                )
+            )
+            assert task is not None
+            if task_state is ImportTaskState.RETRY_WAIT:
+                task.state = ImportTaskState.RETRY_WAIT
+                task.next_retry_at = datetime.now(UTC) + timedelta(minutes=1)
+                await harness.session.commit()
+
+            cancelled = await harness.service.cancel(
+                harness.context,
+                harness.job.id,
+                ip="127.0.0.1",
+                user_agent="test",
+            )
+            assert cancelled.status is ImportJobStatus.CANCELLED
+            await harness.session.refresh(task)
+            assert task.state is ImportTaskState.CANCELLED
+            assert task.completed_at is not None
+            assert task.next_retry_at is None
+            assert task.lease_expires_at is None
+
+    asyncio.run(scenario())
+
+
+def test_cancel_rejects_a_running_durable_task_without_changing_the_job() -> None:
+    async def scenario() -> None:
+        async with service_harness() as harness:
+            decision = await harness.service.queue_import_job_file(
+                harness.context,
+                harness.job.id,
+                harness.occurrence.id,
+                str(uuid4()),
+                ip="127.0.0.1",
+                user_agent="test",
+            )
+            task = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(decision.task_id)
+                )
+            )
+            assert task is not None
+            task.state = ImportTaskState.RUNNING
+            task.run_attempts = 1
+            task.started_at = datetime.now(UTC)
+            task.lease_expires_at = datetime.now(UTC) + timedelta(minutes=1)
+            task.next_retry_at = None
+            await harness.session.commit()
+
+            with pytest.raises(ImportDomainError) as running:
+                await harness.service.cancel(
+                    harness.context,
+                    harness.job.id,
+                    ip="127.0.0.1",
+                    user_agent="test",
+                )
+            assert_error(running.value, "IMPORT_TASK_RUNNING", 409)
+            await harness.session.refresh(harness.job)
+            await harness.session.refresh(task)
+            assert harness.job.status is ImportJobStatus.DRAFT
+            assert task.state is ImportTaskState.RUNNING
+
+    asyncio.run(scenario())
+
+
 def test_task3_schemas_forbid_extra_mapping_input_and_expose_file_locator() -> None:
     with pytest.raises(ValidationError):
         ImportMappingUpdate.model_validate({"mapping": VALID_MAPPING, "unfrozen_extra": True})
     assert "import_job_file_id" in ImportRowPublic.model_fields
 
 
-@pytest.mark.parametrize("terminal_transition", ["exclude", "dispatch_failure"])
-def test_losing_a_duplicate_owner_replans_the_remaining_ready_row(
-    terminal_transition: str,
-) -> None:
+def test_excluding_a_duplicate_owner_replans_the_remaining_ready_row() -> None:
     async def scenario() -> None:
         async with service_harness() as harness:
             first = harness.occurrence
@@ -488,25 +564,13 @@ def test_losing_a_duplicate_owner_replans_the_remaining_ready_row(
             harness.session.add(second_row)
             await harness.session.commit()
 
-            if terminal_transition == "exclude":
-                await harness.service.exclude_import_job_file(
-                    harness.context,
-                    harness.job.id,
-                    first.id,
-                    ip="127.0.0.1",
-                    user_agent="test",
-                )
-            else:
-                first.status = ImportJobFileStatus.PARSING
-                await harness.session.commit()
-                await harness.service.mark_file_dispatch_failed(
-                    harness.context,
-                    harness.job.id,
-                    first.id,
-                    "owner-task",
-                    ip="127.0.0.1",
-                    user_agent="test",
-                )
+            await harness.service.exclude_import_job_file(
+                harness.context,
+                harness.job.id,
+                first.id,
+                ip="127.0.0.1",
+                user_agent="test",
+            )
 
             rows = list(
                 await harness.session.scalars(

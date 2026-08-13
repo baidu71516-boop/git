@@ -482,6 +482,7 @@ class BulkImportRepository:
                         ImportJobFile.source_acquired_at_confirmation_required.is_(False),
                     )
                     .group_by(ImportRow.matched_platform_account_id)
+                    .execution_options(populate_existing=True)
                 )
                 for account_id, observed_at in (await self.session.execute(statement)).all():
                     if account_id is not None and observed_at is not None:
@@ -521,11 +522,13 @@ class BulkImportRepository:
         grouped: dict[K, list[InfluencerPlatformAccount]] = {key: [] for key in frozen_keys}
         for chunk in iter_safe_chunks(keys, chunk_size=self.chunk_size):
             rows = await self.session.scalars(
-                select(InfluencerPlatformAccount).where(
+                select(InfluencerPlatformAccount)
+                .where(
                     tuple_(InfluencerPlatformAccount.platform, value_column).in_(
                         [(key.platform, key.value) for key in chunk]
                     )
                 )
+                .execution_options(populate_existing=True)
             )
             for account in rows:
                 value = getattr(account, value_column.key)
@@ -563,6 +566,7 @@ class BulkImportRepository:
                         PlatformAccountSourceIdentity.external_account_id,
                     ).in_([(key.source, key.platform, key.value) for key in chunk])
                 )
+                .execution_options(populate_existing=True)
             )
             for identity, account in rows:
                 query_key = ExternalIdentityKey(
@@ -590,7 +594,9 @@ class BulkImportRepository:
         result: dict[UUID, Influencer] = {}
         for chunk in iter_safe_chunks(influencer_ids, chunk_size=self.chunk_size, key=str):
             for influencer in await self.session.scalars(
-                select(Influencer).where(Influencer.id.in_(chunk))
+                select(Influencer)
+                .where(Influencer.id.in_(chunk))
+                .execution_options(populate_existing=True)
             ):
                 result[influencer.id] = influencer
         return dict(sorted(result.items(), key=lambda item: str(item[0])))
@@ -601,12 +607,14 @@ class BulkImportRepository:
         result: dict[AccountSourceKey, InfluencerSourceState] = {}
         for chunk in iter_safe_chunks(keys, chunk_size=self.chunk_size):
             rows = await self.session.scalars(
-                select(InfluencerSourceState).where(
+                select(InfluencerSourceState)
+                .where(
                     tuple_(
                         InfluencerSourceState.platform_account_id,
                         InfluencerSourceState.source,
                     ).in_([(key.platform_account_id, key.source) for key in chunk])
                 )
+                .execution_options(populate_existing=True)
             )
             for state in rows:
                 result[AccountSourceKey(state.platform_account_id, state.source)] = state
@@ -618,12 +626,14 @@ class BulkImportRepository:
         result: dict[AccountSourceKey, InfluencerCurrentMetrics] = {}
         for chunk in iter_safe_chunks(keys, chunk_size=self.chunk_size):
             rows = await self.session.scalars(
-                select(InfluencerCurrentMetrics).where(
+                select(InfluencerCurrentMetrics)
+                .where(
                     tuple_(
                         InfluencerCurrentMetrics.platform_account_id,
                         InfluencerCurrentMetrics.source,
                     ).in_([(key.platform_account_id, key.source) for key in chunk])
                 )
+                .execution_options(populate_existing=True)
             )
             for metrics in rows:
                 result[AccountSourceKey(metrics.platform_account_id, metrics.source)] = metrics
@@ -649,13 +659,15 @@ class BulkImportRepository:
         grouped: dict[SourceContactKey, list[InfluencerContact]] = {key: [] for key in frozen_keys}
         for chunk in iter_safe_chunks(keys, chunk_size=self.chunk_size):
             rows = await self.session.scalars(
-                select(InfluencerContact).where(
+                select(InfluencerContact)
+                .where(
                     tuple_(
                         InfluencerContact.influencer_id,
                         InfluencerContact.source,
                         InfluencerContact.type,
                     ).in_([(key.influencer_id, key.source, key.type) for key in chunk])
                 )
+                .execution_options(populate_existing=True)
             )
             for contact in rows:
                 grouped[
@@ -674,12 +686,14 @@ class BulkImportRepository:
         grouped: dict[ContactValueKey, list[InfluencerContact]] = {key: [] for key in frozen_keys}
         for chunk in iter_safe_chunks(keys, chunk_size=self.chunk_size):
             rows = await self.session.scalars(
-                select(InfluencerContact).where(
+                select(InfluencerContact)
+                .where(
                     tuple_(
                         InfluencerContact.type,
                         InfluencerContact.normalized_value,
                     ).in_([(key.type, key.normalized_value) for key in chunk])
                 )
+                .execution_options(populate_existing=True)
             )
             for contact in rows:
                 grouped[ContactValueKey(contact.type, contact.normalized_value)].append(contact)
