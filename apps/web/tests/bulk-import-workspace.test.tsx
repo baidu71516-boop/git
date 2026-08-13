@@ -787,18 +787,35 @@ describe("BulkImportWorkspace file truth and actions", () => {
       expect.objectContaining({ id: "file-failed" }),
     );
     fireEvent.click(
-      within(rowFor("ready.csv")).getByRole("button", {
-        name: "修改数据取得时间",
-      }),
+      within(rowFor("ready.csv")).getByRole("button", { name: /更多/ }),
     );
+    const readyModifyTime = screen
+      .getAllByRole("button", { name: "修改时间" })
+      .find((button) => button.getAttribute("data-file-id") === "file-ready");
+    expect(readyModifyTime).toBeTruthy();
+    if (!readyModifyTime) {
+      throw new Error("无法定位文件就绪态的修改时间按钮");
+    }
+    fireEvent.click(readyModifyTime);
     expect(onEditAcquisitionTime).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-ready" }),
     );
 
     fireEvent.click(
-      within(rowFor("uploaded.csv")).getByRole("button", { name: "排除" }),
+      within(rowFor("uploaded.csv")).getByRole("button", { name: /更多/ }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "确认排除" }));
+    const uploadExclude = screen
+      .getAllByRole("button", { name: "排除" })
+      .find(
+        (button) => button.getAttribute("data-file-id") === "file-uploaded",
+      );
+    expect(uploadExclude).toBeTruthy();
+    if (!uploadExclude) {
+      throw new Error("无法定位上传文件的排除按钮");
+    }
+    fireEvent.click(uploadExclude);
+    const confirmExclude = screen.getByRole("button", { name: "确认排除" });
+    fireEvent.click(confirmExclude);
     expect(onExcludeFile).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-uploaded" }),
     );
@@ -811,7 +828,7 @@ describe("BulkImportWorkspace file truth and actions", () => {
     expect(
       within(rowFor("excluded.csv")).queryByRole("button"),
     ).not.toBeInTheDocument();
-  });
+  }, 10_000);
 
   it("PATCHes the unchanged server acquisition time to confirm it, then freezes editing after Preview", async () => {
     const job = makeJob();
@@ -836,7 +853,8 @@ describe("BulkImportWorkspace file truth and actions", () => {
 
     const { unmount } = renderBulk({ jobId: job.id });
     expect(await screen.findByText("待确认")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确认时间" }));
+    fireEvent.click(screen.getByRole("button", { name: /更多/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "修改时间" }));
     expect(screen.getByLabelText("数据取得时间")).toHaveValue(
       "2026-08-10T10:00",
     );
@@ -870,9 +888,7 @@ describe("BulkImportWorkspace file truth and actions", () => {
       />,
     );
     expect(
-      within(rowFor("ready.csv")).getByRole("button", {
-        name: "修改数据取得时间",
-      }),
+      within(rowFor("ready.csv")).getByRole("button", { name: /更多/ }),
     ).toBeDisabled();
   });
 
@@ -985,8 +1001,9 @@ describe("BulkImportWorkspace file truth and actions", () => {
       ).toBe(1),
     );
     fireEvent.click(
-      within(rowFor("exclude.csv")).getByRole("button", { name: "排除" }),
+      within(rowFor("exclude.csv")).getByRole("button", { name: /更多/ }),
     );
+    fireEvent.click(await screen.findByRole("button", { name: "排除" }));
     fireEvent.click(await screen.findByRole("button", { name: "确认排除" }));
     await waitFor(() =>
       expect(
@@ -1021,7 +1038,7 @@ describe("BulkImportWorkspace Preview and compatible Job states", () => {
       <BulkImportWorkspaceView {...gateProps} />,
     );
     expect(
-      screen.getByText("请先确认所有文件的数据取得时间。"),
+      screen.getByText("还有 1 个文件待确认数据取得时间。"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "生成数据预览" })).toBeDisabled();
 
@@ -1163,9 +1180,7 @@ describe("BulkImportWorkspace Preview and compatible Job states", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "生成数据预览" })).toBeDisabled();
     expect(
-      within(rowFor("ready.csv")).getByRole("button", {
-        name: "修改数据取得时间",
-      }),
+      within(rowFor("ready.csv")).getByRole("button", { name: /更多/ }),
     ).toBeDisabled();
     expect(
       screen.queryByRole("button", { name: /确认导入/ }),

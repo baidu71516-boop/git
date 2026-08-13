@@ -1,8 +1,18 @@
-import { Button, Popconfirm, Space, Table, Tag, Typography } from "antd";
+import { DownOutlined } from "@ant-design/icons";
+import {
+  Button,
+  Dropdown,
+  Popconfirm,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import type { ColumnsType } from "antd/es/table";
 
 import {
   formatBulkDateTime,
+  getBulkFileIssueTone,
   formatBulkFileRowCount,
   formatBulkFileSize,
   getBulkFileIssueMessage,
@@ -11,6 +21,58 @@ import {
 import type { ImportJobFilePublic } from "../types";
 
 const { Text } = Typography;
+
+function MoreActionsMenu({
+  file,
+  canEditTime,
+  canExclude,
+  disabled,
+  onEditAcquisitionTime,
+  onExclude,
+}: {
+  file: ImportJobFilePublic;
+  canEditTime: boolean;
+  canExclude: boolean;
+  disabled: boolean;
+  onEditAcquisitionTime: (file: ImportJobFilePublic) => void;
+  onExclude: (file: ImportJobFilePublic) => void;
+}) {
+  return (
+    <div className="bulk-file-more-menu">
+      {canEditTime ? (
+        <Button
+          type="text"
+          size="small"
+          disabled={disabled}
+          onClick={() => onEditAcquisitionTime(file)}
+          data-file-id={file.id}
+        >
+          修改时间
+        </Button>
+      ) : null}
+      {canExclude ? (
+        <Popconfirm
+          title="确认排除这个文件？"
+          description="排除后，该文件不会参与本次数据预览。"
+          okText="确认排除"
+          cancelText="取消"
+          disabled={disabled}
+          onConfirm={() => onExclude(file)}
+        >
+          <Button
+            type="text"
+            size="small"
+            danger
+            disabled={disabled}
+            data-file-id={file.id}
+          >
+            排除
+          </Button>
+        </Popconfirm>
+      ) : null}
+    </div>
+  );
+}
 
 export function BulkFileTable({
   files,
@@ -36,7 +98,7 @@ export function BulkFileTable({
       title: "文件",
       dataIndex: "original_filename",
       key: "file",
-      width: 230,
+      width: 320,
       render: (_, file) => (
         <div className="bulk-file-name-cell">
           <Text strong ellipsis={{ tooltip: file.original_filename }}>
@@ -73,7 +135,7 @@ export function BulkFileTable({
       key: "source_acquired_at",
       width: 190,
       render: (_, file) => (
-        <Space orientation="vertical" size={2}>
+        <Space orientation="vertical" size={2} className="bulk-file-time-cell">
           <Text>{formatBulkDateTime(file.source_acquired_at)}</Text>
           {file.source_acquired_at_confirmation_required ? (
             <Tag color="warning">待确认</Tag>
@@ -85,20 +147,33 @@ export function BulkFileTable({
       title: "问题",
       key: "issue",
       width: 210,
-      render: (_, file) => (
-        <Text type={file.status === "failed" ? "danger" : "secondary"}>
-          {getBulkFileIssueMessage(file)}
-        </Text>
-      ),
+      render: (_, file) => {
+        const tone = getBulkFileIssueTone(file);
+        return (
+          <Text
+            className={
+              tone === "danger"
+                ? "bulk-file-issue-danger"
+                : tone === "warning"
+                  ? "bulk-file-issue-warning"
+                  : "bulk-file-issue-secondary"
+            }
+            type={tone === "secondary" ? undefined : tone}
+          >
+            {getBulkFileIssueMessage(file)}
+          </Text>
+        );
+      },
     },
     {
       title: "操作",
       key: "actions",
-      width: 260,
+      width: 210,
       fixed: "right",
+      className: "bulk-file-actions-column",
       render: (_, file) => {
         const busy = busyFileId === file.id;
-        const mutationDisabled = readOnly || frozen || busyFileId !== null;
+        const actionDisabled = readOnly || frozen || busyFileId !== null;
         const canEditTime = ["ready", "mapping_required", "failed"].includes(
           file.status,
         );
@@ -113,63 +188,60 @@ export function BulkFileTable({
           return <Text type="secondary">—</Text>;
         }
 
+        const hasSecondaryActions = canEditTime || canExclude;
+
         return (
-          <Space size="small" wrap>
-            {file.status === "mapping_required" ? (
-              <Button
-                type="link"
-                size="small"
-                disabled={mutationDisabled}
-                onClick={() => onEditMapping(file)}
-              >
-                处理字段映射
-              </Button>
-            ) : null}
-            {file.status === "failed" ? (
-              <Button
-                type="link"
-                size="small"
-                loading={busy}
-                disabled={mutationDisabled}
-                onClick={() => onRetry(file)}
-              >
-                重试
-              </Button>
-            ) : null}
-            {canEditTime ? (
-              <Button
-                className="bulk-file-time-action"
-                type="link"
-                size="small"
-                disabled={mutationDisabled}
-                onClick={() => onEditAcquisitionTime(file)}
-              >
-                {file.source_acquired_at_confirmation_required
-                  ? "确认时间"
-                  : "修改数据取得时间"}
-              </Button>
-            ) : null}
-            {canExclude ? (
-              <Popconfirm
-                title="确认排除这个文件？"
-                description="排除后，该文件不会参与本次数据预览。"
-                okText="确认排除"
-                cancelText="取消"
-                disabled={mutationDisabled}
-                onConfirm={() => onExclude(file)}
-              >
+          <div className="bulk-file-actions-cell">
+            <Space
+              size="small"
+              align="center"
+              className="bulk-file-primary-actions"
+            >
+              {file.status === "mapping_required" ? (
                 <Button
                   type="link"
                   size="small"
-                  danger
-                  loading={busy}
-                  disabled={mutationDisabled}
+                  disabled={actionDisabled}
+                  onClick={() => onEditMapping(file)}
                 >
-                  排除
+                  处理字段映射
                 </Button>
-              </Popconfirm>
-            ) : null}
-          </Space>
+              ) : null}
+              {file.status === "failed" ? (
+                <Button
+                  type="link"
+                  size="small"
+                  loading={busy}
+                  disabled={actionDisabled}
+                  onClick={() => onRetry(file)}
+                >
+                  重试
+                </Button>
+              ) : null}
+
+              {hasSecondaryActions ? (
+                <Dropdown
+                  trigger={["click"]}
+                  placement="bottomRight"
+                  popupRender={() => (
+                    <MoreActionsMenu
+                      file={file}
+                      disabled={actionDisabled}
+                      canEditTime={canEditTime}
+                      canExclude={canExclude}
+                      onEditAcquisitionTime={onEditAcquisitionTime}
+                      onExclude={onExclude}
+                    />
+                  )}
+                  disabled={actionDisabled}
+                >
+                  <Button type="link" size="small">
+                    更多 <DownOutlined />
+                  </Button>
+                </Dropdown>
+              ) : null}
+            </Space>
+          </div>
         );
       },
     },

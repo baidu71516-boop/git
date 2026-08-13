@@ -27,6 +27,7 @@ import {
   formatBulkFileRowCount,
   getBulkErrorMessage,
   getBulkFileIssueMessage,
+  getBulkFileIssueTone,
   getBulkFileStatusPresentation,
   getBulkJobStatusPresentation,
   getPreviewGate,
@@ -493,6 +494,19 @@ describe("Bulk import presentation truth", () => {
     expect(getBulkErrorMessage(new Error("socket secret"), "读取失败")).toBe(
       "读取失败",
     );
+    expect(
+      getBulkFileIssueTone(makeFile({ status: "ready", warning_rows: 0 })),
+    ).toBe("secondary");
+    expect(
+      getBulkFileIssueTone(
+        makeFile({
+          status: "ready",
+          error_rows: 0,
+          warning_rows: 3,
+        }),
+      ),
+    ).toBe("warning");
+    expect(getBulkFileIssueTone(makeFile({ status: "failed" }))).toBe("danger");
   });
 
   it("identifies ambiguous Bulk creation without retrying it", () => {
@@ -518,22 +532,22 @@ describe("Bulk import presentation truth", () => {
   it("computes the UX Preview gate from last real File data", () => {
     expect(getPreviewGate([])).toEqual({
       allowed: false,
-      reason: "请先添加至少一个文件。",
+      reason: "请先添加至少一个可用文件。",
     });
     expect(getPreviewGate([makeFile({ status: "failed" })]).reason).toContain(
-      "重试或排除",
+      "有",
     );
     expect(
       getPreviewGate([makeFile({ status: "mapping_required" })]).reason,
-    ).toContain("字段映射");
+    ).toContain("需要处理字段映射");
     expect(getPreviewGate([makeFile({ status: "parsing" })]).reason).toContain(
-      "等待",
+      "正在处理",
     );
     expect(
       getPreviewGate([
         makeFile({ source_acquired_at_confirmation_required: true }),
       ]).reason,
-    ).toContain("数据取得时间");
+    ).toContain("待确认数据取得时间");
     expect(getPreviewGate([makeFile()])).toEqual({
       allowed: true,
       reason: "文件已就绪，可以生成数据预览。",

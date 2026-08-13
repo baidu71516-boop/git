@@ -20,6 +20,8 @@ export type PreviewGate = {
   reason: string;
 };
 
+export type IssueTone = "secondary" | "warning" | "danger";
+
 export const AMBIGUOUS_BULK_CREATE_MESSAGE =
   "采集任务已创建，但系统无法确认批量文件处理任务是否创建成功。为避免重复创建，系统不会自动重试。请保留当前页面并联系管理员核对。";
 
@@ -202,6 +204,22 @@ export function getBulkFileIssueMessage(file: ImportJobFilePublic): string {
   return issues.length > 0 ? issues.join("，") : "—";
 }
 
+export function getBulkFileIssueTone(file: ImportJobFilePublic): IssueTone {
+  if (file.error_code || file.status === "failed") {
+    return "danger";
+  }
+
+  if (file.status === "mapping_required") {
+    return "warning";
+  }
+
+  if (file.warning_rows > 0 || file.error_rows > 0) {
+    return "warning";
+  }
+
+  return "secondary";
+}
+
 export function getBulkErrorMessage(
   error: unknown,
   fallback = "操作失败，请稍后重试。",
@@ -231,25 +249,58 @@ export function getPreviewGate(
 ): PreviewGate {
   const included = files.filter((file) => file.status !== "excluded");
   if (included.length === 0) {
-    return { allowed: false, reason: "请先添加至少一个文件。" };
+    return { allowed: false, reason: "请先添加至少一个可用文件。" };
   }
-  if (included.some((file) => file.status === "failed")) {
+
+  const failedCount = included.filter(
+    (file) => file.status === "failed",
+  ).length;
+  if (failedCount > 0) {
     return {
       allowed: false,
-      reason: "请先重试或排除处理失败的文件。",
+      reason: `还有 ${failedCount} 个文件处理失败，请重试或排除后再生成数据预览。`,
     };
   }
-  if (included.some((file) => file.status === "mapping_required")) {
-    return { allowed: false, reason: "请先完成所有文件的字段映射。" };
-  }
-  if (included.some((file) => file.status !== "ready")) {
-    return { allowed: false, reason: "请等待所有文件处理完成。" };
-  }
-  if (included.some((file) => file.source_acquired_at_confirmation_required)) {
+
+  const mappingCount = included.filter(
+    (file) => file.status === "mapping_required",
+  ).length;
+  if (mappingCount > 0) {
     return {
       allowed: false,
-      reason: "请先确认所有文件的数据取得时间。",
+      reason: `还有 ${mappingCount} 个文件需要处理字段映射。`,
     };
   }
+
+  const parsingCount = included.filter(
+    (file) => file.status === "parsing",
+  ).length;
+  if (parsingCount > 0) {
+    return {
+      allowed: false,
+      reason: `还有 ${parsingCount} 个文件正在处理，请稍后再试。`,
+    };
+  }
+
+  const notReadyCount = included.filter(
+    (file) => file.status !== "ready",
+  ).length;
+  if (notReadyCount > 0) {
+    return {
+      allowed: false,
+      reason: `还有 ${notReadyCount} 个文件尚未就绪，处理完成后可生成数据预览。`,
+    };
+  }
+
+  const confirmationCount = included.filter(
+    (file) => file.source_acquired_at_confirmation_required,
+  ).length;
+  if (confirmationCount > 0) {
+    return {
+      allowed: false,
+      reason: `还有 ${confirmationCount} 个文件待确认数据取得时间。`,
+    };
+  }
+
   return { allowed: true, reason: "文件已就绪，可以生成数据预览。" };
 }
