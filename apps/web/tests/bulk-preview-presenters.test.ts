@@ -498,7 +498,7 @@ describe("row and Issue whitelisting", () => {
   it("keeps decimal strings and ISO dates while formatting safe values", () => {
     expect(formatPreviewValue("98.123456789")).toBe("98.123456789");
     expect(formatPreviewValue("2026-08-10T10:00:00+08:00")).toBe(
-      "2026-08-10T10:00:00+08:00",
+      "2026-08-10 10:00",
     );
   });
 });

@@ -131,6 +131,16 @@ const shanghaiDateTimeFormatter = new Intl.DateTimeFormat("en-CA", {
   hourCycle: "h23",
 });
 
+const dateTimeNoTimezonePattern =
+  /^(\d{4}-\d{2}-\d{2})[T\s](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/;
+
+function formatNaiveDateTime(value: string): string | null {
+  const match = value.match(dateTimeNoTimezonePattern);
+  if (!match) return null;
+  const [, date, hour, minute] = match;
+  return `${date} ${hour}:${minute}`;
+}
+
 export function getCollectionJobStatusPresentation(
   status: CollectionJobStatus,
 ): StatusPresentation {
@@ -156,7 +166,11 @@ export function formatBulkFileRowCount(file: ImportJobFilePublic): string {
 
 export function formatBulkDateTime(value: string | null): string {
   if (!value) return "—";
-  const date = new Date(value);
+  const trimmed = value.trim();
+  const naive = formatNaiveDateTime(trimmed);
+  if (naive !== null) return naive;
+
+  const date = new Date(trimmed);
   if (Number.isNaN(date.getTime())) return "—";
   const values = Object.fromEntries(
     shanghaiDateTimeFormatter

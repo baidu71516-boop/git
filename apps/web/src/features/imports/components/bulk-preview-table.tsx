@@ -21,7 +21,7 @@ import type {
   UnifiedPreviewSummary,
 } from "../types";
 
-const { Text } = Typography;
+const { Paragraph, Text } = Typography;
 
 const categories: readonly ImportRowCategory[] = [
   "all",
@@ -39,11 +39,17 @@ const integerFormatter = new Intl.NumberFormat("zh-CN", {
   maximumFractionDigits: 0,
 });
 
-function tagColor(tone: string): string | undefined {
-  if (tone === "success") return "success";
+function actionTagColor(tone: string): string | undefined {
+  if (tone === "success") return "blue";
+  if (tone === "processing") return "purple";
   if (tone === "warning") return "warning";
   if (tone === "danger") return "error";
-  if (tone === "processing") return "processing";
+  return undefined;
+}
+
+function screeningTagColor(tone: string): string | undefined {
+  if (tone === "success") return "success";
+  if (tone === "warning") return "warning";
   return undefined;
 }
 
@@ -63,16 +69,6 @@ function categoryCount(
     duplicate: summary.internal_duplicate_rows,
   };
   return counts[category] ?? null;
-}
-
-function sourceLabel(
-  row: ImportRowPublic,
-  files: readonly ImportJobFilePublic[],
-): string {
-  return (
-    files.find((file) => file.id === row.import_job_file_id)
-      ?.original_filename ?? "来源文件"
-  );
 }
 
 export type BulkPreviewTableProps = {
@@ -110,17 +106,20 @@ export function BulkPreviewTable({
     {
       title: "达人 / 来源",
       key: "creator",
-      width: 310,
+      className: "bulk-preview-creator-col",
+      width: 300,
       render: (_, row) => {
         const presented = presentPreviewRow(row);
-        const displayName = presented.displayName ?? "—";
+        const source =
+          files.find((file) => file.id === row.import_job_file_id)
+            ?.original_filename ?? "来源文件";
         return (
           <div className="bulk-preview-creator-cell">
             <Text strong ellipsis={{ tooltip: presented.displayName ?? false }}>
-              {displayName}
+              {presented.displayName ?? "—"}
             </Text>
             <Text type="secondary" ellipsis>
-              {sourceLabel(row, files)} · 第 {row.row_number} 行
+              {source} · 第 {row.row_number} 行
             </Text>
           </div>
         );
@@ -129,20 +128,20 @@ export function BulkPreviewTable({
     {
       title: "处理结果",
       key: "action",
-      width: 132,
+      width: 112,
       render: (_, row) => {
         const action = presentPreviewRow(row).action;
-        return <Tag color={tagColor(action.tone)}>{action.label}</Tag>;
+        return <Tag color={actionTagColor(action.tone)}>{action.label}</Tag>;
       },
     },
     {
       title: "筛选结果",
       key: "screening",
-      width: 132,
+      width: 112,
       render: (_, row) => {
         const screening = presentPreviewRow(row).screening;
         return screening ? (
-          <Tag color={tagColor(screening.tone)}>{screening.label}</Tag>
+          <Tag color={screeningTagColor(screening.tone)}>{screening.label}</Tag>
         ) : (
           <Text type="secondary">—</Text>
         );
@@ -155,7 +154,7 @@ export function BulkPreviewTable({
       render: (_, row) => {
         const count = presentPreviewRow(row).changeCount;
         return count > 0 ? (
-          <Text>{integerFormatter.format(count)} 项会更新</Text>
+          <Text>{integerFormatter.format(count)} 项</Text>
         ) : (
           <Text type="secondary">—</Text>
         );
@@ -172,15 +171,16 @@ export function BulkPreviewTable({
         if (!first) return <Text type="secondary">—</Text>;
         return (
           <div className="bulk-preview-issue-cell">
-            <Text
+            <Paragraph
               className={
                 first.severity === "error"
                   ? "bulk-preview-issue-error"
                   : "bulk-preview-issue-warning"
               }
+              ellipsis={{ tooltip: first.message, rows: 2 }}
             >
               {first.message}
-            </Text>
+            </Paragraph>
             {issues.length > 1 ? (
               <Text type="secondary">另有 {issues.length - 1} 项</Text>
             ) : null}
@@ -191,7 +191,7 @@ export function BulkPreviewTable({
     {
       title: "操作",
       key: "operation",
-      width: 80,
+      width: 86,
       fixed: "right",
       render: (_, row) => (
         <Button
@@ -244,16 +244,18 @@ export function BulkPreviewTable({
       <div className="bulk-preview-table-heading">
         <div>
           <Text strong id="bulk-preview-table-title">
-            预览数据
+            分类筛选
           </Text>
-          <Text type="secondary">结果由系统按当前分类稳定排列。</Text>
+          <Text type="secondary">先锁定目标类目，再看该类目中的每行结果。</Text>
         </div>
-        <Segmented<ImportRowCategory>
-          className="bulk-preview-category-filter"
-          value={category}
-          options={categoryOptions}
-          onChange={onCategoryChange}
-        />
+        <div className="bulk-preview-filter-bar">
+          <Segmented<ImportRowCategory>
+            className="bulk-preview-category-filter"
+            value={category}
+            options={categoryOptions}
+            onChange={onCategoryChange}
+          />
+        </div>
       </div>
 
       {error ? (
@@ -279,7 +281,7 @@ export function BulkPreviewTable({
         loading={loading}
         pagination={false}
         locale={{ emptyText }}
-        scroll={{ x: 1024 }}
+        scroll={{ x: 1040 }}
         onRow={(row) => ({
           onClick: () => onSelectRow(row),
           className: "bulk-preview-table-row",

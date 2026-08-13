@@ -54,12 +54,10 @@ function metricValue(
   return typeof value === "number" ? integerFormatter.format(value) : "—";
 }
 
-function tagColor(tone: string): string | undefined {
+function screeningTone(tone: string): string {
   if (tone === "success") return "success";
   if (tone === "warning") return "warning";
-  if (tone === "danger") return "error";
-  if (tone === "processing") return "processing";
-  return undefined;
+  return "default";
 }
 
 export function BulkPreviewSummary({
@@ -73,7 +71,7 @@ export function BulkPreviewSummary({
       aria-labelledby="bulk-preview-summary-title"
     >
       <Title level={5} id="bulk-preview-summary-title">
-        结果摘要
+        核心结果
       </Title>
 
       <dl className="bulk-preview-summary-band">
@@ -86,18 +84,16 @@ export function BulkPreviewSummary({
       </dl>
 
       <div className="bulk-preview-screening-summary">
-        <div>
+        <div className="bulk-preview-screening-summary-meta">
           <Text strong>筛选结果</Text>
-          <Text type="secondary">
-            后端已按当前筛选规则完成判断，信息不足的数据不会由页面补算。
-          </Text>
+          <Text type="secondary">后端已按当前筛选规则完成判断</Text>
         </div>
-        <div className="bulk-preview-screening-counts">
+        <div className="bulk-preview-screening-counts" role="list">
           {screeningMetrics.map(({ result, key }) => {
             const presentation = getScreeningPresentation(result);
             if (!presentation) return null;
             return (
-              <Tag color={tagColor(presentation.tone)} key={result}>
+              <Tag color={screeningTone(presentation.tone)} key={result}>
                 {presentation.label} {metricValue(summary, key)}
               </Tag>
             );

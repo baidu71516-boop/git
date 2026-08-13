@@ -20,15 +20,29 @@ function ChangeValue({
   before: string | null;
   after: string | null;
 }) {
-  if (before === null && after === null) return null;
   return (
     <div className="bulk-preview-change-values">
-      <Text>{before ?? "—"}</Text>
-      <Text type="secondary" aria-hidden>
-        →
-      </Text>
-      <Text>{after ?? "—"}</Text>
+      <div className="bulk-preview-change-value-col">
+        <Text type="secondary" className="bulk-preview-change-value-label">
+          原值
+        </Text>
+        <Text>{before ?? "—"}</Text>
+      </div>
+      <div className="bulk-preview-change-value-col bulk-preview-change-value-col-new">
+        <Text type="secondary" className="bulk-preview-change-value-label">
+          新值
+        </Text>
+        <Text className="bulk-preview-change-value-new">{after ?? "—"}</Text>
+      </div>
     </div>
+  );
+}
+
+function SectionTitle({ title }: { title: string }) {
+  return (
+    <Title level={5} className="bulk-preview-section-title">
+      {title}
+    </Title>
   );
 }
 
@@ -60,7 +74,7 @@ export function BulkPreviewRowDrawer({
     <Drawer
       rootClassName="bulk-preview-row-drawer"
       open={open}
-      size={740}
+      width={740}
       title={
         <div className="bulk-preview-drawer-title">
           <div className="bulk-preview-drawer-title-name">
@@ -69,18 +83,7 @@ export function BulkPreviewRowDrawer({
           <Text type="secondary">
             {source} · 第 {row.row_number} 行
           </Text>
-        </div>
-      }
-      extra={
-        <div className="bulk-preview-drawer-statuses">
-          <Tag color={tagColor(presented.action.tone)}>
-            {presented.action.label}
-          </Tag>
-          {presented.screening ? (
-            <Tag color={tagColor(presented.screening.tone)}>
-              {presented.screening.label}
-            </Tag>
-          ) : null}
+          <Text type="secondary">处理结果：{presented.action.label}</Text>
         </div>
       }
       closable={{ "aria-label": "关闭预览数据详情", placement: "end" }}
@@ -90,7 +93,7 @@ export function BulkPreviewRowDrawer({
     >
       <div className="bulk-preview-drawer-content">
         <section className="bulk-preview-drawer-section">
-          <Title level={5}>基本信息</Title>
+          <SectionTitle title="基本信息" />
           <dl className="bulk-preview-detail-list">
             {presented.displayName ? (
               <div>
@@ -101,14 +104,6 @@ export function BulkPreviewRowDrawer({
             <div>
               <dt>来源文件</dt>
               <dd>{source}</dd>
-            </div>
-            <div>
-              <dt>行号</dt>
-              <dd>第 {row.row_number} 行</dd>
-            </div>
-            <div>
-              <dt>处理结果</dt>
-              <dd>{presented.action.label}</dd>
             </div>
             {presented.batchDuplicate ? (
               <div>
@@ -126,12 +121,12 @@ export function BulkPreviewRowDrawer({
 
         {presented.screening ? (
           <section className="bulk-preview-drawer-section">
-            <Title level={5}>筛选结果</Title>
+            <SectionTitle title="筛选结果" />
             <div className="bulk-preview-screening-detail-heading">
               <Tag color={tagColor(presented.screening.tone)}>
                 {presented.screening.label}
               </Tag>
-              <Text type="secondary">按当前筛选规则的后端判断结果</Text>
+              <Text type="secondary">按筛选规则的当前判断结果。</Text>
             </div>
             {presented.screening.evidence.length > 0 ? (
               <div className="bulk-preview-screening-evidence">
@@ -168,7 +163,7 @@ export function BulkPreviewRowDrawer({
 
         {changeBuckets.length > 0 ? (
           <section className="bulk-preview-drawer-section">
-            <Title level={5}>变更摘要</Title>
+            <SectionTitle title="变更摘要" />
             <div className="bulk-preview-change-buckets">
               {changeBuckets.map((bucket) => (
                 <section
@@ -183,7 +178,18 @@ export function BulkPreviewRowDrawer({
                         key={`${item.kind}-${item.label}-${index}`}
                       >
                         <Text strong>{item.label}</Text>
-                        <ChangeValue before={item.before} after={item.after} />
+                        {item.kind === "field" ? (
+                          <ChangeValue
+                            before={item.before}
+                            after={item.after}
+                          />
+                        ) : null}
+                        {item.kind === "contact" ? (
+                          <Text type="secondary">{item.message}</Text>
+                        ) : null}
+                        {item.message && item.kind === "field" ? (
+                          <Text type="secondary">{item.message}</Text>
+                        ) : null}
                         {item.incoming !== null &&
                         item.incoming !== item.after ? (
                           <Text type="secondary">
@@ -198,7 +204,6 @@ export function BulkPreviewRowDrawer({
                             移除：{item.removed.join("、")}
                           </Text>
                         ) : null}
-                        {item.message ? <Text>{item.message}</Text> : null}
                       </div>
                     ))}
                   </div>
@@ -210,7 +215,7 @@ export function BulkPreviewRowDrawer({
 
         {presented.issues.length > 0 ? (
           <section className="bulk-preview-drawer-section">
-            <Title level={5}>问题</Title>
+            <SectionTitle title="问题" />
             <div className="bulk-preview-issues-list">
               {presented.issues.map((issue, index) => (
                 <div

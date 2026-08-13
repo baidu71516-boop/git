@@ -528,7 +528,7 @@ describe("Bulk unified preview review", () => {
     renderBulk();
 
     expect(await screen.findByText("白桃汽水")).toBeInTheDocument();
-    expect(screen.getByText("结果摘要")).toBeInTheDocument();
+    expect(screen.getByText("核心结果")).toBeInTheDocument();
     expect(screen.getAllByText("筛选结果").length).toBeGreaterThan(0);
     const firstRequest = rowsRequests(fetchSpy)[0];
     expect(firstRequest?.searchParams.toString()).toBe(
@@ -553,7 +553,7 @@ describe("Bulk unified preview review", () => {
       }
     }
     expect(
-      within(previewTableRow("白桃汽水")).getByText("1 项会更新"),
+      within(previewTableRow("白桃汽水")).getByText(/^1 项$/),
     ).toBeInTheDocument();
 
     const pagination = document.querySelector(".bulk-preview-pagination");
@@ -757,11 +757,8 @@ describe("Bulk Preview and Confirm terminal states", () => {
     });
 
     renderBulk();
-    expect(
-      await screen.findByText(
-        "数据预览已失效，本次未写入达人库。请重新生成数据预览后再确认导入。",
-      ),
-    ).toBeInTheDocument();
+    const staleNotice = await screen.findByRole("alert");
+    expect(staleNotice).toHaveTextContent("本次预览已失效");
     fireEvent.click(screen.getByRole("button", { name: "重新生成数据预览" }));
 
     await waitFor(() => {
@@ -844,8 +841,8 @@ describe("Bulk Preview and Confirm terminal states", () => {
     });
 
     renderBulk();
-    const heading = await screen.findByRole("heading", { name: "导入结果" });
-    const resultSection = heading.closest("section");
+    await screen.findByText("✓ 导入完成");
+    const resultSection = document.querySelector(".bulk-preview-completed-result");
     expect(resultSection).not.toBeNull();
     const actual = within(resultSection as HTMLElement);
     for (const [label, value] of [

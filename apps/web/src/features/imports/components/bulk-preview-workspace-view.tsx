@@ -34,7 +34,7 @@ function StateNotice({ job }: { job: ImportJobPublic }) {
         description={
           job.confirmed_revision === null
             ? "文件、筛选规则或相关数据已经发生变化，请重新生成数据预览后再确认导入。"
-            : "数据预览已失效，本次未写入达人库。请重新生成数据预览后再确认导入。"
+            : "文件、筛选规则或相关数据已发生变化，本次预览已失效。"
         }
       />
     );
@@ -79,17 +79,16 @@ function StateNotice({ job }: { job: ImportJobPublic }) {
 
   if (job.status === "completed") {
     return (
-      <Alert
-        className="bulk-preview-state-notice"
-        type="success"
-        showIcon
-        title="导入完成"
-        description={
-          job.completed_at
+      <div className="bulk-preview-completed-state">
+        <Text strong className="bulk-preview-completed-title">
+          ✓ 导入完成
+        </Text>
+        <Text type="secondary">
+          {job.completed_at
             ? `完成时间：${formatBulkDateTime(job.completed_at)}`
-            : "本批数据已经完成导入。"
-        }
-      />
+            : "本批数据已完成导入。"}
+        </Text>
+      </div>
     );
   }
 
@@ -110,16 +109,8 @@ function CompletedResult({ job }: { job: ImportJobPublic }) {
   return (
     <section
       className="bulk-preview-completed-result"
-      aria-labelledby="bulk-preview-result-title"
+      aria-label="完成结果摘要"
     >
-      <div className="bulk-preview-result-heading">
-        <div>
-          <Title level={5} id="bulk-preview-result-title">
-            导入结果
-          </Title>
-          <Text type="secondary">以下为本次实际完成的处理结果。</Text>
-        </div>
-      </div>
       <dl className="bulk-preview-result-band">
         {metrics.map((metric) => (
           <div key={metric.label}>
@@ -295,7 +286,7 @@ export function BulkPreviewWorkspaceView({
       {job.status === "completed" ? <CompletedResult job={job} /> : null}
       {job.status === "completed" && previewContent ? (
         <details className="bulk-preview-completed-preview">
-          <summary>查看导入前的数据预览</summary>
+          <summary>查看文件处理详情</summary>
           {previewContent}
         </details>
       ) : (

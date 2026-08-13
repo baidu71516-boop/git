@@ -4,6 +4,7 @@ import type {
   ImportRowPublic,
   ScreeningResult,
 } from "./types";
+import { formatBulkDateTime } from "./formatters";
 
 export type PreviewPresentationTone =
   "default" | "success" | "warning" | "danger" | "processing";
@@ -237,12 +238,17 @@ const emailPattern = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const phoneCandidatePattern = /\+?\d[\d\s().-]{5,}\d/g;
 const decimalPattern = /^-?\d+\.\d+$/;
 const isoDateTimePattern =
-  /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+  /^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/;
 const safeCodePattern = /^[A-Z][A-Z0-9_]{0,79}$/;
 const numberFormatter = new Intl.NumberFormat("zh-CN", {
   notation: "compact",
   maximumFractionDigits: 2,
 });
+
+function formatDateTimeValue(value: string): string {
+  const formatted = formatBulkDateTime(value);
+  return formatted === "—" ? value : formatted;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -266,7 +272,10 @@ function truncate(value: string, maximum = 240): string {
 function redactEmbeddedContacts(value: string): string {
   const trimmed = value.trim();
   if (!trimmed) return "—";
-  if (decimalPattern.test(trimmed) || isoDateTimePattern.test(trimmed)) {
+  if (isoDateTimePattern.test(trimmed)) {
+    return formatDateTimeValue(trimmed);
+  }
+  if (decimalPattern.test(trimmed)) {
     return truncate(trimmed);
   }
   const withoutEmails = trimmed.replace(emailPattern, "***");
@@ -301,6 +310,9 @@ export function formatPreviewValue(value: unknown, depth = 0): string {
   if (typeof value === "string") {
     if (value === "xiaohongshu") return "小红书";
     if (value === "[REDACTED]" || value === "***") return "***";
+    if (isoDateTimePattern.test(value)) {
+      return formatDateTimeValue(value);
+    }
     return redactEmbeddedContacts(value);
   }
   if (typeof value === "number") {

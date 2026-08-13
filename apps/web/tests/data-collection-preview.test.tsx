@@ -50,7 +50,7 @@ describe("development data collection visual preview", () => {
     render(<BulkImportPreviewWorkspace />);
 
     expect(screen.getByText("开发预览状态")).toBeInTheDocument();
-    expect(screen.getByText("结果摘要")).toBeInTheDocument();
+    expect(screen.getByText("核心结果")).toBeInTheDocument();
     expect(screen.getByText("夏日防晒小美")).toBeInTheDocument();
     expect(screen.getByText("共 51 条")).toBeInTheDocument();
     expect(screen.getByText("符合条件 46")).toBeInTheDocument();
@@ -163,13 +163,9 @@ describe("development data collection visual preview", () => {
     expect(screen.getByText("正在导入")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("导入完成"));
-    expect(screen.getAllByText("导入完成").length).toBeGreaterThan(1);
-    const resultTitle = screen.getByText("导入结果");
-    const resultSection = resultTitle.closest("section");
+    const resultSection = document.querySelector(".bulk-preview-completed-result");
     expect(resultSection).not.toBeNull();
-    expect(
-      within(resultSection as HTMLElement).getByText("46"),
-    ).toBeInTheDocument();
+    expect(within(resultSection as HTMLElement).getByText("46")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   }, 20_000);
 });
