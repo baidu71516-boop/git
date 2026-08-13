@@ -1,7 +1,7 @@
-import { AppShell } from "@/components/app-shell";
 import { PageHeader } from "@/components/ui/page-header";
 import { notFound } from "next/navigation";
 
+import { InfluencerPreviewShell } from "@/features/influencers/influencer-preview-shell";
 import { createInfluencerPreviewDetailItems } from "@/features/influencers/preview-fixtures";
 
 export default function DevInfluencerDrawerPreviewPage() {
@@ -12,12 +12,9 @@ export default function DevInfluencerDrawerPreviewPage() {
   const items = createInfluencerPreviewDetailItems();
 
   return (
-    <AppShell
+    <InfluencerPreviewShell
       title="达人详情 Drawer 预览"
-      department="界面预览"
-      operator="预览用户"
-      role="仅展示"
-      onLogout={() => undefined}
+      description="仅用于界面预览"
     >
       <section className="influencer-workspace influencer-detail-preview-list-workspace">
         <div className="influencer-page-heading">
@@ -36,6 +33,6 @@ export default function DevInfluencerDrawerPreviewPage() {
           ))}
         </ul>
       </section>
-    </AppShell>
+    </InfluencerPreviewShell>
   );
 }

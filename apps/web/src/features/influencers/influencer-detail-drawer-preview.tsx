@@ -5,11 +5,11 @@ import { Drawer, Space, Tag, Typography } from "antd";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 
-import { AppShell } from "@/components/app-shell";
 import { PageHeader } from "@/components/ui/page-header";
 
 import { crmStageDisplay, platformLabel } from "./formatters";
 import { InfluencerDetail } from "./components/influencer-detail";
+import { InfluencerPreviewShell } from "./influencer-preview-shell";
 import type { InfluencerDetail as InfluencerDetailData } from "./types";
 
 const { Title, Text } = Typography;
@@ -25,13 +25,7 @@ export function DevInfluencerDetailDrawerPreview({
   const stage = crmStageDisplay(detail.crm_stage);
 
   return (
-    <AppShell
-      title="达人详情预览"
-      department="界面预览"
-      operator="预览用户"
-      role="仅展示"
-      onLogout={() => undefined}
-    >
+    <InfluencerPreviewShell title="达人详情预览" description="仅用于界面预览">
       <section className="influencer-workspace influencer-detail-preview-workspace">
         <div className="influencer-page-heading">
           <PageHeader
@@ -83,6 +77,6 @@ export function DevInfluencerDetailDrawerPreview({
           <span className="detail-secondary-text">仅开发环境可见</span>
         </Space>
       </section>
-    </AppShell>
+    </InfluencerPreviewShell>
   );
 }
