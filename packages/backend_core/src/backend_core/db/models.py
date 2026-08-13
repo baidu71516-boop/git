@@ -8,6 +8,7 @@ from backend_core.imports.models import (
     ImportJobFile,
     ImportJobFileClientId,
     ImportRow,
+    ImportTaskRequest,
     StoredImportFile,
 )
 from backend_core.influencers.models import (
@@ -30,6 +31,7 @@ __all__ = [
     "ImportJobFile",
     "ImportJobFileClientId",
     "ImportRow",
+    "ImportTaskRequest",
     "Influencer",
     "InfluencerContact",
     "InfluencerCurrentMetrics",

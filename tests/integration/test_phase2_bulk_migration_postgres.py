@@ -608,6 +608,7 @@ def test_fresh_upgrade_repeat_and_alembic_check(
         assert _revision(connection) == "0004_phase2_bulk_import"
         assert inspect(connection).has_table("import_job_files")
         assert inspect(connection).has_table("import_job_file_client_ids")
+        assert inspect(connection).has_table("import_task_requests")
         import_job_file_columns = {
             column["name"]: column for column in inspect(connection).get_columns("import_job_files")
         }
@@ -621,6 +622,20 @@ def test_fresh_upgrade_repeat_and_alembic_check(
             constraint["name"]
             for constraint in inspect(connection).get_check_constraints("import_job_files")
         }
+        assert _enum_values(connection, "import_task_kind") == [
+            "legacy_parse",
+            "file_parse",
+            "preview",
+            "confirm",
+        ]
+        assert _enum_values(connection, "import_task_state") == [
+            "requested",
+            "running",
+            "retry_wait",
+            "completed",
+            "terminal_failed",
+            "cancelled",
+        ]
 
 
 def test_0003_realistic_backfill_preserves_lineage_and_metadata(
@@ -689,6 +704,7 @@ def test_0003_realistic_backfill_preserves_lineage_and_metadata(
             )
             == 0
         )
+        assert connection.scalar(text("SELECT count(*) FROM import_task_requests")) == 0
 
         row_lineage = connection.execute(
             text(
@@ -797,6 +813,7 @@ def test_safe_legacy_downgrade_and_reupgrade_preserve_0003_data(
         assert _revision(connection) == "0003_phase1b"
         assert not inspect(connection).has_table("import_job_files")
         assert not inspect(connection).has_table("import_job_file_client_ids")
+        assert not inspect(connection).has_table("import_task_requests")
         assert "import_job_file_id" not in {
             column["name"] for column in inspect(connection).get_columns("import_rows")
         }
@@ -827,6 +844,7 @@ def test_safe_legacy_downgrade_and_reupgrade_preserve_0003_data(
             == 1
         )
         assert connection.scalar(text("SELECT count(*) FROM import_job_file_client_ids")) == 0
+        assert connection.scalar(text("SELECT count(*) FROM import_task_requests")) == 0
         assert (
             connection.scalar(
                 text(
@@ -995,7 +1013,9 @@ def test_acquisition_confirmation_states_and_check_constraint(
             )
 
 
-@pytest.mark.parametrize("unsafe_change", ["multi_file", "nonlegacy_single", "alias", "screening"])
+@pytest.mark.parametrize(
+    "unsafe_change", ["multi_file", "nonlegacy_single", "alias", "screening", "durable_task"]
+)
 def test_downgrade_rejects_non_projectable_phase2_data(
     migration_database: MigrationDatabase,
     unsafe_change: str,
@@ -1062,7 +1082,7 @@ def test_downgrade_rejects_non_projectable_phase2_data(
                 ),
                 {"id": uuid4(), "job_id": seeded["job_ids"][0], "file_id": file_id},
             )
-        else:
+        elif unsafe_change == "screening":
             connection.execute(
                 text(
                     """
@@ -1081,6 +1101,23 @@ def test_downgrade_rejects_non_projectable_phase2_data(
                             "source_tags_exact_any": ["美妆"],
                         }
                     ),
+                },
+            )
+        else:
+            connection.execute(
+                text(
+                    """
+                    INSERT INTO import_task_requests (
+                        id, task_token, task_kind, import_job_id, state
+                    ) VALUES (
+                        :id, :task_token, 'legacy_parse', :job_id, 'requested'
+                    )
+                    """
+                ),
+                {
+                    "id": uuid4(),
+                    "task_token": uuid4(),
+                    "job_id": seeded["job_ids"][0],
                 },
             )
 
@@ -1371,3 +1408,236 @@ def test_postgresql_constraints_protect_file_and_row_lineage(
             )
         ).scalar_one()
         assert screening_column == "jsonb"
+
+
+def test_durable_import_task_constraints_and_reconciliation_indexes(
+    migration_database: MigrationDatabase,
+) -> None:
+    migration_database.upgrade("0003_phase1b")
+    with migration_database.engine.begin() as connection:
+        seeded = _seed_legacy_graph(connection, statuses=("completed", "completed"))
+    migration_database.upgrade("0004_phase2_bulk_import")
+
+    insert_task = """
+        INSERT INTO import_task_requests (
+            id, task_token, task_kind, import_job_id, import_job_file_id,
+            preview_revision, state, dispatch_attempts, run_attempts,
+            next_retry_at, lease_expires_at, completed_at
+        ) VALUES (
+            :id, :task_token, CAST(:task_kind AS import_task_kind),
+            :job_id, :file_id, :preview_revision,
+            CAST(:state AS import_task_state), :dispatch_attempts, :run_attempts,
+            :next_retry_at, :lease_expires_at, :completed_at
+        )
+    """
+
+    def task_parameters(
+        *,
+        job_id: UUID,
+        task_kind: str,
+        state: str = "requested",
+        file_id: UUID | None = None,
+        preview_revision: int | None = None,
+        task_token: UUID | None = None,
+        dispatch_attempts: int = 0,
+        run_attempts: int = 0,
+    ) -> dict[str, Any]:
+        now = datetime.now(UTC)
+        return {
+            "id": uuid4(),
+            "task_token": task_token or uuid4(),
+            "task_kind": task_kind,
+            "job_id": job_id,
+            "file_id": file_id,
+            "preview_revision": preview_revision,
+            "state": state,
+            "dispatch_attempts": dispatch_attempts,
+            "run_attempts": run_attempts,
+            "next_retry_at": now if state == "retry_wait" else None,
+            "lease_expires_at": now + timedelta(minutes=5) if state == "running" else None,
+            "completed_at": now if state == "completed" else None,
+        }
+
+    with migration_database.engine.begin() as connection:
+        job_one, job_two = seeded["job_ids"]
+        file_one = connection.scalar(
+            text("SELECT id FROM import_job_files WHERE import_job_id = :job_id"),
+            {"job_id": job_one},
+        )
+        file_two = connection.scalar(
+            text("SELECT id FROM import_job_files WHERE import_job_id = :job_id"),
+            {"job_id": job_two},
+        )
+        assert isinstance(file_one, UUID)
+        assert isinstance(file_two, UUID)
+
+        shared_token = uuid4()
+        connection.execute(
+            text(insert_task),
+            task_parameters(
+                job_id=job_one,
+                task_kind="legacy_parse",
+                state="cancelled",
+                task_token=shared_token,
+            ),
+        )
+        _assert_database_rejects(
+            connection,
+            insert_task,
+            task_parameters(
+                job_id=job_two,
+                task_kind="legacy_parse",
+                state="cancelled",
+                task_token=shared_token,
+            ),
+        )
+
+        # The composite FK makes a file target inseparable from its owning job.
+        _assert_database_rejects(
+            connection,
+            insert_task,
+            task_parameters(job_id=job_one, task_kind="file_parse", file_id=file_two),
+        )
+
+        invalid_targets = (
+            task_parameters(job_id=job_one, task_kind="file_parse"),
+            task_parameters(
+                job_id=job_one,
+                task_kind="file_parse",
+                file_id=file_one,
+                preview_revision=1,
+            ),
+            task_parameters(job_id=job_one, task_kind="confirm"),
+            task_parameters(job_id=job_one, task_kind="confirm", preview_revision=0),
+            task_parameters(
+                job_id=job_one,
+                task_kind="confirm",
+                file_id=file_one,
+                preview_revision=1,
+            ),
+            task_parameters(
+                job_id=job_one,
+                task_kind="preview",
+                preview_revision=1,
+            ),
+            task_parameters(job_id=job_one, task_kind="legacy_parse", file_id=file_one),
+        )
+        for parameters in invalid_targets:
+            _assert_database_rejects(connection, insert_task, parameters)
+
+        invalid_running = task_parameters(job_id=job_one, task_kind="legacy_parse", state="running")
+        invalid_running["lease_expires_at"] = None
+        invalid_retry_wait = task_parameters(
+            job_id=job_one, task_kind="legacy_parse", state="retry_wait"
+        )
+        invalid_retry_wait["next_retry_at"] = None
+        invalid_completed = task_parameters(
+            job_id=job_one, task_kind="legacy_parse", state="completed"
+        )
+        invalid_completed["completed_at"] = None
+        invalid_attempts = task_parameters(
+            job_id=job_one,
+            task_kind="legacy_parse",
+            state="cancelled",
+            dispatch_attempts=-1,
+        )
+        invalid_runs = task_parameters(
+            job_id=job_one,
+            task_kind="legacy_parse",
+            state="cancelled",
+            run_attempts=-1,
+        )
+        for parameters in (
+            invalid_running,
+            invalid_retry_wait,
+            invalid_completed,
+            invalid_attempts,
+            invalid_runs,
+        ):
+            _assert_database_rejects(connection, insert_task, parameters)
+
+        for column, value in (("task_kind", "future_task"), ("state", "unknown")):
+            invalid_enum = task_parameters(
+                job_id=job_one,
+                task_kind="legacy_parse",
+                state="cancelled",
+            )
+            invalid_enum[column] = value
+            _assert_database_rejects(connection, insert_task, invalid_enum)
+
+        active_cases = (
+            (
+                task_parameters(job_id=job_one, task_kind="legacy_parse"),
+                task_parameters(job_id=job_one, task_kind="legacy_parse", state="running"),
+            ),
+            (
+                task_parameters(job_id=job_one, task_kind="file_parse", file_id=file_one),
+                task_parameters(
+                    job_id=job_one,
+                    task_kind="file_parse",
+                    file_id=file_one,
+                    state="retry_wait",
+                ),
+            ),
+            (
+                task_parameters(job_id=job_one, task_kind="preview"),
+                task_parameters(job_id=job_one, task_kind="preview", state="running"),
+            ),
+            (
+                task_parameters(job_id=job_one, task_kind="confirm", preview_revision=1),
+                task_parameters(
+                    job_id=job_one,
+                    task_kind="confirm",
+                    preview_revision=1,
+                    state="retry_wait",
+                ),
+            ),
+        )
+        for accepted, duplicate in active_cases:
+            connection.execute(text(insert_task), accepted)
+            _assert_database_rejects(connection, insert_task, duplicate)
+
+        # Historical terminal rows remain available, and confirm uniqueness is revision-scoped.
+        connection.execute(
+            text(insert_task),
+            task_parameters(
+                job_id=job_one,
+                task_kind="confirm",
+                preview_revision=1,
+                state="terminal_failed",
+            ),
+        )
+        connection.execute(
+            text(insert_task),
+            task_parameters(job_id=job_one, task_kind="confirm", preview_revision=2),
+        )
+
+        index_definitions = {
+            row["indexname"]: row["indexdef"]
+            for row in connection.execute(
+                text(
+                    """
+                    SELECT indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = current_schema()
+                      AND tablename = 'import_task_requests'
+                    """
+                )
+            ).mappings()
+        }
+        assert {
+            "ix_import_task_requests_due",
+            "ix_import_task_requests_expired_lease",
+            "uq_import_task_request_active_confirm",
+            "uq_import_task_request_active_file_parse",
+            "uq_import_task_request_active_legacy_parse",
+            "uq_import_task_request_active_preview",
+        } <= set(index_definitions)
+        assert (
+            "COALESCE(next_retry_at, requested_at)"
+            in index_definitions["ix_import_task_requests_due"]
+        )
+        assert (
+            "WHERE (state = 'running'::import_task_state)"
+            in index_definitions["ix_import_task_requests_expired_lease"]
+        )

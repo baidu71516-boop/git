@@ -6,6 +6,7 @@ from backend_core.imports.models import (
     ImportJobFile,
     ImportJobFileClientId,
     ImportRow,
+    ImportTaskRequest,
     StoredImportFile,
     default_screening_rules,
 )
@@ -111,6 +112,78 @@ def test_import_row_locator_and_same_job_composite_fk_are_file_scoped() -> None:
     )
     assert ImportRow.__table__.c.import_job_file_id.nullable is False
     assert ImportRow.import_job_file.property.back_populates == "rows"
+
+
+def test_import_task_request_constraints_define_durable_task_identity() -> None:
+    configure_mappers()
+
+    assert _constraint_names(ImportTaskRequest, UniqueConstraint) == {
+        "uq_import_task_request_token"
+    }
+    assert _constraint_names(ImportTaskRequest, CheckConstraint) == {
+        "ck_import_task_request_attempts_nonnegative",
+        "ck_import_task_request_state_timestamps",
+        "ck_import_task_request_target",
+    }
+    file_job_foreign_key = next(
+        constraint
+        for constraint in ImportTaskRequest.__table__.constraints
+        if isinstance(constraint, ForeignKeyConstraint)
+        and constraint.name == "fk_import_task_request_file_job"
+    )
+    assert tuple(element.parent.name for element in file_job_foreign_key.elements) == (
+        "import_job_file_id",
+        "import_job_id",
+    )
+    assert tuple(element.target_fullname for element in file_job_foreign_key.elements) == (
+        "import_job_files.id",
+        "import_job_files.import_job_id",
+    )
+
+    indexes = {index.name: index for index in ImportTaskRequest.__table__.indexes}
+    assert set(indexes) == {
+        "ix_import_task_requests_due",
+        "ix_import_task_requests_expired_lease",
+        "uq_import_task_request_active_confirm",
+        "uq_import_task_request_active_file_parse",
+        "uq_import_task_request_active_legacy_parse",
+        "uq_import_task_request_active_preview",
+    }
+    assert all(
+        indexes[name].unique
+        for name in (
+            "uq_import_task_request_active_confirm",
+            "uq_import_task_request_active_file_parse",
+            "uq_import_task_request_active_legacy_parse",
+            "uq_import_task_request_active_preview",
+        )
+    )
+    assert indexes["ix_import_task_requests_due"].unique is False
+    assert indexes["ix_import_task_requests_expired_lease"].unique is False
+    assert tuple(
+        column.name for column in indexes["uq_import_task_request_active_legacy_parse"].columns
+    ) == ("import_job_id",)
+    assert tuple(
+        column.name for column in indexes["uq_import_task_request_active_file_parse"].columns
+    ) == ("import_job_id", "import_job_file_id")
+    assert tuple(
+        column.name for column in indexes["uq_import_task_request_active_preview"].columns
+    ) == ("import_job_id",)
+    assert tuple(
+        column.name for column in indexes["uq_import_task_request_active_confirm"].columns
+    ) == ("import_job_id", "preview_revision")
+    assert tuple(
+        column.name for column in indexes["ix_import_task_requests_expired_lease"].columns
+    ) == ("lease_expires_at", "id")
+
+    table = ImportTaskRequest.__table__
+    assert table.c.task_token.nullable is False
+    assert table.c.import_job_id.nullable is False
+    assert table.c.import_job_file_id.nullable is True
+    assert table.c.preview_revision.nullable is True
+    assert table.c.dispatch_attempts.server_default is not None
+    assert table.c.run_attempts.server_default is not None
+    assert table.c.requested_at.server_default is not None
 
 
 def test_bulk_schema_defaults_and_required_index_are_frozen() -> None:

@@ -97,7 +97,9 @@
 
 ### Migration、Worker 与性能
 
-- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias 与 acquisition confirmation Boolean/CHECK）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
+- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias、acquisition confirmation Boolean/CHECK 与 durable `import_task_requests`）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
+- [ ] `import_task_requests` 以唯一 token、kind/target CHECK、Job/File 复合 FK、持久 dispatch/run attempts、retry time、Worker lease 和 completed/terminal state 成为 task lifecycle 唯一事实源；Redis、Audit、`error_code` 与 Celery retry count 均不得替代。
+- [ ] PostgreSQL 16 task schema gate 覆盖 token unique、四类 active partial unique、terminal 历史保留、confirm revision/file_parse file、state/timestamp、非负 attempts、复合 FK、reconciliation indexes、无历史 backfill及有 durable task 时危险 downgrade 拒绝。
 - [ ] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
 - [ ] `0004` alias Migration Gate 在 PostgreSQL 16 覆盖 fresh DB、0003 realistic data、repeat upgrade、safe downgrade→0003→0004、dangerous multi-file downgrade guard、`alembic check`、metadata drift、Legacy lineage 和 alias unique/composite FK；Legacy occurrence 保持 0 alias。
 - [ ] `0004` confirmation CHECK Gate 覆盖 Legacy NULL/legacy_unknown/false、普通 timestamp/server_default/false、历史 SHA timestamp/server_default/true、显式 timestamp/user_confirmed/false，并由数据库拒绝 NULL/server_default/true、timestamp/user_confirmed/true、NULL/legacy_unknown/true。

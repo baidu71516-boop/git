@@ -903,6 +903,15 @@ Influencer / PlatformAccount
 - 复合 FK `(import_job_file_id, import_job_id)`
 - 新增 Freshness 查询索引 `(matched_platform_account_id, committed_at DESC, import_job_id)`
 
+`import_task_requests`：
+
+- 使用唯一 `task_token` 与 kind `legacy_parse/file_parse/preview/confirm` 持久化 Parse/Preview/Confirm 请求，不增加通用 Workflow Engine 或未来 task kind。
+- state 固定为 `requested/running/retry_wait/completed/terminal_failed/cancelled`；持久化 dispatch/run attempts、requested/dispatch/retry/lease/start/completion 时间。
+- file_parse 必须绑定同 Job 的 file；confirm 必须绑定非空 revision；其他 job-level task 不保存无意义 file/revision。
+- active requested/running/retry_wait 对 legacy_parse(Job)、file_parse(Job/File)、preview(Job)、confirm(Job/Revision) 分别 partial unique；due/expired partial indexes 支撑 bounded deterministic reconciliation。
+- PostgreSQL 是 task lifecycle 与 retry exhaustion 的唯一 authoritative source；Redis、Audit、`error_code`、Celery retry metadata 与内存状态均不得替代。
+- 历史任务不 backfill；业务状态与 request、业务完成与 task completed 各自在同一个 PostgreSQL transaction 中提交。
+
 `0004` 的 NOT NULL Row FK 必须与单文件兼容桥同一个 Task 1 交付，不允许只部署 Migration：
 
 - 现有 `POST /import-jobs` 创建新 Legacy single-file Job 时同时创建 position=1 的 ImportJobFile，但不创建或伪造 client-ID alias。
@@ -959,7 +968,7 @@ Legacy `source_acquired_at` 必须保持 NULL 且 confirmation required=false，
 
 ### 18.1 0004
 
-1. 新建 ImportJobFile 与 `import_job_file_client_ids` alias 结构；alias 表使用 Job 内 client ID 唯一约束和 `(import_job_file_id, import_job_id)` 复合 FK，ImportJobFile 本身不保存 `client_file_id`。
+1. 新建 ImportJobFile、`import_job_file_client_ids` alias 与 durable `import_task_requests`；alias/task file target 使用 `(import_job_file_id, import_job_id)` 复合 FK，ImportJobFile 本身不保存 `client_file_id`。
 2. 预检并安全拒绝仍处于 uploaded/parsing/previewing/confirm_queued/importing 的活动 Legacy Job；部署前先让任务完成或人工处理。
 3. 每个历史 ImportJob 回填 position=1 的 occurrence，但不回填任何 alias；`source_acquired_at=NULL`、`source_acquired_at_origin=legacy_unknown`、`source_acquired_at_confirmation_required=false`；completed/preview_ready/preview_stale 映射 ready，mapping_required 映射 mapping_required，failed 映射 failed，cancelled 映射 excluded。
 4. 每个历史 ImportRow 关联该 occurrence。
@@ -970,7 +979,8 @@ Legacy `source_acquired_at` 必须保持 NULL 且 confirmation required=false，
 9. 为历史 CollectionJob 回填空规则 `{"schema_version":1,"platforms":[],"source_tags_exact_any":[]}` 与 `screening_rules_revision=1`。
 10. 增加 Draft/File status、failed_stage 与 Batch Audit enum。
 11. 同版本交付 Legacy single-file 兼容桥；不得在旧 create/parse/preview 仍会生成无 file FK Row 时单独上线 Migration。
-12. `0004` 尚未发布，alias 与 occurrence-level acquisition confirmation Boolean/CHECK 直接完善同一 `0004_phase2_bulk_import`；不得另建 Migration，`0005` 仍专用于 Refresh Queue。
+12. `0004` 尚未发布，alias、occurrence-level acquisition confirmation Boolean/CHECK 与 durable task/outbox schema 直接完善同一 `0004_phase2_bulk_import`；不得另建 Migration，`0005` 仍专用于 Refresh Queue。
+13. Migration 不伪造历史 task lifecycle；存在任何 durable task record 时，`0004 → 0003` 必须安全拒绝。
 
 ### 18.2 0005
 
@@ -1088,8 +1098,10 @@ Export 成功响应是统一 JSON Envelope 的唯一 Phase 2 例外：返回 `te
 - 同时最多一个 Heavy Import Preview/Confirm。
 - Heavy gate 使用 PostgreSQL session-level advisory lock 的固定命名 key；任务未取得锁时进入可重试等待，不并发执行。连接/Worker 退出自动释放，并在 finally 主动释放；不得只用进程内 semaphore 或会因 Redis 重启失效的裸锁。
 - Import tasks 继续 acks_late + reject_on_worker_lost。
-- task payload 只传 Job/File ID 和 revision，数据库是事实源。
-- API 状态提交后 Broker dispatch 丢失由 scheduler reconciliation 修复。
+- task payload 只传 Job/File ID、revision 和 persisted task token，数据库是事实源。
+- API 业务状态与 `import_task_requests` 必须同事务提交；业务完成与 task completed 必须同事务提交。
+- API 状态提交后 Broker dispatch 丢失由 scheduler 对 persisted requested/retry_wait/expired-running task 使用 bounded `FOR UPDATE SKIP LOCKED` reconciliation 修复。
+- Worker claim 使用 token/state guard，持久增加 run attempts 并设置/续租 lease；Redis 重启后 retry exhaustion 仍由 PostgreSQL 决定。
 - 已由人工 Confirm 的 revision 重投属于恢复，不是 Auto Confirm。
 
 必须移除 2000 行路径中的逐行 N+1：

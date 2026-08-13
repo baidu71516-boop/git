@@ -44,6 +44,22 @@ class ImportJobFileStatus(StrEnum):
     EXCLUDED = "excluded"
 
 
+class ImportTaskKind(StrEnum):
+    LEGACY_PARSE = "legacy_parse"
+    FILE_PARSE = "file_parse"
+    PREVIEW = "preview"
+    CONFIRM = "confirm"
+
+
+class ImportTaskState(StrEnum):
+    REQUESTED = "requested"
+    RUNNING = "running"
+    RETRY_WAIT = "retry_wait"
+    COMPLETED = "completed"
+    TERMINAL_FAILED = "terminal_failed"
+    CANCELLED = "cancelled"
+
+
 class SourceAcquiredAtOrigin(StrEnum):
     SERVER_DEFAULT = "server_default"
     USER_CONFIRMED = "user_confirmed"

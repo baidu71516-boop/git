@@ -150,8 +150,10 @@ Phase 2 Bulk Batch 逐文件选择 Adapter，但通用 Planner/Matcher/Repositor
 - 当前 4C/8GB 测试服务器的 Worker concurrency 固定为 `2`。
 - Heavy Import Preview/Confirm 全局同时最多运行 `1` 个，通过可恢复的锁/lease 控制，而不是仅依赖进程内变量。
 - 任务入口只解析参数、装配 Session 并调用 `backend_core`；不得复制业务逻辑。
-- Retry 必须重新读取持久化 Job/File/Row/Preview 状态；同 Job/Revision 的操作保持幂等。
-- Scheduler 只负责持久化任务的 reconciliation，不创建 Browser Automation 或采集器。
+- `import_task_requests` 持久化 task token、kind、target、state、dispatch/run attempts、retry time 与 Worker lease；PostgreSQL 是唯一恢复事实源，Celery/Redis 只提供 at-least-once delivery。
+- 业务状态与 task request 同事务创建，业务结果与 task completed 同事务提交；Broker payload 只携带 ID、revision 与 persisted token。
+- Retry 必须重新读取持久化 Job/File/Row/Preview/task 状态；同 token/Job/Revision 的操作保持幂等，不能使用 Celery retry metadata 作为 authoritative run count。
+- Scheduler 只负责 bounded、deterministic 的持久化任务 reconciliation；使用 `FOR UPDATE SKIP LOCKED` 领取到期 requested/retry_wait 或 lease 过期 running task，不创建 Browser Automation 或采集器。
 
 ---
 
