@@ -5,8 +5,8 @@
 Base：`/api/v1`
 
 - Phase 1A–1C 接口已实现；以 Router、Schema 和测试为运行事实源。
-- 当前开发分支已实现 Phase 2 Task 1–6 的 Bulk Import、Structured Screening、Unified Preview 与 Atomic Confirm/Recovery 接口；仍以 Router、Schema 和测试为运行事实源。
-- Task 7 Freshness 与 Task 8 Refresh Queue 已实现；Task 9 Refresh Return 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称服务端当前可调用。
+- 当前开发分支已实现 Phase 2 Task 1–9 的 Bulk Import、Structured Screening、Unified Preview、Atomic Confirm/Recovery、Freshness、Refresh Queue 与 Refresh Return；仍以 Router、Schema 和测试为运行事实源。
+- Task 10 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称当前可调用。
 - Phase 2 详细语义以 `docs/PHASE_2_SCOPE.md` 为准。
 - 旧的 `/imports` 草案路径已废弃；正式导入资源前缀为 `/import-jobs`。
 
@@ -101,7 +101,7 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/confirm`
 - `POST /import-jobs/{id}/cancel`
 
-### Phase 2 Tasks 1–6 Implemented — Bulk Batch
+### Phase 2 Tasks 1–6 + Task 9 Implemented — Bulk Batch / Linked Return
 
 - `POST /import-jobs/bulk`：创建 Draft Batch，一个 ImportJob 对应一个 Bulk Batch。
 - `GET /import-jobs`
@@ -122,7 +122,15 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 
 `0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`、`source_acquired_at_confirmation_required=false`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
-Task 8 的 `POST /import-jobs/bulk` JSON 仍只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 只先建立 nullable 同部门 FK；可选 `refresh_queue_id` 请求、状态校验与回流处理属于 Task 9，尚未实现。一个 Job 最多关联一个 Queue、一个未完成 Queue 可接收多个回流 Job仍是 Task 9 冻结契约。
+Task 9 的 `POST /import-jobs/bulk` JSON additive 接受可选 `refresh_queue_id`。Queue 必须存在、与 Collection/ImportJob 同 Department 且为 open/exported；未知或跨部门 Queue 返回 safe 404，completed/cancelled 返回 409 `REFRESH_QUEUE_NOT_RETURNABLE`。一个 Job 最多关联一个 Queue，一个未完成 Queue 可接收多个回流 Job。
+
+Queue-linked Unified Preview 在现有响应中 additive 返回：
+
+- `ImportJob.preview_summary.refresh_return`：matched/outside/pending、Queue Item with/without return、各 expected status、conflict 与稳定 `missing_queue_item_ids`。
+- 每个 `ImportRow.merge_plan.refresh_return`：matched Queue Item、expected fulfillment、稳定 reason 与唯一 Last Return claimant evidence。
+- Confirm result 的 `refresh_return`：同一 summary、claimed Item 数与 Queue 是否完成。
+
+Preview 不修改 Queue。没有 `refresh_queue_id` 的普通 Bulk 不产生上述 key，既有响应与 Plan Hash 语义保持不变；Task 9 不增加专用 Return endpoint。
 
 `POST /import-jobs/{id}/files` multipart 至少包含：
 

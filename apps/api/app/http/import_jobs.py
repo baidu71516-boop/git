@@ -240,6 +240,7 @@ async def create_bulk_import_job(
         collection_job_id=payload.collection_job_id,
         ip=get_client_ip(request),
         user_agent=get_user_agent(request),
+        refresh_queue_id=payload.refresh_queue_id,
     )
     return envelope(request, data=ImportJobPublic.model_validate(job))
 

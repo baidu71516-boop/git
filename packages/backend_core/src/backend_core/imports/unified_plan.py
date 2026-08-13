@@ -34,6 +34,7 @@ from backend_core.imports.preview_domain import (
     PreviewRowFact,
     PreviewRowHashInput,
     PreviewRowLocator,
+    ScreeningEvaluation,
     ScreeningRulePayload,
     ScreeningRuleSnapshot,
     build_change_summary,
@@ -45,6 +46,13 @@ from backend_core.imports.preview_domain import (
 )
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.storage import StorageAdapter
+from backend_core.refresh.enums import RefreshQueueStatus
+from backend_core.refresh.reconciliation import (
+    RefreshReturnPreview,
+    RefreshReturnRow,
+    reconcile_refresh_return,
+)
+from backend_core.refresh.repository import RefreshQueueRepository
 
 _PLANNER_VERSION = "phase1b-v1"
 _ADAPTER_VERSION = "phase2-v1"
@@ -77,6 +85,7 @@ class UnifiedPlanResult:
     rows: tuple[UnifiedPlanRow, ...]
     prefetched_state: PrefetchedImportState
     summary: dict[str, Any]
+    refresh_return: RefreshReturnPreview | None = None
 
     @property
     def staging_rows(self) -> tuple[_StagingRow, ...]:
@@ -101,6 +110,7 @@ class UnifiedPlanBuilder:
         self.session = session
         self.storage = storage
         self.repository = ImportRepository(session)
+        self.refresh_queue_repository = RefreshQueueRepository(session)
         self.batch = BatchImportProcessor(
             session,
             storage,
@@ -135,7 +145,9 @@ class UnifiedPlanBuilder:
                 "All included files must be parsed successfully",
                 status_code=409,
             )
-        if any(item.source_acquired_at_confirmation_required for item in included):
+        if job.refresh_queue_id is None and any(
+            item.source_acquired_at_confirmation_required for item in included
+        ):
             raise ImportDomainError(
                 "SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED",
                 "Confirm source acquisition time before generating Preview",
@@ -149,6 +161,7 @@ class UnifiedPlanBuilder:
             preview_revision=preview_revision,
             collection_job_id=job.collection_job_id,
             source_type=job.source_type,
+            refresh_queue_id=job.refresh_queue_id,
             files=manifest,
             screening=screening,
             planner_version=_PLANNER_VERSION,
@@ -316,24 +329,14 @@ class UnifiedPlanBuilder:
                 import_row_id=staged.import_row_id,
             )
             duplicate_owner = self.duplicate_owner_locator(plan.merge_plan)
-            plan_hash = hash_preview_row(
-                PreviewRowHashInput(
-                    context_hash=context.context_hash,
-                    locator=locator,
-                    normalized_data=staged.normalized_data,
-                    action=plan.action,
-                    match_type=plan.match_type,
-                    matched_influencer_id=plan.matched_influencer_id,
-                    matched_platform_account_id=plan.matched_platform_account_id,
-                    duplicate_owner_locator=duplicate_owner,
-                    merge_plan=plan.merge_plan,
-                    preconditions=plan.preconditions,
-                    screening=screening_evaluation,
-                    change_summary=change_summary,
-                    warnings=tuple(plan.warnings),
-                    errors=tuple(plan.errors),
-                    manual_review=plan.merge_plan.get("batch_manual_review"),
-                )
+            plan_hash = self.hash_row(
+                context=context,
+                staged=staged,
+                plan=plan,
+                locator=locator,
+                duplicate_owner=duplicate_owner,
+                screening=screening_evaluation,
+                change_summary=change_summary,
             )
             possible_duplicate = any(
                 warning.get("code") == "POSSIBLE_DUPLICATE_CONTACT" for warning in plan.warnings
@@ -359,6 +362,47 @@ class UnifiedPlanBuilder:
                 )
             )
 
+        refresh_return = await self.refresh_return_preview(
+            job,
+            tuple(rows),
+            for_update=revalidation_mode is RevalidationMode.CONFIRM_PRESERVE,
+        )
+        if refresh_return is not None:
+            evidence_by_row_id = {
+                evidence.locator.import_row_id: evidence for evidence in refresh_return.row_evidence
+            }
+            batch_entries = []
+            reconciled_rows: list[UnifiedPlanRow] = []
+            for planned_row in rows:
+                evidence = evidence_by_row_id[planned_row.locator.import_row_id]
+                planned_row.plan.merge_plan["refresh_return"] = evidence.model_dump(mode="json")
+                screening_document = planned_row.plan.merge_plan.get("screening")
+                screening_evaluation = (
+                    ScreeningEvaluation.model_validate(screening_document)
+                    if screening_document is not None
+                    else None
+                )
+                change_summary = ChangeSummary.model_validate(
+                    planned_row.plan.merge_plan["change_summary"]
+                )
+                row_plan_hash = self.hash_row(
+                    context=context,
+                    staged=planned_row.staging,
+                    plan=planned_row.plan,
+                    locator=planned_row.locator,
+                    duplicate_owner=self.duplicate_owner_locator(planned_row.plan.merge_plan),
+                    screening=screening_evaluation,
+                    change_summary=change_summary,
+                )
+                batch_entries.append(
+                    BatchPlanHashEntry(
+                        locator=planned_row.locator,
+                        row_plan_hash=row_plan_hash,
+                    )
+                )
+                reconciled_rows.append(replace(planned_row, row_plan_hash=row_plan_hash))
+            rows = reconciled_rows
+
         summary = summarize_preview(
             occurrence_count=len(files),
             included_file_count=len(included),
@@ -378,12 +422,106 @@ class UnifiedPlanBuilder:
                 },
             }
         )
+        if refresh_return is not None:
+            summary_document["refresh_return"] = {
+                **refresh_return.summary.model_dump(mode="json"),
+                "missing_queue_item_ids": [
+                    str(item.queue_item_id)
+                    for item in refresh_return.item_evidence
+                    if item.matching_row_count == 0
+                ],
+            }
         return UnifiedPlanResult(
             context=context,
             screening=screening,
             rows=tuple(rows),
             prefetched_state=prefetched_state,
             summary=summary_document,
+            refresh_return=refresh_return,
+        )
+
+    async def refresh_return_preview(
+        self,
+        job: ImportJob,
+        rows: tuple[UnifiedPlanRow, ...],
+        *,
+        for_update: bool,
+    ) -> RefreshReturnPreview | None:
+        """Build linked Queue evidence strictly after existing Hard Match planning."""
+
+        if job.refresh_queue_id is None:
+            return None
+        queue = await self.refresh_queue_repository.get_queue(
+            job.refresh_queue_id,
+            department_id=job.department_id,
+            for_update=for_update,
+        )
+        if queue is None:
+            raise ImportDomainError(
+                "REFRESH_QUEUE_NOT_FOUND",
+                "Refresh queue not found",
+                status_code=404,
+            )
+        if queue.status not in {RefreshQueueStatus.OPEN, RefreshQueueStatus.EXPORTED}:
+            raise ImportDomainError(
+                "REFRESH_QUEUE_NOT_RETURNABLE",
+                "Refresh queue cannot accept returns in its current status",
+                status_code=409,
+            )
+        queue_items = await self.refresh_queue_repository.list_reconciliation_items(
+            queue.id,
+            for_update=for_update,
+        )
+        return reconcile_refresh_return(
+            (
+                RefreshReturnRow(
+                    locator=row.locator,
+                    source=row.staging.record.source,
+                    action=row.plan.action,
+                    matched_platform_account_id=row.plan.matched_platform_account_id,
+                    is_owner_effective=not bool(row.plan.merge_plan.get("batch_duplicate")),
+                    source_acquired_at=_as_utc(row.staging.occurrence.source_acquired_at),
+                    source_acquired_at_confirmation_required=(
+                        row.staging.occurrence.source_acquired_at_confirmation_required
+                    ),
+                    change_summary=ChangeSummary.model_validate(
+                        row.plan.merge_plan["change_summary"]
+                    ),
+                )
+                for row in rows
+            ),
+            queue_items,
+        )
+
+    @staticmethod
+    def hash_row(
+        *,
+        context: PreviewRevisionContext,
+        staged: _StagingRow,
+        plan: PlannedImportRow,
+        locator: PreviewRowLocator,
+        duplicate_owner: PreviewRowLocator | None,
+        screening: ScreeningEvaluation | None,
+        change_summary: ChangeSummary,
+    ) -> str:
+        return hash_preview_row(
+            PreviewRowHashInput(
+                context_hash=context.context_hash,
+                locator=locator,
+                normalized_data=staged.normalized_data,
+                action=plan.action,
+                match_type=plan.match_type,
+                matched_influencer_id=plan.matched_influencer_id,
+                matched_platform_account_id=plan.matched_platform_account_id,
+                duplicate_owner_locator=duplicate_owner,
+                merge_plan=plan.merge_plan,
+                preconditions=plan.preconditions,
+                screening=screening,
+                change_summary=change_summary,
+                warnings=tuple(plan.warnings),
+                errors=tuple(plan.errors),
+                manual_review=plan.merge_plan.get("batch_manual_review"),
+            )
         )
 
     @staticmethod

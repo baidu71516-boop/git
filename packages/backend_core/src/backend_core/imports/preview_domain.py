@@ -1046,8 +1046,6 @@ class PreviewFileManifestEntry(FrozenContract):
                 raise ValueError("included manifest files must have a mapping hash")
             if self.source_acquired_at is None:
                 raise ValueError("included manifest files must have acquisition time")
-            if self.source_acquired_at_confirmation_required:
-                raise ValueError("included files cannot require acquisition confirmation")
         elif self.status is not ImportJobFileStatus.EXCLUDED:
             raise ValueError("non-included manifest files must be excluded")
         if (self.source_acquired_at_origin is SourceAcquiredAtOrigin.LEGACY_UNKNOWN) != (
@@ -1067,6 +1065,7 @@ class PreviewRevisionContext(FrozenContract):
     preview_revision: PositiveStrictInt
     collection_job_id: UUID
     source_type: ImportSourceType
+    refresh_queue_id: UUID | None = None
     files: tuple[PreviewFileManifestEntry, ...]
     screening: ScreeningRuleSnapshot
     planner_version: Annotated[str, StringConstraints(min_length=1, max_length=80)]
@@ -1093,10 +1092,12 @@ class PreviewRevisionContext(FrozenContract):
         return hash_document(self.hash_payload())
 
     def hash_payload(self) -> dict[str, Any]:
-        return {
-            **self.model_dump(mode="json"),
-            "screening_rule_hash": self.screening.rule_hash,
-        }
+        payload = self.model_dump(mode="json")
+        # Preserve the Task 1-8 context hash for ordinary Bulk imports while
+        # binding every linked return plan to its one frozen Queue aggregate.
+        if self.refresh_queue_id is None:
+            payload.pop("refresh_queue_id", None)
+        return {**payload, "screening_rule_hash": self.screening.rule_hash}
 
 
 class PreviewRowLocator(FrozenContract):

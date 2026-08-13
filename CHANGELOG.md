@@ -4,6 +4,30 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 9 — Refresh Return Reconciliation
+
+#### Added
+
+- `POST /import-jobs/bulk` additive 接受可选 `refresh_queue_id`，只允许同 Department 的 open/exported Queue；Import Job/detail/OpenAPI 回传该链接，普通 Bulk 请求与 Audit shape 保持不变。
+- 新增纯 `refresh.reconciliation` domain：只消费现有 Hard Matcher 已确定的 account/source 与 owner/effective plan facts，不接受 Queue identity snapshot；统一生成 matched/outside/pending、Missing Return、changed/no-change/stale/unresolved、冲突 claimant 与安全 Preview summary。
+- Unified Preview 把 Queue ID 绑定进 linked context hash，在 `preview_summary.refresh_return` 与每行 `merge_plan.refresh_return` 冻结 expected evidence；Preview 不修改 Queue，普通 Bulk 不产生 additive key。
+- Atomic Confirm 在现有 Merge finalize 后、唯一 commit 前写 Item fulfillment/Last Return lineage 并聚合 Queue completion；completed result replay 直接复用持久结果，不重复核销。
+- 新增 `make test-refresh-return-postgres`，覆盖原子回滚/recovery/replay、同 Item 并发唯一赢家、Freshness、confirmation-required unresolved 与真实 2000-item mixed 回流。
+
+#### Reliability and Boundaries
+
+- Queue Item 只能在 Phase 1B Hard Matcher 唯一确定 owner/effective PlatformAccount 后按 `(queue_id, platform_account_id, source)` 关联；repository projection 不读取 `identity_snapshot`，未修改 Hard Matcher。
+- 无法唯一确定账号的 ERROR/MANUAL_REVIEW、所有 SKIP/duplicate non-owner 与 Missing Return 保持 pending；只有已唯一匹配后的确定性问题可写 Last Return 并进入 unresolved。
+- acquisition 必须严格晚于非空 baseline 才能 no-change fulfill；旧 observation 为 stale_return，confirmation-required/acquisition-null/baseline-null no-change 为 unresolved。Freshness 仍只从 completed Confirm lineage 推导。
+- Queue/Items 使用 PostgreSQL row locks 与 frozen plan comparison；Merge、Row lineage、fulfillment、Queue completion、Job/task/Audit 同事务。没有 Redis 最终一致性依赖、新 Audit enum、Migration、Web、Task 10 或部署。
+
+#### Verification
+
+- Task 9 PostgreSQL 16 Gate 为 5 passed；2000 Queue Items/1705 return rows 最终为 800 fulfilled_changed、600 fulfilled_no_change、300 stale_return、300 pending，367 SQL、13.842815s、RSS high-water 322,420,736 bytes。
+- 普通 Task 6 Confirm 的 2000-row measured P95 为 6.711925s/55 SQL/RSS 346,669,056 bytes；5000 Confirm 为 16.103438s/106 SQL/RSS 651,329,536 bytes；Task 4 与 Task 5 的 5k/10k opt-in gates 也已实际复跑通过。
+- 显式 PostgreSQL 16 的 `make test` 通过：Backend/Integration/Smoke 558 passed、6 skipped（Task 9 与既有 capacity opt-ins 已独立实跑，仓库外真实附件未提供）；API 27、Worker 20、Web 29 passed。
+- `make lint`、`make compose-validate`、Task 7/8 PG targets 与 Alembic fresh/current/check 全部通过；唯一 head 仍为 `0005_phase2_refresh_queue`。
+
 ### Phase 2 Task 8 — Refresh Queue / Deterministic Export
 
 #### Added

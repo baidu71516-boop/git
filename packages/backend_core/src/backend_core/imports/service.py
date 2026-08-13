@@ -54,6 +54,8 @@ from backend_core.imports.schemas import (
 from backend_core.imports.state_machine import transition_import_job
 from backend_core.imports.storage import StorageAdapter
 from backend_core.imports.task_service import DispatchStatus, ImportTaskService
+from backend_core.refresh.enums import RefreshQueueStatus
+from backend_core.refresh.repository import RefreshQueueRepository
 
 CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
 VIEWER_EMAIL_VALUE = re.compile(
@@ -168,6 +170,7 @@ class ImportService:
         self.session = session
         self.storage = storage
         self.repository = ImportRepository(session)
+        self.refresh_queue_repository = RefreshQueueRepository(session)
         self.audit = AuditRepository(session)
         self.parser_limits = parser_limits
         self.max_file_bytes = max_file_bytes
@@ -540,6 +543,7 @@ class ImportService:
         collection_job_id: UUID,
         ip: str,
         user_agent: str,
+        refresh_queue_id: UUID | None = None,
     ) -> ImportJob:
         self._require_mutation(context)
         collection = await self.get_collection_job(context, collection_job_id)
@@ -549,8 +553,31 @@ class ImportService:
                 "Collection job is not active",
                 status_code=409,
             )
+        refresh_queue = None
+        if refresh_queue_id is not None:
+            refresh_queue = await self.refresh_queue_repository.get_queue(
+                refresh_queue_id,
+                department_id=collection.department_id,
+                for_update=True,
+            )
+            if refresh_queue is None:
+                raise ImportDomainError(
+                    "REFRESH_QUEUE_NOT_FOUND",
+                    "Refresh queue not found",
+                    status_code=404,
+                )
+            if refresh_queue.status not in (
+                RefreshQueueStatus.OPEN,
+                RefreshQueueStatus.EXPORTED,
+            ):
+                raise ImportDomainError(
+                    "REFRESH_QUEUE_NOT_RETURNABLE",
+                    "Refresh queue cannot accept returns in its current status",
+                    status_code=409,
+                )
         job = ImportJob(
             collection_job_id=collection.id,
+            refresh_queue_id=refresh_queue.id if refresh_queue is not None else None,
             department_id=collection.department_id,
             operator_id=self._operator_id(context),
             stored_file_id=None,
@@ -567,6 +594,12 @@ class ImportService:
         )
         self.session.add(job)
         await self.session.flush()
+        audit_after = {
+            "collection_job_id": str(collection.id),
+            "status": job.status.value,
+        }
+        if refresh_queue is not None:
+            audit_after["refresh_queue_id"] = str(refresh_queue.id)
         self.audit.add(
             action=AuditAction.IMPORT_BATCH_CREATED,
             result=AuditResult.SUCCESS,
@@ -576,7 +609,7 @@ class ImportService:
             user_agent=user_agent,
             entity_type="import_job",
             entity_id=job.id,
-            after={"collection_job_id": str(collection.id), "status": job.status.value},
+            after=audit_after,
         )
         await self.session.commit()
         return job
@@ -1611,13 +1644,14 @@ class ImportService:
             confirmation = [
                 item for item in included if item.source_acquired_at_confirmation_required
             ]
-            if confirmation:
+            if confirmation and job.refresh_queue_id is None:
                 raise ImportDomainError(
                     "SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED",
                     "Confirm source acquisition time before generating Preview",
                     status_code=409,
                     details={"file_ids": [str(item.id) for item in confirmation]},
                 )
+            await self._require_returnable_refresh_queue(job)
             retrying = job.status is ImportJobStatus.FAILED
             transition_import_job(job, ImportJobStatus.PREVIEWING)
             task = await self._create_task_request(
@@ -1760,6 +1794,7 @@ class ImportService:
                 "Preview revision is stale; regenerate or confirm the current preview",
                 status_code=409,
             )
+        await self._require_returnable_refresh_queue(job)
         transition_import_job(job, ImportJobStatus.CONFIRM_QUEUED)
         job.confirmed_revision = preview_revision
         job.confirmed_at = self.clock.now()
@@ -1886,6 +1921,7 @@ class ImportService:
                 status_code=409,
             )
 
+        await self._require_returnable_refresh_queue(job)
         transition_import_job(job, ImportJobStatus.CONFIRM_QUEUED)
         task = await self._create_task_request(
             task_id=task_id,
@@ -1915,6 +1951,27 @@ class ImportService:
             task_id=self._task_id(task),
             task_kind="confirm",
         )
+
+    async def _require_returnable_refresh_queue(self, job: ImportJob) -> None:
+        if job.refresh_queue_id is None:
+            return
+        queue = await self.refresh_queue_repository.get_queue(
+            job.refresh_queue_id,
+            department_id=job.department_id,
+            for_update=True,
+        )
+        if queue is None:
+            raise ImportDomainError(
+                "REFRESH_QUEUE_NOT_FOUND",
+                "Refresh queue not found",
+                status_code=404,
+            )
+        if queue.status not in {RefreshQueueStatus.OPEN, RefreshQueueStatus.EXPORTED}:
+            raise ImportDomainError(
+                "REFRESH_QUEUE_NOT_RETURNABLE",
+                "Refresh queue cannot accept returns in its current status",
+                status_code=409,
+            )
 
     async def cancel(
         self,

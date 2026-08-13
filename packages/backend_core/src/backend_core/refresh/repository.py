@@ -9,7 +9,8 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, or_, select, text, update
+from sqlalchemy import Table, and_, bindparam, case, func, or_, select, text, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -32,9 +33,11 @@ from backend_core.influencers.repository import (
 from backend_core.refresh.enums import (
     RefreshPriorityReason,
     RefreshQueueItemStatus,
+    RefreshQueueStatus,
 )
 from backend_core.refresh.models import RefreshQueue, RefreshQueueItem
 from backend_core.refresh.priority import evaluate_refresh_priority
+from backend_core.refresh.reconciliation import RefreshReturnPreview, RefreshReturnQueueItem
 from backend_core.refresh.schemas import IDENTITY_WHITESPACE
 
 ACTIVE_ITEM_STATUSES = (
@@ -404,6 +407,142 @@ class RefreshQueueRepository:
                 )
             )
         )
+
+    async def list_reconciliation_items(
+        self,
+        queue_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> list[RefreshReturnQueueItem]:
+        """Read or lock the minimal Item facts needed for return reconciliation.
+
+        This projection deliberately omits ``identity_snapshot`` so neither
+        Preview nor Confirm can accidentally turn Queue export evidence into a
+        Hard Match or fallback identity source.
+        """
+
+        statement = (
+            select(
+                RefreshQueueItem.queue_id,
+                RefreshQueueItem.id.label("queue_item_id"),
+                RefreshQueueItem.platform_account_id,
+                RefreshQueueItem.source,
+                RefreshQueueItem.baseline_last_observed_at,
+                RefreshQueueItem.status,
+            )
+            .where(RefreshQueueItem.queue_id == queue_id)
+            .order_by(
+                RefreshQueueItem.platform_account_id,
+                RefreshQueueItem.source,
+                RefreshQueueItem.id,
+            )
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = (await self.session.execute(statement)).mappings()
+        return [
+            RefreshReturnQueueItem(
+                queue_id=row["queue_id"],
+                queue_item_id=row["queue_item_id"],
+                platform_account_id=row["platform_account_id"],
+                source=row["source"],
+                baseline_last_observed_at=_utc(row["baseline_last_observed_at"]),
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    async def apply_return_fulfillment(
+        self,
+        queue_id: UUID,
+        *,
+        import_job_id: UUID,
+        preview: RefreshReturnPreview,
+        now: datetime,
+    ) -> bool:
+        """Apply locked return decisions and aggregate Queue completion.
+
+        The caller must have built ``preview`` from ``list_reconciliation_items``
+        with ``for_update=True`` in the same transaction.  Core executemany
+        updates preserve the projection boundary: ``identity_snapshot`` is
+        never selected or used while fulfillment lineage is written.
+        """
+
+        claimed_items = preview.claimed_items
+        if claimed_items:
+            fulfilled_statuses = {
+                RefreshQueueItemStatus.FULFILLED_CHANGED,
+                RefreshQueueItemStatus.FULFILLED_NO_CHANGE,
+            }
+            parameters = []
+            for decision in claimed_items:
+                fulfilled = decision.expected_status in fulfilled_statuses
+                assert decision.claimant_locator is not None
+                parameters.append(
+                    {
+                        "return_item_id": decision.queue_item_id,
+                        "return_queue_id": queue_id,
+                        "return_current_status": decision.current_status,
+                        "return_next_status": decision.expected_status,
+                        "return_job_id": import_job_id,
+                        "return_row_id": decision.claimant_locator.import_row_id,
+                        "return_fulfilled_job_id": import_job_id if fulfilled else None,
+                        "return_fulfilled_row_id": (
+                            decision.claimant_locator.import_row_id if fulfilled else None
+                        ),
+                        "return_fulfilled_at": now if fulfilled else None,
+                        "return_updated_at": now,
+                    }
+                )
+            item_table = cast(Table, RefreshQueueItem.__table__)
+            statement = (
+                update(item_table)
+                .where(
+                    item_table.c.id == bindparam("return_item_id"),
+                    item_table.c.queue_id == bindparam("return_queue_id"),
+                    item_table.c.status == bindparam("return_current_status"),
+                )
+                .values(
+                    status=bindparam("return_next_status"),
+                    fulfilled_import_job_id=bindparam("return_fulfilled_job_id"),
+                    fulfilled_import_row_id=bindparam("return_fulfilled_row_id"),
+                    fulfilled_at=bindparam("return_fulfilled_at"),
+                    last_return_import_job_id=bindparam("return_job_id"),
+                    last_return_import_row_id=bindparam("return_row_id"),
+                    updated_at=bindparam("return_updated_at"),
+                )
+                .execution_options(synchronize_session=False)
+            )
+            result = await self.session.execute(statement, parameters)
+            if int(cast(CursorResult[Any], result).rowcount or 0) != len(parameters):
+                raise RuntimeError("locked Refresh Queue Item state changed during fulfillment")
+
+        fulfilled_statuses = {
+            RefreshQueueItemStatus.FULFILLED_CHANGED,
+            RefreshQueueItemStatus.FULFILLED_NO_CHANGE,
+        }
+        should_complete = bool(preview.item_evidence) and all(
+            item.expected_status in fulfilled_statuses for item in preview.item_evidence
+        )
+        if not should_complete:
+            return False
+        queue_result = await self.session.execute(
+            update(RefreshQueue)
+            .where(
+                RefreshQueue.id == queue_id,
+                RefreshQueue.status.in_((RefreshQueueStatus.OPEN, RefreshQueueStatus.EXPORTED)),
+            )
+            .values(
+                status=RefreshQueueStatus.COMPLETED,
+                completed_at=now,
+                cancelled_at=None,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if int(cast(CursorResult[Any], queue_result).rowcount or 0) != 1:
+            raise RuntimeError("locked Refresh Queue state changed during completion")
+        return True
 
     async def summary(self, queue_id: UUID) -> RefreshQueueSummaryRecord:
         status_rows = (

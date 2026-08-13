@@ -6,7 +6,7 @@
 
 本文是 Phase 2 的唯一权威实施与验收协议。旧的 Phase 2 Browser Automation 方案以及“Phase 2 = SOP + Campaign + AI”的排期均已人工废弃。本次设计冻结不代表代码、Schema、Migration、API、Worker 或 Web 已实现，也不授权自动开始 Task 1。
 
-实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 8 Refresh Queue；Task 0 的冻结范围和任务顺序没有改变。Task 9 Refresh Return、Web 与部署尚未开始，也未由 Task 8 获得实现授权。
+实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 9 Refresh Return；Task 0 的冻结范围和任务顺序没有改变。Task 10 Web 与部署尚未开始，也未由 Task 9 获得实现授权。
 
 若本文与旧版 Phase 2 描述冲突，以本文和已确认的 Phase 1A–1C 决策为准。Phase 1A–1C 的认证、权限、导入、去重、非破坏性合并、Contact 保护和不可变 Snapshot 语义不得被 Phase 2 改写。
 
@@ -756,7 +756,10 @@ Adapter
 
 Queue identity 不能成为新的 hard dedupe 依据。
 
-只有现有 Hard Matcher 已把成功 owner row 解析到 `platform_account_id` 后，才按 `(refresh_queue_id, platform_account_id, source)` 查找 Item；找不到 Item 不影响普通 Merge，但不产生 Queue fulfillment。
+只有现有 Phase 1B Hard Matcher 已把 owner/effective business row 唯一解析到
+`platform_account_id` 后，才按 `(refresh_queue_id, platform_account_id, source)` 查找 Item；
+找不到 Item 不影响普通 Merge，但不产生 Queue fulfillment。Queue Identity、
+`identity_snapshot` 均不得成为 Hard Match、fallback match 或异常行身份猜测依据。
 
 NO_CHANGE 可以 fulfill，必须同时满足：
 
@@ -773,7 +776,10 @@ queue_item.baseline_last_observed_at
 - acquisition time 为 NULL 时进入 `unresolved`；小于或等于非空 baseline 时进入 `stale_return`。
 - `source_acquired_at_confirmation_required=true` 时视为尚未确认的旧 Blob replay 风险，进入 `unresolved`，不得自动 fulfill。
 - acquisition 严格较新且 `source_acquired_at_confirmation_required=false` 的 NO_CHANGE 才进入 `fulfilled_no_change`。
-- ERROR、SKIP、MANUAL_REVIEW 不 fulfill，记录 Last Return 并进入/保持 `unresolved`。
+- 已唯一 Hard Match 到 Queue Item 的 owner/effective business row，若后续发生非身份匹配类
+  确定性问题而无法正常 fulfillment，则记录 Last Return 并进入/保持 `unresolved`。
+- 无法唯一确定账号的 ERROR / MANUAL_REVIEW 保持 pending；所有 SKIP / duplicate non-owner
+  保持 pending；Missing Return 保持 pending。它们不得借助 Queue Identity 猜测关联 Item。
 
 上述 acquisition/SHA 规则只判断 Refresh observation，不参与 Phase 1B SourceState/CurrentMetrics 的 Newer/Same/Older Merge。
 
@@ -1342,7 +1348,7 @@ MVP 最终交付：
 
 每个 Task 必须独立人工验收，不能自动进入下一 Task。
 
-当前实施检查点：Task 8 关闭 Department-owned Refresh Queue、`0005`、deterministic priority、真实 Identity CSV 与六个 Queue API；Refresh Return、Web 与部署仍按上表等待各自独立人工授权。
+当前实施检查点：Task 9 已关闭 Queue-linked Bulk、Preview reconciliation、Confirm 同事务 fulfillment、Queue completion、Freshness interaction 与 2000-item Return Gate；Web、后续通用性能收口与部署仍按上表等待各自独立人工授权。
 
 ---
 

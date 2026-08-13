@@ -32,6 +32,7 @@ from backend_core.imports.state_machine import transition_import_job
 from backend_core.imports.storage import StorageAdapter
 from backend_core.imports.task_service import ImportTaskService
 from backend_core.imports.unified_plan import RevalidationMode, UnifiedPlanBuilder
+from backend_core.refresh.repository import RefreshQueueRepository
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,8 @@ _PREVIEW_REVALIDATION_STALE_CODES = frozenset(
         "MAPPING_REQUIRED",
         "MIME_MISMATCH",
         "NO_DATA_ROWS",
+        "REFRESH_QUEUE_NOT_FOUND",
+        "REFRESH_QUEUE_NOT_RETURNABLE",
         "SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED",
         "UNSAFE_XLSX",
         "UNSUPPORTED_SOURCE",
@@ -79,6 +82,7 @@ class BulkConfirmProcessor:
     ) -> None:
         self.session = session
         self.repository = ImportRepository(session)
+        self.refresh_queue_repository = RefreshQueueRepository(session)
         self.audit = AuditRepository(session)
         self.task_service = ImportTaskService(session, settings)
         self.plan_builder = UnifiedPlanBuilder(
@@ -216,6 +220,20 @@ class BulkConfirmProcessor:
             )
         await applier.finalize()
 
+        refresh_queue_completed = False
+        if unified.refresh_return is not None:
+            if job.refresh_queue_id is None:
+                raise ImportDomainError(
+                    "IMPORT_PREVIEW_REVALIDATION_FAILED",
+                    "Refresh return plan lost its linked Queue",
+                )
+            refresh_queue_completed = await self.refresh_queue_repository.apply_return_fulfillment(
+                job.refresh_queue_id,
+                import_job_id=job.id,
+                preview=unified.refresh_return,
+                now=now,
+            )
+
         result = {
             "import_job_id": str(job.id),
             "preview_revision": preview_revision,
@@ -226,6 +244,12 @@ class BulkConfirmProcessor:
             "error_rows": unified.summary["error_rows"],
             "manual_review_rows": unified.summary["manual_review_rows"],
         }
+        if unified.refresh_return is not None:
+            result["refresh_return"] = {
+                **unified.refresh_return.summary.model_dump(mode="json"),
+                "claimed_item_count": len(unified.refresh_return.claimed_items),
+                "queue_completed": refresh_queue_completed,
+            }
         job.result = result
         job.completed_at = now
         job.error_code = None
