@@ -1,7 +1,7 @@
 import { LinkOutlined } from "@ant-design/icons";
 import { Card, Descriptions, Empty, Space, Tag, Typography } from "antd";
 
-import { displayValue } from "../formatters";
+import { displayValue, platformLabel } from "../formatters";
 import type { PlatformAccountDetail } from "../types";
 
 const { Paragraph, Title } = Typography;
@@ -24,12 +24,12 @@ export function PlatformAccountSection({
             <Card key={account.id} size="small" title={account.account_name}>
               <Descriptions column={1} size="small">
                 <Descriptions.Item label="平台">
-                  {account.platform}
+                  {platformLabel(account.platform)}
                 </Descriptions.Item>
                 <Descriptions.Item label="平台账号 ID">
                   {displayValue(account.platform_account_id)}
                 </Descriptions.Item>
-                <Descriptions.Item label="账号 Handle">
+                <Descriptions.Item label="账号标识">
                   {displayValue(account.account_handle)}
                 </Descriptions.Item>
                 <Descriptions.Item label="创建来源">

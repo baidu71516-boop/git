@@ -45,11 +45,11 @@ export function ContactSection({
                 <Descriptions.Item label="来源更新时间">
                   {formatShanghaiDate(contact.source_updated_at)}
                 </Descriptions.Item>
-                <Descriptions.Item label="首次 Import Job / Row">
+                <Descriptions.Item label="首次导入任务 / 数据行">
                   {contact.first_import_job_id ?? "—"} /{" "}
                   {contact.first_import_row_id ?? "—"}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近 Import Job / Row">
+                <Descriptions.Item label="最近导入任务 / 数据行">
                   {contact.last_import_job_id ?? "—"} /{" "}
                   {contact.last_import_row_id ?? "—"}
                 </Descriptions.Item>

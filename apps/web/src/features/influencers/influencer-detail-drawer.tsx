@@ -2,10 +2,10 @@
 
 import { InfluencerDetailView } from "./influencer-detail-view";
 
-export function InfluencerDetailWorkspace({
+export function InfluencerDetailDrawer({
   influencerId,
 }: {
   influencerId: string;
 }) {
-  return <InfluencerDetailView influencerId={influencerId} variant="page" />;
+  return <InfluencerDetailView influencerId={influencerId} variant="drawer" />;
 }

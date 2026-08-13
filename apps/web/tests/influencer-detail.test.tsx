@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InfluencerDetailWorkspace } from "../src/features/influencers/influencer-detail-workspace";
+import { InfluencerDetailDrawer } from "../src/features/influencers/influencer-detail-drawer";
 import {
   displayValue,
   renderJsonValue,
@@ -214,6 +215,17 @@ function renderDetail() {
   );
 }
 
+function renderDrawer() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <InfluencerDetailDrawer influencerId={influencerId} />
+    </QueryClientProvider>,
+  );
+}
+
 beforeEach(() => {
   navigation.back.mockReset();
 });
@@ -271,9 +283,7 @@ describe("InfluencerDetailWorkspace", () => {
 
     expect(screen.getByText("来源赛道")).toBeInTheDocument();
     expect(screen.getByText("external-1")).toBeInTheDocument();
-    expect(screen.getAllByText("最近记录的 Import Job").length).toBeGreaterThan(
-      0,
-    );
+    expect(screen.getAllByText("最近导入任务").length).toBeGreaterThan(0);
     expect(screen.queryByText("最后观察")).not.toBeInTheDocument();
     expect(screen.queryByText("source_data")).not.toBeInTheDocument();
 
@@ -341,10 +351,10 @@ describe("InfluencerDetailWorkspace", () => {
     const fetchMock = mockDetailApi(envelope(null, 500));
     const first = renderDetail();
     expect(
-      await screen.findByText("达人详情加载失败", {}, { timeout: 3000 }),
+      await screen.findByText("达人资料加载失败", {}, { timeout: 3000 }),
     ).toBeInTheDocument();
     const callsBeforeRetry = fetchMock.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "重试达人详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
     await waitFor(() =>
       expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeRetry),
     );
@@ -353,7 +363,7 @@ describe("InfluencerDetailWorkspace", () => {
     mockDetailApi(envelope(null, 404, "INFLUENCER_NOT_FOUND"));
     renderDetail();
     expect(await screen.findByText("达人不存在或不可见")).toBeInTheDocument();
-    expect(screen.queryByText("达人详情加载失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("达人资料加载失败")).not.toBeInTheDocument();
   });
 
   it("keeps snapshot loading and errors independent from readable detail", async () => {
@@ -429,5 +439,32 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       screen.getByRole("button", { name: "上一页历史快照" }),
     ).toBeEnabled();
+  });
+
+  it("reuses the protected detail view inside a canonical URL drawer", async () => {
+    mockDetailApi();
+    renderDrawer();
+
+    expect(screen.getByText("正在加载达人详情")).toBeInTheDocument();
+    expect(await screen.findByText("多账号达人")).toBeInTheDocument();
+    expect(screen.getByText("小红书 · 账号甲")).toBeInTheDocument();
+    expect(screen.getAllByText("高意向").length).toBeGreaterThan(0);
+    expect(screen.getByText(/email · \*\*\*/)).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "完整资料" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭达人详情" }));
+    expect(navigation.back).toHaveBeenCalledOnce();
+  });
+
+  it("keeps drawer errors in Chinese and closes with browser history", async () => {
+    mockDetailApi(envelope(null, 500));
+    renderDrawer();
+
+    expect(
+      await screen.findByText("达人资料加载失败", {}, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新加载" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /^关\s*闭$/ }));
+    expect(navigation.back).toHaveBeenCalledOnce();
   });
 });
