@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 import { PageHeader } from "@/components/ui/page-header";
+import { InfluencerAvatar } from "./components/influencer-avatar";
 
 import { crmStageDisplay, platformLabel } from "./formatters";
 import { InfluencerDetail } from "./components/influencer-detail";
@@ -31,12 +32,12 @@ export function DevInfluencerDetailDrawerPreview({
     : "";
 
   return (
-    <InfluencerPreviewShell title="达人详情预览" description="仅用于界面预览">
+    <InfluencerPreviewShell title="达人详情预览" description="仅开发环境可见">
       <section className="influencer-workspace influencer-detail-preview-workspace">
         <div className="influencer-page-heading">
           <PageHeader
-            title={`开发环境预览 · ${detail.display_name}`}
-            description="仅用于视觉验收，数据为虚构"
+            title={`达人详情预览 · ${detail.display_name}`}
+            description="仅开发环境可见"
           />
         </div>
         <div className="detail-preview-links">
@@ -51,11 +52,24 @@ export function DevInfluencerDetailDrawerPreview({
           size="default"
           width={740}
           title={
-            <div className="influencer-drawer-heading">
-              <Title level={5} style={{ margin: 0 }}>
-                {detail.display_name}
-              </Title>
-              <Text type="secondary">{activeSubtitle}</Text>
+            <div className="influencer-detail-drawer-title">
+              <InfluencerAvatar
+                size={56}
+                name={detail.display_name}
+                avatarUrl={detail.avatar_url ?? null}
+                square={false}
+              />
+              <div className="influencer-detail-drawer-title-main">
+                <Title level={4} style={{ margin: 0 }}>
+                  {detail.display_name}
+                </Title>
+                <Text
+                  type="secondary"
+                  className="influencer-detail-drawer-subtitle"
+                >
+                  {activeSubtitle}
+                </Text>
+              </div>
             </div>
           }
           extra={

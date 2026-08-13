@@ -1,4 +1,4 @@
-import { Divider, Space, Tag, Tooltip, Typography } from "antd";
+import { Space, Tag, Tooltip, Typography } from "antd";
 import type { ReactNode } from "react";
 
 import { AppTooltip } from "@/components/ui/app-tooltip";
@@ -118,6 +118,12 @@ function contactSourceLabel(source: string): string {
   if (source === "huitun") {
     return "灰豚";
   }
+  if (source === "manual") {
+    return "手动";
+  }
+  if (source === "generic") {
+    return "通用";
+  }
   return source || "—";
 }
 
@@ -134,12 +140,10 @@ function contactValidationLabel(status: string | null | undefined): string {
 function PlatformMetricGrid({
   account,
   detail,
-  showPlatformHeader = false,
   index,
 }: {
   account: InfluencerDetailData["platform_accounts"][number];
   detail: InfluencerDetailData;
-  showPlatformHeader?: boolean;
   index: number;
 }) {
   const metric = metricForAccount(detail, account.id);
@@ -154,13 +158,10 @@ function PlatformMetricGrid({
       className="detail-platform-item"
       style={index > 0 ? { paddingTop: "12px" } : undefined}
     >
-      {showPlatformHeader ? (
-        <div className="detail-platform-title">
-          {platformLabel(account.platform)}
-        </div>
-      ) : null}
+      <div className="detail-platform-subtitle">
+        {platformLabel(account.platform)} · {account.account_name}
+      </div>
       <div className="detail-platform-grid detail-two-column-grid">
-        {rowItem("账号名", account.account_name, `${account.id}-handle`)}
         <div className="detail-row-item" key={`${account.id}-followers`}>
           <span className="detail-row-label">粉丝</span>
           <span className="detail-row-value">
@@ -206,14 +207,7 @@ function MultiPlatformMetric({
   detail: InfluencerDetailData;
   index: number;
 }) {
-  return (
-    <PlatformMetricGrid
-      account={account}
-      detail={detail}
-      index={index}
-      showPlatformHeader
-    />
-  );
+  return <PlatformMetricGrid account={account} detail={detail} index={index} />;
 }
 
 export function InfluencerDetail({
@@ -245,15 +239,14 @@ export function InfluencerDetail({
           基本资料
         </Title>
         <div className="detail-field-grid detail-two-column-grid">
+          {rowItem("负责人", detail.owner ? detail.owner.name : "未分配")}
+          {rowItem("CRM 阶段", stage.label)}
           {rowItem(
             "平台",
             activeAccount ? platformLabel(activeAccount.platform) : "—",
           )}
           {rowItem("账号名", activeAccount ? activeAccount.account_name : "—")}
-          {rowItem("负责人", detail.owner ? detail.owner.name : "未分配")}
-          {rowItem("CRM 阶段", stage.label)}
         </div>
-        <Divider />
         <div className="detail-label-row">
           <span className="detail-row-label">标签</span>
           <span className="detail-tag-line">

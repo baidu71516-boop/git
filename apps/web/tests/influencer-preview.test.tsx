@@ -87,7 +87,11 @@ describe("development influencer visual preview", () => {
 
     expect(document.querySelectorAll(".influencer-row")).toHaveLength(8);
     expect(
-      screen.getByText("仅用于界面预览", { exact: false }),
+      screen.getByText(
+        (content) =>
+          content.includes("仅开发环境可见") ||
+          content.includes("仅用于界面预览"),
+      ),
     ).toBeInTheDocument();
     expect(screen.getByText("8,532")).toBeInTheDocument();
     expect(screen.getByText("20.66万")).toBeInTheDocument();
@@ -136,11 +140,12 @@ describe("development influencer visual preview", () => {
 
     render(previewPage);
     expect(
-      screen.getByText("开发环境预览", { exact: false }),
+      screen.getByRole("heading", {
+        level: 2,
+        name: /^达人详情预览 · /,
+      }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText("仅用于视觉验收", { exact: false }),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText("仅开发环境可见").length).toBeGreaterThan(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -169,15 +174,11 @@ describe("development influencer visual preview", () => {
     expect(
       screen.getByRole("heading", { name: "管理信息", level: 5 }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", {
-        name: new RegExp(displayFixture.display_name, "i"),
-        level: 2,
-      }),
-    ).toBeInTheDocument();
+    expect(screen.getByText(displayFixture.display_name)).toBeInTheDocument();
     expect(screen.getAllByText("粉丝").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("48.24万")).toBeInTheDocument();
     expect(screen.getByText("24.12万")).toBeInTheDocument();
-    expect(screen.getAllByText("月面电台账号1").length).toBeGreaterThan(1);
+    expect(screen.getByText("月面电台账号1")).toBeInTheDocument();
+    expect(screen.getAllByText("粉丝").length).toBeGreaterThanOrEqual(2);
   });
 });

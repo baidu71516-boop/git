@@ -43,7 +43,7 @@ export function InfluencerPreviewWorkspace() {
         <div className="influencer-page-heading">
           <PageHeader
             title="达人库"
-            description="公司共享达人资源 · 统一查看、筛选和管理 · 仅用于界面预览"
+            description="公司共享达人资源 · 统一查看、筛选和管理 · 仅开发环境可见"
           />
         </div>
 

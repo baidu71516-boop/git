@@ -483,9 +483,11 @@ describe("InfluencerDetailWorkspace", () => {
 
     expect(screen.getByText("正在加载达人详情")).toBeInTheDocument();
     expect(
-      await screen.findByText("多账号达人", { selector: "strong" }),
+      await screen.findByText("多账号达人", { exact: false }),
     ).toBeInTheDocument();
-    const drawerHeader = document.querySelector(".influencer-drawer-heading");
+    const drawerHeader = document.querySelector(
+      ".influencer-detail-drawer-title",
+    );
     expect(drawerHeader).not.toBeNull();
     expect(
       within(drawerHeader as HTMLElement).getByText("小红书 · 账号甲"),

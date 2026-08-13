@@ -8,6 +8,7 @@ import { useState } from "react";
 import { AppLoading } from "@/components/ui/app-loading";
 import { ApiClientError } from "@/lib/api/client";
 
+import { InfluencerAvatar } from "./components/influencer-avatar";
 import { InfluencerDetail } from "./components/influencer-detail";
 import { MetricSnapshotList } from "./components/metric-snapshot-list";
 import { crmStageDisplay, platformLabel } from "./formatters";
@@ -31,9 +32,23 @@ function DrawerTitle({ detail }: { detail: InfluencerDetailData | undefined }) {
   if (!detail) return <span>达人详情</span>;
   const subtitle = drawerSubtitle(detail);
   return (
-    <div className="influencer-drawer-heading">
-      <strong>{detail.display_name}</strong>
-      {subtitle ? <Text type="secondary">{subtitle}</Text> : null}
+    <div className="influencer-detail-drawer-title">
+      <InfluencerAvatar
+        size={56}
+        name={detail.display_name}
+        avatarUrl={detail.avatar_url ?? null}
+        square={false}
+      />
+      <div className="influencer-detail-drawer-title-main">
+        <div className="influencer-detail-drawer-title-name">
+          {detail.display_name}
+        </div>
+        {subtitle ? (
+          <Text type="secondary" className="influencer-detail-drawer-subtitle">
+            {subtitle}
+          </Text>
+        ) : null}
+      </div>
     </div>
   );
 }
