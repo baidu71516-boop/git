@@ -8,21 +8,50 @@ import { AppShell } from "@/components/app-shell";
 import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
 import {
   createBulkPreviewScenarios,
+  getBulkPreviewRowsPage,
   type BulkPreviewScenarioKey,
 } from "./preview-fixtures";
+import type { ImportRowCategory, ImportRowPublic } from "./types";
 
 const { Text } = Typography;
 const noOperation = () => undefined;
+const previewPageSize = 50;
 
 export function BulkImportPreviewWorkspace() {
   const scenarios = useMemo(() => createBulkPreviewScenarios(), []);
   const [scenarioKey, setScenarioKey] =
-    useState<BulkPreviewScenarioKey>("mixed_files");
+    useState<BulkPreviewScenarioKey>("preview_ready");
+  const [category, setCategory] = useState<ImportRowCategory>("all");
+  const [offset, setOffset] = useState(0);
+  const [selectedRow, setSelectedRow] = useState<ImportRowPublic | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const scenario =
     scenarios.find((candidate) => candidate.key === scenarioKey) ??
     scenarios[0];
 
   if (!scenario) return null;
+
+  const rowsPage = getBulkPreviewRowsPage(
+    scenario,
+    category,
+    offset,
+    previewPageSize,
+  );
+
+  function changeScenario(value: BulkPreviewScenarioKey) {
+    const nextScenario = scenarios.find((candidate) => candidate.key === value);
+    setScenarioKey(value);
+    if (!nextScenario?.job?.preview_summary) setCategory("all");
+    setOffset(0);
+    setSelectedRow(null);
+    setConfirmOpen(false);
+  }
+
+  function changeCategory(value: ImportRowCategory) {
+    setCategory(value);
+    setOffset(0);
+    setSelectedRow(null);
+  }
 
   return (
     <AppShell
@@ -47,7 +76,7 @@ export function BulkImportPreviewWorkspace() {
               value: key,
             }))}
             onChange={(value) =>
-              setScenarioKey(value as BulkPreviewScenarioKey)
+              changeScenario(value as BulkPreviewScenarioKey)
             }
           />
         </div>
@@ -73,6 +102,29 @@ export function BulkImportPreviewWorkspace() {
             onRequestPreview={noOperation}
             onRebuildPreview={noOperation}
             onRetryJob={noOperation}
+            preview={{
+              rowsPage,
+              selectedRow,
+              category,
+              offset,
+              loadingRows: false,
+              rowsError: null,
+              confirmBusy: false,
+              confirmAmbiguous: false,
+              confirmError: null,
+              confirmOpen,
+              onCategoryChange: changeCategory,
+              onOffsetChange: (nextOffset) => {
+                setOffset(nextOffset);
+                setSelectedRow(null);
+              },
+              onSelectRow: setSelectedRow,
+              onCloseRow: () => setSelectedRow(null),
+              onReloadRows: noOperation,
+              onRequestConfirm: () => setConfirmOpen(true),
+              onCancelConfirm: () => setConfirmOpen(false),
+              onConfirm: () => setConfirmOpen(false),
+            }}
           />
         </Space>
       </section>
