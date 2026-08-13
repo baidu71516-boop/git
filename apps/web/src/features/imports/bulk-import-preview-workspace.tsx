@@ -1,0 +1,81 @@
+"use client";
+
+import { Segmented, Space, Typography } from "antd";
+import { useMemo, useState } from "react";
+
+import { AppShell } from "@/components/app-shell";
+
+import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
+import {
+  createBulkPreviewScenarios,
+  type BulkPreviewScenarioKey,
+} from "./preview-fixtures";
+
+const { Text } = Typography;
+const noOperation = () => undefined;
+
+export function BulkImportPreviewWorkspace() {
+  const scenarios = useMemo(() => createBulkPreviewScenarios(), []);
+  const [scenarioKey, setScenarioKey] =
+    useState<BulkPreviewScenarioKey>("mixed_files");
+  const scenario =
+    scenarios.find((candidate) => candidate.key === scenarioKey) ??
+    scenarios[0];
+
+  if (!scenario) return null;
+
+  return (
+    <AppShell
+      title="数据采集"
+      description="上传达人数据，完成文件检查后生成数据预览。"
+      department="界面预览"
+      operator="预览用户"
+      role="仅展示"
+      onLogout={noOperation}
+    >
+      <section
+        className="data-collection-preview"
+        aria-label="数据采集视觉预览"
+      >
+        <div className="data-collection-preview-controls">
+          <Text strong>开发预览状态</Text>
+          <Segmented
+            block
+            value={scenarioKey}
+            options={scenarios.map(({ key, label }) => ({
+              label,
+              value: key,
+            }))}
+            onChange={(value) =>
+              setScenarioKey(value as BulkPreviewScenarioKey)
+            }
+          />
+        </div>
+
+        <Space orientation="vertical" size="middle" className="full-width">
+          <BulkImportWorkspaceView
+            job={scenario.job}
+            collection={scenario.collection}
+            files={scenario.files}
+            readOnly={false}
+            uploadItems={[]}
+            busyFileId={null}
+            previewBusy={false}
+            error={null}
+            notice={null}
+            onNewCollection={noOperation}
+            onSelectFiles={noOperation}
+            onRetryUpload={noOperation}
+            onEditAcquisitionTime={noOperation}
+            onEditMapping={noOperation}
+            onRetryFile={noOperation}
+            onExcludeFile={noOperation}
+            onRequestPreview={noOperation}
+            onRebuildPreview={noOperation}
+            onRetryJob={noOperation}
+          />
+        </Space>
+      </section>
+    </AppShell>
+  );
+}

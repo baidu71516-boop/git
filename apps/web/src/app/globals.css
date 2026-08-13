@@ -319,6 +319,36 @@ body {
   margin-bottom: 16px;
 }
 
+.data-collection-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
+.data-collection-preview-controls {
+  display: grid;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px dashed var(--app-border);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.data-collection-preview-controls .ant-segmented {
+  width: 100% !important;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.data-collection-preview-controls .ant-segmented-group {
+  min-width: max-content;
+}
+
 .bulk-workspace-card {
   border: 1px solid var(--app-border);
   box-shadow: none;
