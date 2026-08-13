@@ -25,6 +25,9 @@ export type IssueTone = "secondary" | "warning" | "danger";
 export const AMBIGUOUS_BULK_CREATE_MESSAGE =
   "采集任务已创建，但系统无法确认批量文件处理任务是否创建成功。为避免重复创建，系统不会自动重试。请保留当前页面并联系管理员核对。";
 
+export const AMBIGUOUS_BULK_CONFIRM_MESSAGE =
+  "无法确认导入请求是否已受理，请勿重复提交。系统将继续检查当前任务状态。";
+
 const collectionStatusPresentation: Record<
   CollectionJobStatus,
   StatusPresentation
@@ -95,6 +98,7 @@ const safeErrorMessages: Readonly<Record<string, string>> = {
   IMPORT_PREVIEW_BLOCKED: "仍有文件未就绪，请处理后再生成数据预览。",
   SOURCE_ACQUIRED_AT_CONFIRMATION_REQUIRED: "请先确认所有文件的数据取得时间。",
   INVALID_PREVIEW_REQUEST: "数据预览请求无效，请刷新后重试。",
+  PREVIEW_STALE: "数据预览已失效，请重新生成后再确认导入。",
   INVALID_STATE_TRANSITION: "任务状态已变化，请刷新后重试。",
   VALIDATION_ERROR: "提交内容有误，请检查后重试。",
   INTERNAL_ERROR: "系统暂时无法完成操作，请稍后重试。",
@@ -235,6 +239,16 @@ export function getBulkErrorMessage(
 }
 
 export function isAmbiguousBulkCreateError(error: unknown): boolean {
+  if (!(error instanceof ApiClientError)) return true;
+  return (
+    error.code === "INVALID_RESPONSE" ||
+    error.status < 400 ||
+    error.status === 408 ||
+    error.status >= 500
+  );
+}
+
+export function isAmbiguousBulkConfirmError(error: unknown): boolean {
   if (!(error instanceof ApiClientError)) return true;
   return (
     error.code === "INVALID_RESPONSE" ||

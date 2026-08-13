@@ -27,11 +27,14 @@ import {
   AMBIGUOUS_BULK_CREATE_MESSAGE,
   getBulkErrorMessage,
   isAmbiguousBulkCreateError,
+  isAmbiguousBulkConfirmError,
 } from "./formatters";
 import {
   useBulkImportFiles,
   useBulkImportJob,
+  useBulkImportRows,
   useCollectionJob,
+  useConfirmBulkImportMutation,
   useCreateBulkImportJobMutation,
   useCreateCollectionJobMutation,
   useExcludeBulkImportFileMutation,
@@ -47,11 +50,14 @@ import type {
   CollectionJobPublic,
   ImportJobFilePublic,
   ImportJobPublic,
+  ImportRowCategory,
+  ImportRowPublic,
 } from "./types";
 
 const { Paragraph, Text } = Typography;
 
 const MAX_PARALLEL_UPLOADS = 2;
+const PREVIEW_PAGE_SIZE = 50;
 
 type CollectionFormValues = {
   name: string;
@@ -148,21 +154,69 @@ export function BulkImportWorkspace({
   const [acquisitionValue, setAcquisitionValue] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [previewCategory, setPreviewCategory] =
+    useState<ImportRowCategory>("all");
+  const [previewOffset, setPreviewOffset] = useState(0);
+  const [selectedPreviewRow, setSelectedPreviewRow] =
+    useState<ImportRowPublic | null>(null);
+  const [confirmModalOpen, setConfirmModalOpen] = useState(false);
+  const [confirmError, setConfirmError] = useState<{
+    revision: number;
+    message: string;
+  } | null>(null);
+  const [ambiguousConfirmRevision, setAmbiguousConfirmRevision] = useState<
+    number | null
+  >(null);
+  const [acceptedConfirmRevision, setAcceptedConfirmRevision] = useState<
+    number | null
+  >(null);
   const creationInFlightRef = useRef(false);
+  const confirmInFlightRef = useRef(false);
+  const lastImportJobErrorRef = useRef<unknown>(null);
   const currentJobIdRef = useRef(jobId);
   const uploadQueueRef = useRef<BulkUploadItem[]>([]);
   const activeUploadCountRef = useRef(0);
   const scheduledUploadIdsRef = useRef(new Set<string>());
   currentJobIdRef.current = jobId;
 
-  const importJobQuery = useBulkImportJob(jobId ?? "", Boolean(jobId));
+  const pendingConfirmRevision =
+    ambiguousConfirmRevision ?? acceptedConfirmRevision;
+  const importJobQuery = useBulkImportJob(
+    jobId ?? "",
+    Boolean(jobId),
+    pendingConfirmRevision,
+  );
+  if (importJobQuery.data) lastImportJobErrorRef.current = null;
+  else if (importJobQuery.isError) {
+    lastImportJobErrorRef.current = importJobQuery.error;
+  }
+  const visibleImportJobError =
+    importJobQuery.error ?? lastImportJobErrorRef.current;
   const recoveredJob = importJobQuery.data ?? null;
+  const confirmOutcomeUnknown =
+    ambiguousConfirmRevision !== null &&
+    recoveredJob?.status === "preview_ready" &&
+    recoveredJob.preview_revision === ambiguousConfirmRevision;
+  const confirmAcceptedAwaitingStatus =
+    acceptedConfirmRevision !== null &&
+    recoveredJob?.status === "preview_ready" &&
+    recoveredJob.preview_revision === acceptedConfirmRevision;
   const validBulkJob = recoveredJob ? isBulkJob(recoveredJob) : false;
   const collectionQuery = useCollectionJob(
     validBulkJob ? (recoveredJob?.collection_job_id ?? "") : "",
     validBulkJob,
   );
   const filesQuery = useBulkImportFiles(jobId ?? "", validBulkJob);
+  const previewRowsQuery = useBulkImportRows(
+    {
+      importJobId: jobId ?? "",
+      previewRevision: recoveredJob?.preview_revision ?? 0,
+      category: previewCategory,
+      offset: previewOffset,
+      limit: PREVIEW_PAGE_SIZE,
+    },
+    validBulkJob && recoveredJob?.preview_summary !== null,
+  );
 
   const createCollectionMutation = useCreateCollectionJobMutation();
   const createBulkJobMutation = useCreateBulkImportJobMutation();
@@ -172,6 +226,7 @@ export function BulkImportWorkspace({
   const retryFileMutation = useRetryBulkImportFileMutation();
   const excludeFileMutation = useExcludeBulkImportFileMutation();
   const previewMutation = useRequestBulkPreviewMutation();
+  const confirmMutation = useConfirmBulkImportMutation();
   const retryJobMutation = useRetryBulkImportJobMutation();
 
   const files = useMemo(() => filesQuery.data ?? [], [filesQuery.data]);
@@ -188,6 +243,9 @@ export function BulkImportWorkspace({
       uploadBusy ||
       busyFileId !== null ||
       previewMutation.isPending ||
+      confirmMutation.isPending ||
+      confirmAcceptedAwaitingStatus ||
+      confirmOutcomeUnknown ||
       retryJobMutation.isPending
     ) {
       setError("当前任务仍有操作正在进行，请等待完成后再新建采集任务。");
@@ -440,6 +498,13 @@ export function BulkImportWorkspace({
     if (!jobId) return;
     const ownerJobId = jobId;
     setError(null);
+    setConfirmError(null);
+    setAmbiguousConfirmRevision(null);
+    setConfirmModalOpen(false);
+    setAcceptedConfirmRevision(null);
+    setPreviewCategory("all");
+    setPreviewOffset(0);
+    setSelectedPreviewRow(null);
     try {
       await previewMutation.mutateAsync({ importJobId: jobId, rebuild });
       if (currentJobIdRef.current === ownerJobId) {
@@ -456,6 +521,8 @@ export function BulkImportWorkspace({
     if (!jobId) return;
     const ownerJobId = jobId;
     setError(null);
+    setConfirmError(null);
+    setConfirmModalOpen(false);
     try {
       await retryJobMutation.mutateAsync(jobId);
       if (currentJobIdRef.current === ownerJobId) {
@@ -468,22 +535,89 @@ export function BulkImportWorkspace({
     }
   }
 
-  if (jobId && importJobQuery.isPending) {
-    return (
-      <Card variant="borderless" className="bulk-workspace-card">
-        <AppLoading label="正在恢复批量采集任务" />
-      </Card>
-    );
+  function changePreviewCategory(category: ImportRowCategory) {
+    setPreviewCategory(category);
+    setPreviewOffset(0);
+    setSelectedPreviewRow(null);
   }
 
-  if (jobId && importJobQuery.isError) {
+  function changePreviewOffset(offset: number) {
+    setPreviewOffset(offset);
+    setSelectedPreviewRow(null);
+  }
+
+  function openConfirm() {
+    if (
+      readOnly ||
+      recoveredJob?.status !== "preview_ready" ||
+      recoveredJob.preview_revision < 1 ||
+      recoveredJob.preview_summary === null ||
+      confirmInFlightRef.current ||
+      confirmAcceptedAwaitingStatus ||
+      ambiguousConfirmRevision === recoveredJob.preview_revision
+    ) {
+      return;
+    }
+    setConfirmError(null);
+    setConfirmModalOpen(true);
+  }
+
+  async function confirmPreview() {
+    if (
+      !jobId ||
+      readOnly ||
+      recoveredJob?.status !== "preview_ready" ||
+      recoveredJob.preview_revision < 1 ||
+      recoveredJob.preview_summary === null ||
+      confirmInFlightRef.current ||
+      confirmAcceptedAwaitingStatus ||
+      ambiguousConfirmRevision === recoveredJob.preview_revision
+    ) {
+      return;
+    }
+    const ownerJobId = jobId;
+    const revision = recoveredJob.preview_revision;
+    confirmInFlightRef.current = true;
+    setConfirmError(null);
+    setError(null);
+    try {
+      await confirmMutation.mutateAsync({
+        importJobId: ownerJobId,
+        previewRevision: revision,
+      });
+      if (currentJobIdRef.current === ownerJobId) {
+        setAcceptedConfirmRevision(revision);
+        setConfirmModalOpen(false);
+        setNotice("导入请求已受理，系统正在检查任务状态。");
+      }
+    } catch (caught) {
+      if (currentJobIdRef.current !== ownerJobId) return;
+      if (isAmbiguousBulkConfirmError(caught)) {
+        setAcceptedConfirmRevision(null);
+        setAmbiguousConfirmRevision(revision);
+        setConfirmModalOpen(false);
+      } else {
+        setAcceptedConfirmRevision(null);
+        setConfirmModalOpen(false);
+        setConfirmError({
+          revision,
+          message: getBulkErrorMessage(caught, "确认导入失败，请检查后重试。"),
+        });
+      }
+      void importJobQuery.refetch();
+    } finally {
+      confirmInFlightRef.current = false;
+    }
+  }
+
+  if (jobId && visibleImportJobError) {
     return (
       <Card variant="borderless" className="bulk-workspace-card">
         <Alert
           type="error"
           showIcon
           title={getBulkErrorMessage(
-            importJobQuery.error,
+            visibleImportJobError,
             "批量采集任务无法加载。",
           )}
           description="请检查链接或权限。当前系统不会自动查找其他批量任务。"
@@ -496,6 +630,14 @@ export function BulkImportWorkspace({
             </Space>
           }
         />
+      </Card>
+    );
+  }
+
+  if (jobId && importJobQuery.isPending) {
+    return (
+      <Card variant="borderless" className="bulk-workspace-card">
+        <AppLoading label="正在恢复批量采集任务" />
       </Card>
     );
   }
@@ -571,6 +713,52 @@ export function BulkImportWorkspace({
         onRequestPreview={() => void requestPreview(false)}
         onRebuildPreview={() => void requestPreview(true)}
         onRetryJob={() => void retryJob()}
+        preview={
+          validBulkJob && recoveredJob
+            ? {
+                rowsPage: previewRowsQuery.data ?? null,
+                selectedRow:
+                  selectedPreviewRow?.preview_revision ===
+                  recoveredJob.preview_revision
+                    ? selectedPreviewRow
+                    : null,
+                category: previewCategory,
+                offset: previewOffset,
+                loadingRows: previewRowsQuery.isFetching,
+                rowsError: previewRowsQuery.isError
+                  ? getBulkErrorMessage(
+                      previewRowsQuery.error,
+                      "数据预览加载失败，请重新加载。",
+                    )
+                  : null,
+                confirmBusy:
+                  confirmMutation.isPending ||
+                  confirmAcceptedAwaitingStatus ||
+                  previewMutation.isPending ||
+                  retryJobMutation.isPending,
+                confirmAmbiguous: confirmOutcomeUnknown,
+                confirmError:
+                  confirmError?.revision === recoveredJob.preview_revision
+                    ? confirmError.message
+                    : null,
+                confirmOpen:
+                  confirmModalOpen &&
+                  recoveredJob.status === "preview_ready" &&
+                  recoveredJob.preview_summary !== null &&
+                  !confirmOutcomeUnknown,
+                onCategoryChange: changePreviewCategory,
+                onOffsetChange: changePreviewOffset,
+                onSelectRow: setSelectedPreviewRow,
+                onCloseRow: () => setSelectedPreviewRow(null),
+                onReloadRows: () => void previewRowsQuery.refetch(),
+                onRequestConfirm: openConfirm,
+                onCancelConfirm: () => {
+                  if (!confirmMutation.isPending) setConfirmModalOpen(false);
+                },
+                onConfirm: () => void confirmPreview(),
+              }
+            : null
+        }
       />
 
       <Modal

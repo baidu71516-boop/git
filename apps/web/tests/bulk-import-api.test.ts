@@ -6,12 +6,14 @@ import { ApiClientError } from "@/lib/api/client";
 
 import {
   bulkImportApiPaths,
+  confirmBulkImport,
   createBulkImportJob,
   createCollectionJob,
   excludeBulkImportFile,
   getCollectionJob,
   getImportJob,
   listBulkImportFiles,
+  listBulkImportRows,
   listCollectionJobs,
   requestBulkPreview,
   retryBulkImportFile,
@@ -34,9 +36,12 @@ import {
   isAmbiguousBulkCreateError,
 } from "@/features/imports/formatters";
 import {
+  bulkImportQueryKeys,
   isActiveJobStatus,
   retryBulkRead,
+  shouldPollBulkJob,
   shouldPollFiles,
+  useConfirmBulkImportMutation,
   useCreateBulkImportJobMutation,
   useCreateCollectionJobMutation,
   useExcludeBulkImportFileMutation,
@@ -127,6 +132,12 @@ describe("Bulk import API contract", () => {
     );
     expect(bulkImportApiPaths.fileExclude("job/id", "file id")).toBe(
       "/import-jobs/job%2Fid/files/file%20id/exclude",
+    );
+    expect(bulkImportApiPaths.rows("job/id")).toBe(
+      "/import-jobs/job%2Fid/rows",
+    );
+    expect(bulkImportApiPaths.confirm("job/id")).toBe(
+      "/import-jobs/job%2Fid/confirm",
     );
   });
 
@@ -295,6 +306,69 @@ describe("Bulk import API contract", () => {
     expect(paths.every((path) => !path.includes("/tasks"))).toBe(true);
   });
 
+  it("reads one category page with only category, offset, and limit", async () => {
+    const page = { items: [], total: 23, offset: 200, limit: 50 };
+    apiRequestMock.mockResolvedValue(success(page));
+
+    await expect(
+      listBulkImportRows({
+        importJobId: "job/id",
+        category: "manual_review",
+        offset: 200,
+        limit: 50,
+      }),
+    ).resolves.toEqual(page);
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/import-jobs/job%2Fid/rows?category=manual_review&offset=200&limit=50",
+    );
+    const requestPath = String(apiRequestMock.mock.calls[0]?.[0]);
+    expect(requestPath).not.toContain("action=");
+    expect([...new URLSearchParams(requestPath.split("?")[1]).keys()]).toEqual([
+      "category",
+      "offset",
+      "limit",
+    ]);
+  });
+
+  it("confirms only the requested revision and accepts new or idempotent dispatch data", async () => {
+    const accepted = {
+      import_job_id: "job/id",
+      status: "confirm_queued",
+      preview_revision: 3,
+      task_id: "task-1",
+      idempotent: false,
+    };
+    const replayed = { ...accepted, idempotent: true };
+    apiRequestMock
+      .mockResolvedValueOnce(success(accepted))
+      .mockResolvedValueOnce(success(replayed));
+
+    await expect(
+      confirmBulkImport({ importJobId: "job/id", previewRevision: 3 }),
+    ).resolves.toEqual(accepted);
+    await expect(
+      confirmBulkImport({ importJobId: "job/id", previewRevision: 3 }),
+    ).resolves.toEqual(replayed);
+
+    expect(apiRequestMock.mock.calls).toEqual([
+      [
+        "/import-jobs/job%2Fid/confirm",
+        {
+          method: "POST",
+          body: JSON.stringify({ preview_revision: 3 }),
+        },
+      ],
+      [
+        "/import-jobs/job%2Fid/confirm",
+        {
+          method: "POST",
+          body: JSON.stringify({ preview_revision: 3 }),
+        },
+      ],
+    ]);
+  });
+
   it("rejects a successful envelope that lacks data", async () => {
     apiRequestMock.mockResolvedValue(success(null));
     await expect(getImportJob("job-1")).rejects.toMatchObject({
@@ -305,6 +379,32 @@ describe("Bulk import API contract", () => {
 });
 
 describe("Bulk query retry and polling policy", () => {
+  it("keys row pages by revision, category, offset, and limit", () => {
+    expect(bulkImportQueryKeys.rows("job-1", 3, "warning", 50, 50)).toEqual([
+      "imports",
+      "bulk",
+      "rows",
+      "job-1",
+      3,
+      "warning",
+      50,
+      50,
+    ]);
+  });
+
+  it("keeps checking only the unresolved Confirm revision without widening normal polling", () => {
+    const ready = { status: "preview_ready", preview_revision: 3 } as const;
+    expect(shouldPollBulkJob(ready)).toBe(false);
+    expect(shouldPollBulkJob(ready, 3)).toBe(true);
+    expect(shouldPollBulkJob(ready, 2)).toBe(false);
+    expect(
+      shouldPollBulkJob({ status: "completed", preview_revision: 3 }, 3),
+    ).toBe(false);
+    expect(
+      shouldPollBulkJob({ status: "confirm_queued", preview_revision: 3 }),
+    ).toBe(true);
+  });
+
   it("retries a read at most once, except client errors below 500", () => {
     expect(
       retryBulkRead(0, new ApiClientError("not found", 404, "NOT_FOUND")),
@@ -361,6 +461,7 @@ describe("Bulk query retry and polling policy", () => {
         retryFile: useRetryBulkImportFileMutation(),
         excludeFile: useExcludeBulkImportFileMutation(),
         preview: useRequestBulkPreviewMutation(),
+        confirm: useConfirmBulkImportMutation(),
         retryJob: useRetryBulkImportJobMutation(),
       }),
       { wrapper: Wrapper },
@@ -412,6 +513,11 @@ describe("Bulk query retry and polling policy", () => {
           importJobId: "job-1",
           rebuild: false,
         }),
+      () =>
+        result.current.confirm.mutateAsync({
+          importJobId: "job-1",
+          previewRevision: 1,
+        }),
       () => result.current.retryJob.mutateAsync("job-1"),
     ];
 
@@ -422,6 +528,42 @@ describe("Bulk query retry and polling policy", () => {
     }
 
     expect(apiRequestMock).toHaveBeenCalledTimes(actions.length);
+    queryClient.clear();
+  });
+
+  it("invalidates the Job after Confirm is accepted", async () => {
+    apiRequestMock.mockResolvedValue(
+      success({
+        import_job_id: "job-1",
+        status: "confirm_queued",
+        preview_revision: 1,
+        task_id: "task-1",
+        idempotent: false,
+      }),
+    );
+    const queryClient = new QueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    function Wrapper({ children }: { children: ReactNode }) {
+      return createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        children,
+      );
+    }
+    const { result } = renderHook(() => useConfirmBulkImportMutation(), {
+      wrapper: Wrapper,
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        importJobId: "job-1",
+        previewRevision: 1,
+      });
+    });
+
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: bulkImportQueryKeys.job("job-1"),
+    });
     queryClient.clear();
   });
 });

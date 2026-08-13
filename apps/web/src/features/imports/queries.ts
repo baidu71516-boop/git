@@ -3,12 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiClientError } from "@/lib/api/client";
 
 import {
+  confirmBulkImport,
   createBulkImportJob,
   createCollectionJob,
   excludeBulkImportFile,
   getCollectionJob,
   getImportJob,
   listBulkImportFiles,
+  listBulkImportRows,
   listCollectionJobs,
   requestBulkPreview,
   retryBulkImportFile,
@@ -17,7 +19,13 @@ import {
   updateBulkImportFileSourceAcquiredAt,
   uploadBulkImportFile,
 } from "./api";
-import type { ImportJobFilePublic, ImportJobStatus } from "./types";
+import type {
+  BulkImportRowsQueryInput,
+  ImportJobFilePublic,
+  ImportJobPublic,
+  ImportJobStatus,
+  ImportRowCategory,
+} from "./types";
 
 const BULK_POLL_INTERVAL_MS = 1_200;
 
@@ -30,6 +38,23 @@ export const bulkImportQueryKeys = {
     ["imports", "bulk", "job", importJobId] as const,
   files: (importJobId: string) =>
     ["imports", "bulk", "files", importJobId] as const,
+  rows: (
+    importJobId: string,
+    previewRevision: number,
+    category: ImportRowCategory,
+    offset: number,
+    limit: number,
+  ) =>
+    [
+      "imports",
+      "bulk",
+      "rows",
+      importJobId,
+      previewRevision,
+      category,
+      offset,
+      limit,
+    ] as const,
 };
 
 export function retryBulkRead(failureCount: number, error: Error): boolean {
@@ -87,14 +112,31 @@ export function useCollectionJob(collectionJobId: string, enabled = true) {
   });
 }
 
-export function useBulkImportJob(importJobId: string, enabled = true) {
+export function shouldPollBulkJob(
+  job: Pick<ImportJobPublic, "status" | "preview_revision"> | undefined,
+  pendingConfirmRevision: number | null = null,
+): boolean {
+  return Boolean(
+    job &&
+    (isActiveJobStatus(job.status) ||
+      (pendingConfirmRevision !== null &&
+        job.status === "preview_ready" &&
+        job.preview_revision === pendingConfirmRevision)),
+  );
+}
+
+export function useBulkImportJob(
+  importJobId: string,
+  enabled = true,
+  pendingConfirmRevision: number | null = null,
+) {
   return useQuery({
     queryKey: bulkImportQueryKeys.job(importJobId),
     queryFn: () => getImportJob(importJobId),
     enabled: enabled && importJobId.length > 0,
     retry: retryBulkRead,
     refetchInterval: (query) =>
-      query.state.data && isActiveJobStatus(query.state.data.status)
+      shouldPollBulkJob(query.state.data, pendingConfirmRevision)
         ? BULK_POLL_INTERVAL_MS
         : false,
   });
@@ -108,6 +150,30 @@ export function useBulkImportFiles(importJobId: string, enabled = true) {
     retry: retryBulkRead,
     refetchInterval: (query) =>
       shouldPollFiles(query.state.data) ? BULK_POLL_INTERVAL_MS : false,
+  });
+}
+
+export function useBulkImportRows(
+  {
+    importJobId,
+    previewRevision,
+    category,
+    offset,
+    limit,
+  }: BulkImportRowsQueryInput,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: bulkImportQueryKeys.rows(
+      importJobId,
+      previewRevision,
+      category,
+      offset,
+      limit,
+    ),
+    queryFn: () => listBulkImportRows({ importJobId, category, offset, limit }),
+    enabled: enabled && importJobId.length > 0 && previewRevision > 0,
+    retry: retryBulkRead,
   });
 }
 
@@ -228,6 +294,30 @@ export function useRequestBulkPreviewMutation() {
     mutationFn: requestBulkPreview,
     retry: false,
     onSuccess: (dispatch) => {
+      void queryClient.invalidateQueries({
+        queryKey: bulkImportQueryKeys.job(dispatch.import_job_id),
+      });
+    },
+  });
+}
+
+export function useConfirmBulkImportMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: confirmBulkImport,
+    retry: false,
+    onSuccess: (dispatch) => {
+      queryClient.setQueryData<ImportJobPublic>(
+        bulkImportQueryKeys.job(dispatch.import_job_id),
+        (job) =>
+          job
+            ? {
+                ...job,
+                status: dispatch.status,
+                preview_revision: dispatch.preview_revision,
+              }
+            : job,
+      );
       void queryClient.invalidateQueries({
         queryKey: bulkImportQueryKeys.job(dispatch.import_job_id),
       });

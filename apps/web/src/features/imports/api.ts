@@ -4,11 +4,14 @@ import type {
   BulkImportFileIdentity,
   CollectionJobCreateInput,
   CollectionJobPublic,
+  ConfirmBulkImportInput,
   CreateBulkImportJobInput,
   ImportDispatchResult,
   ImportJobFilePublic,
   ImportJobFileUploadResult,
   ImportJobPublic,
+  ImportRowsPage,
+  ListBulkImportRowsInput,
   RequestBulkPreviewInput,
   UpdateBulkImportFileMappingInput,
   UpdateBulkImportFileSourceAcquiredAtInput,
@@ -36,6 +39,9 @@ export const bulkImportApiPaths = {
     `/import-jobs/${encoded(importJobId)}/files/${encoded(importJobFileId)}/exclude`,
   preview: (importJobId: string) =>
     `/import-jobs/${encoded(importJobId)}/preview`,
+  rows: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/rows`,
+  confirm: (importJobId: string) =>
+    `/import-jobs/${encoded(importJobId)}/confirm`,
   retry: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/retry`,
 } as const;
 
@@ -106,6 +112,23 @@ export async function listBulkImportFiles(
     bulkImportApiPaths.files(importJobId),
   );
   return requireData(response.data, "批量文件列表");
+}
+
+export async function listBulkImportRows({
+  importJobId,
+  category,
+  offset,
+  limit,
+}: ListBulkImportRowsInput): Promise<ImportRowsPage> {
+  const query = new URLSearchParams({
+    category,
+    offset: String(offset),
+    limit: String(limit),
+  });
+  const response = await apiRequest<ImportRowsPage>(
+    `${bulkImportApiPaths.rows(importJobId)}?${query.toString()}`,
+  );
+  return requireData(response.data, "数据预览列表");
 }
 
 export async function uploadBulkImportFile({
@@ -185,6 +208,20 @@ export async function requestBulkPreview({
     { method: "POST", body: jsonBody({ rebuild }) },
   );
   return requireData(response.data, "数据预览请求");
+}
+
+export async function confirmBulkImport({
+  importJobId,
+  previewRevision,
+}: ConfirmBulkImportInput): Promise<ImportDispatchResult> {
+  const response = await apiRequest<ImportDispatchResult>(
+    bulkImportApiPaths.confirm(importJobId),
+    {
+      method: "POST",
+      body: jsonBody({ preview_revision: previewRevision }),
+    },
+  );
+  return requireData(response.data, "确认导入");
 }
 
 export async function retryBulkImportJob(

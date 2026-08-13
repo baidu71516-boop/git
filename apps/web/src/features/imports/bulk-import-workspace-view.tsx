@@ -7,6 +7,10 @@ import {
   type BulkUploadItem,
 } from "./components/bulk-file-uploader";
 import { BulkJobSummary } from "./components/bulk-job-summary";
+import {
+  BulkPreviewWorkspaceView,
+  type BulkPreviewWorkspaceViewProps,
+} from "./components/bulk-preview-workspace-view";
 import type {
   CollectionJobPublic,
   ImportJobFilePublic,
@@ -120,6 +124,10 @@ export type BulkImportWorkspaceViewProps = {
   onRequestPreview: () => void;
   onRebuildPreview: () => void;
   onRetryJob: () => void;
+  preview?: Omit<
+    BulkPreviewWorkspaceViewProps,
+    "job" | "files" | "readOnly" | "onRebuildPreview" | "onRetryJob"
+  > | null;
 };
 
 export function BulkImportWorkspaceView({
@@ -142,6 +150,7 @@ export function BulkImportWorkspaceView({
   onRequestPreview,
   onRebuildPreview,
   onRetryJob,
+  preview = null,
 }: BulkImportWorkspaceViewProps) {
   if (!job) {
     return (
@@ -210,13 +219,30 @@ export function BulkImportWorkspaceView({
           <Alert type="success" showIcon title={notice} closable />
         ) : null}
 
-        <JobStateAlert
-          job={job}
-          readOnly={readOnly}
-          busy={previewBusy}
-          onRebuildPreview={onRebuildPreview}
-          onRetryJob={onRetryJob}
-        />
+        {preview ? null : (
+          <JobStateAlert
+            job={job}
+            readOnly={readOnly}
+            busy={previewBusy}
+            onRebuildPreview={onRebuildPreview}
+            onRetryJob={onRetryJob}
+          />
+        )}
+
+        {job.preview_revision > 0 ||
+        job.status === "previewing" ||
+        job.status === "failed" ? (
+          preview ? (
+            <BulkPreviewWorkspaceView
+              {...preview}
+              job={job}
+              files={files}
+              readOnly={readOnly}
+              onRebuildPreview={onRebuildPreview}
+              onRetryJob={onRetryJob}
+            />
+          ) : null
+        ) : null}
 
         <section
           className="bulk-file-section"
