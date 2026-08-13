@@ -1,6 +1,6 @@
 "use client";
 
-import { AppstoreOutlined, LeftOutlined } from "@ant-design/icons";
+import { LeftOutlined } from "@ant-design/icons";
 import { Drawer, Space, Tag, Typography } from "antd";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -23,6 +23,12 @@ export function DevInfluencerDetailDrawerPreview({
 }) {
   const router = useRouter();
   const stage = crmStageDisplay(detail.crm_stage);
+  const activeAccount =
+    detail.platform_accounts.find((account) => account.is_active) ??
+    detail.platform_accounts[0];
+  const activeSubtitle = activeAccount
+    ? `${platformLabel(activeAccount.platform)} · ${activeAccount.account_name}`
+    : "";
 
   return (
     <InfluencerPreviewShell title="达人详情预览" description="仅用于界面预览">
@@ -49,18 +55,12 @@ export function DevInfluencerDetailDrawerPreview({
               <Title level={5} style={{ margin: 0 }}>
                 {detail.display_name}
               </Title>
-              <Text type="secondary">
-                {detail.platform_accounts[0]
-                  ? `${platformLabel(detail.platform_accounts[0].platform)} · ${detail.platform_accounts[0].account_name}`
-                  : ""}
-              </Text>
+              <Text type="secondary">{activeSubtitle}</Text>
             </div>
           }
           extra={
-            stage ? (
-              <Tag color={stage.color || "default"} icon={<AppstoreOutlined />}>
-                {stage.label}
-              </Tag>
+            stage.label ? (
+              <Tag color={stage.color || "default"}>{stage.label}</Tag>
             ) : null
           }
           closable={{ "aria-label": "关闭详情抽屉", placement: "end" }}

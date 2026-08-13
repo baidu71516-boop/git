@@ -563,7 +563,7 @@ body {
 
 .influencer-detail-layout {
   display: grid;
-  gap: 16px;
+  gap: 20px;
 }
 
 .influencer-detail-drawer .ant-drawer-mask {
@@ -617,7 +617,7 @@ body {
 
 .influencer-detail-panel {
   display: grid;
-  gap: 16px;
+  gap: 20px;
 }
 
 .influencer-detail-panel > .ant-typography:first-child {
@@ -625,11 +625,11 @@ body {
 }
 
 .detail-section {
-  padding: 12px 2px;
+  padding: 2px 2px;
 }
 
 .detail-section .ant-typography {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
   font-size: 15px;
   line-height: 1.45;
   letter-spacing: 0.01em;
@@ -644,10 +644,12 @@ body {
 }
 
 .detail-field-grid,
-.detail-row-grid {
+.detail-row-grid,
+.detail-two-column-grid,
+.detail-platform-grid {
   display: grid;
   gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .detail-row-grid {
@@ -692,16 +694,23 @@ body {
 }
 
 .detail-platform-item {
-  padding: 12px;
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
-  background: #fcfdff;
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
 }
 
 .detail-platform-item-title {
-  margin-bottom: 8px;
+  margin: 0;
   color: var(--app-text);
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.detail-platform-title {
+  margin: 0 0 6px;
+  color: var(--app-text);
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .detail-inline-rows {
@@ -786,6 +795,11 @@ body {
   .influencer-drawer-content {
     padding: 12px;
     gap: 12px;
+  }
+
+  .detail-two-column-grid,
+  .detail-platform-grid {
+    grid-template-columns: 1fr;
   }
 }
 

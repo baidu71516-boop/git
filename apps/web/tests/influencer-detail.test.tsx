@@ -270,14 +270,17 @@ describe("InfluencerDetailWorkspace", () => {
       .closest("section");
     expect(ownerSection).not.toBeNull();
     expect(
-      within(ownerSection as HTMLElement).getByText("已停用"),
+      within(ownerSection as HTMLElement).getByText("资料更新时间"),
+    ).toBeInTheDocument();
+    expect(
+      within(ownerSection as HTMLElement).getByText("创建时间"),
     ).toBeInTheDocument();
     expect(screen.getAllByText(/账号甲/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/账号乙/).length).toBeGreaterThan(0);
     expect(screen.getByText("美妆")).toBeInTheDocument();
     expect(screen.getByText("动画")).toBeInTheDocument();
     expect(
-      within(ownerSection as HTMLElement).getByText("2026/08/11 00:00:00"),
+      within(ownerSection as HTMLElement).getByText("2026-08-11 09:30"),
     ).toBeInTheDocument();
 
     const contactSection = screen
@@ -304,7 +307,7 @@ describe("InfluencerDetailWorkspace", () => {
       within(ownerSection as HTMLElement).getByText("数据来源"),
     ).toBeInTheDocument();
     expect(
-      within(ownerSection as HTMLElement).getByText(/huitun/),
+      within(ownerSection as HTMLElement).getByText(/灰豚/),
     ).toBeInTheDocument();
     expect(screen.queryByText("最后观察")).not.toBeInTheDocument();
     expect(screen.queryByText("source_data")).not.toBeInTheDocument();

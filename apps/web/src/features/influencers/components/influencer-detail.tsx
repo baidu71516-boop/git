@@ -1,4 +1,5 @@
-import { Divider, Space, Tag, Typography } from "antd";
+import { Divider, Space, Tag, Tooltip, Typography } from "antd";
+import type { ReactNode } from "react";
 
 import { AppTooltip } from "@/components/ui/app-tooltip";
 
@@ -8,20 +9,44 @@ import {
   formatExactFollowers,
   formatFollowers,
   formatMetricsTimestamp,
-  formatShanghaiDate,
   platformLabel,
 } from "../formatters";
 import type { InfluencerDetail as InfluencerDetailData } from "../types";
 
 const { Title } = Typography;
 
+const detailDateMinuteFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const detailDateSecondFormatter = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+
 function unique(values: string[]): string[] {
   return Array.from(new Set(values));
 }
 
-function rowItem(label: string, value: string | null) {
+function rowItem(
+  label: string,
+  value: string | number | ReactNode | null,
+  key?: string,
+) {
   return (
-    <div className="detail-row-item" key={label}>
+    <div className="detail-row-item" key={key || label}>
       <span className="detail-row-label">{label}</span>
       <span className="detail-row-value">{value}</span>
     </div>
@@ -59,6 +84,138 @@ function allSources(detail: InfluencerDetailData): string[] {
   ]);
 }
 
+function mapDataSourceLabel(source: string): string {
+  if (source === "huitun") {
+    return "灰豚";
+  }
+  if (source === "manual") {
+    return "手动";
+  }
+  if (source === "generic") {
+    return "通用";
+  }
+  return source || "—";
+}
+
+function formatDateForDetailField(value: string | null): ReactNode {
+  if (!value) {
+    return "—";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "—";
+  }
+  const full = detailDateSecondFormatter.format(date).replaceAll("/", "-");
+  const minute = detailDateMinuteFormatter.format(date).replaceAll("/", "-");
+  return (
+    <Tooltip title={full}>
+      <span>{minute}</span>
+    </Tooltip>
+  );
+}
+
+function contactSourceLabel(source: string): string {
+  if (source === "huitun") {
+    return "灰豚";
+  }
+  return source || "—";
+}
+
+function contactValidationLabel(status: string | null | undefined): string {
+  if (status === "unverified") {
+    return "未验证";
+  }
+  if (status === "valid" || status === "verified") {
+    return "已验证";
+  }
+  return status || "—";
+}
+
+function PlatformMetricGrid({
+  account,
+  detail,
+  showPlatformHeader = false,
+  index,
+}: {
+  account: InfluencerDetailData["platform_accounts"][number];
+  detail: InfluencerDetailData;
+  showPlatformHeader?: boolean;
+  index: number;
+}) {
+  const metric = metricForAccount(detail, account.id);
+  const followersCount = metricFollowers(metric);
+  const followers =
+    followersCount === null ? "—" : formatFollowers(followersCount);
+  const followersTooltip =
+    followersCount === null ? null : formatExactFollowers(followersCount);
+
+  return (
+    <div
+      className="detail-platform-item"
+      style={index > 0 ? { paddingTop: "12px" } : undefined}
+    >
+      {showPlatformHeader ? (
+        <div className="detail-platform-title">
+          {platformLabel(account.platform)}
+        </div>
+      ) : null}
+      <div className="detail-platform-grid detail-two-column-grid">
+        {rowItem("账号名", account.account_name, `${account.id}-handle`)}
+        <div className="detail-row-item" key={`${account.id}-followers`}>
+          <span className="detail-row-label">粉丝</span>
+          <span className="detail-row-value">
+            {followersTooltip ? (
+              <AppTooltip title={followersTooltip}>
+                <span>{followers}</span>
+              </AppTooltip>
+            ) : (
+              followers
+            )}
+          </span>
+        </div>
+        {rowItem(
+          "指标更新时间",
+          metric?.source_updated_at
+            ? formatMetricsTimestamp(metric.source_updated_at)
+            : "—",
+          `${account.id}-updated`,
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SinglePlatformMetric({
+  account,
+  detail,
+  index,
+}: {
+  account: InfluencerDetailData["platform_accounts"][number];
+  detail: InfluencerDetailData;
+  index: number;
+}) {
+  return <PlatformMetricGrid account={account} detail={detail} index={index} />;
+}
+
+function MultiPlatformMetric({
+  account,
+  detail,
+  index,
+}: {
+  account: InfluencerDetailData["platform_accounts"][number];
+  detail: InfluencerDetailData;
+  index: number;
+}) {
+  return (
+    <PlatformMetricGrid
+      account={account}
+      detail={detail}
+      index={index}
+      showPlatformHeader
+    />
+  );
+}
+
 export function InfluencerDetail({
   detail,
   showTitle = true,
@@ -75,11 +232,9 @@ export function InfluencerDetail({
   );
   const visibleTags = tags.slice(0, 2);
   const extraTags = tags.length - visibleTags.length;
-  const stageNode =
-    detail.crm_stage !== "" ? (
-      <Tag color={stage.color || "default"}>{stage.label}</Tag>
-    ) : null;
-  const allSourcesText = allSources(detail).join("、") || "—";
+  const allSourcesText =
+    allSources(detail).map(mapDataSourceLabel).join("、") || "—";
+  const isMultiPlatform = detail.platform_accounts.length > 1;
 
   return (
     <section className="influencer-detail-panel">
@@ -89,15 +244,14 @@ export function InfluencerDetail({
         <Title level={5} id="basic-section-title">
           基本资料
         </Title>
-        <div className="detail-field-grid">
-          {rowItem("达人名称", detail.display_name)}
-          {rowItem("负责人", detail.owner ? detail.owner.name : "未分配")}
-          {rowItem("CRM 阶段", stage.label)}
+        <div className="detail-field-grid detail-two-column-grid">
           {rowItem(
             "平台",
             activeAccount ? platformLabel(activeAccount.platform) : "—",
           )}
-          {rowItem("账号", activeAccount ? activeAccount.account_name : "—")}
+          {rowItem("账号名", activeAccount ? activeAccount.account_name : "—")}
+          {rowItem("负责人", detail.owner ? detail.owner.name : "未分配")}
+          {rowItem("CRM 阶段", stage.label)}
         </div>
         <Divider />
         <div className="detail-label-row">
@@ -130,82 +284,25 @@ export function InfluencerDetail({
         </Title>
         {detail.platform_accounts.length === 0 ? (
           <span className="detail-empty-state">暂无平台账号与指标</span>
-        ) : detail.platform_accounts.length === 1 ? (
-          <div className="detail-single-platform">
-            {detail.platform_accounts.map((account) => {
-              const metric = metricForAccount(detail, account.id);
-              const followersCount = metricFollowers(metric);
-              const followers =
-                followersCount === null ? "—" : formatFollowers(followersCount);
-              const tooltip =
-                followersCount === null
-                  ? null
-                  : formatExactFollowers(followersCount);
-              return (
-                <div className="detail-inline-rows" key={account.id}>
-                  {rowItem("平台", platformLabel(account.platform))}
-                  {rowItem("账号名", account.account_name)}
-                  <div className="detail-row-item">
-                    <span className="detail-row-label">粉丝</span>
-                    <span className="detail-row-value">
-                      {tooltip ? (
-                        <AppTooltip title={tooltip}>
-                          <span>{followers}</span>
-                        </AppTooltip>
-                      ) : (
-                        followers
-                      )}
-                    </span>
-                  </div>
-                  {rowItem(
-                    "指标更新时间",
-                    metric?.source_updated_at
-                      ? formatMetricsTimestamp(metric.source_updated_at)
-                      : "—",
-                  )}
-                </div>
-              );
-            })}
-          </div>
         ) : (
           <div className="detail-platform-list">
-            {detail.platform_accounts.map((account) => {
-              const metric = metricForAccount(detail, account.id);
-              const followersCount = metricFollowers(metric);
-              const followers =
-                followersCount === null ? "—" : formatFollowers(followersCount);
-              const followersTooltip =
-                followersCount === null
-                  ? null
-                  : formatExactFollowers(followersCount);
-              return (
-                <div className="detail-platform-item" key={account.id}>
-                  <div className="detail-platform-item-title">
-                    {platformLabel(account.platform)} · {account.account_name}
-                  </div>
-                  <div className="detail-row-grid">
-                    <div className="detail-row-item">
-                      <span className="detail-row-label">粉丝</span>
-                      <span className="detail-row-value">
-                        {followersTooltip && metric?.source_updated_at ? (
-                          <AppTooltip title={followersTooltip}>
-                            <span>{followers}</span>
-                          </AppTooltip>
-                        ) : (
-                          followers
-                        )}
-                      </span>
-                    </div>
-                    {rowItem(
-                      "指标更新时间",
-                      metric?.source_updated_at
-                        ? formatMetricsTimestamp(metric.source_updated_at)
-                        : "—",
-                    )}
-                  </div>
-                </div>
-              );
-            })}
+            {detail.platform_accounts.map((account, index) =>
+              isMultiPlatform ? (
+                <MultiPlatformMetric
+                  key={account.id}
+                  account={account}
+                  detail={detail}
+                  index={index}
+                />
+              ) : (
+                <SinglePlatformMetric
+                  key={account.id}
+                  account={account}
+                  detail={detail}
+                  index={index}
+                />
+              ),
+            )}
           </div>
         )}
       </section>
@@ -227,7 +324,8 @@ export function InfluencerDetail({
                   {contact.display_value}
                 </span>
                 <span className="detail-secondary-text">
-                  来源：{contact.source} · 验证：{contact.validation_status}
+                  来源：{contactSourceLabel(contact.source)} · 状态：
+                  {contactValidationLabel(contact.validation_status)}
                 </span>
               </div>
             ))}
@@ -239,24 +337,10 @@ export function InfluencerDetail({
         <Title level={5} id="owner-title">
           管理信息
         </Title>
-        <div className="detail-field-grid">
-          {rowItem("负责人", detail.owner ? detail.owner.name : "未分配")}
-          {rowItem("CRM 阶段", stage.label)}
-          {rowItem(
-            "负责人状态",
-            detail.owner
-              ? detail.owner.status === "disabled"
-                ? "已停用"
-                : "正常"
-              : "—",
-          )}
+        <div className="detail-field-grid detail-two-column-grid">
           {rowItem("数据来源", allSourcesText)}
-          {rowItem("创建时间", formatShanghaiDate(detail.created_at))}
-          {rowItem("达人记录更新时间", formatShanghaiDate(detail.updated_at))}
-        </div>
-        <div className="detail-row-item detail-tag-row">
-          <span className="detail-row-label">CRM 阶段徽标</span>
-          {stageNode}
+          {rowItem("创建时间", formatDateForDetailField(detail.created_at))}
+          {rowItem("资料更新时间", formatDateForDetailField(detail.updated_at))}
         </div>
       </section>
     </section>

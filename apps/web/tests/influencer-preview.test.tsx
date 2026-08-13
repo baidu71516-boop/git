@@ -178,6 +178,6 @@ describe("development influencer visual preview", () => {
     expect(screen.getAllByText("粉丝").length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("48.24万")).toBeInTheDocument();
     expect(screen.getByText("24.12万")).toBeInTheDocument();
-    expect(screen.getByText("月面电台账号1")).toBeInTheDocument();
+    expect(screen.getAllByText("月面电台账号1").length).toBeGreaterThan(1);
   });
 });
