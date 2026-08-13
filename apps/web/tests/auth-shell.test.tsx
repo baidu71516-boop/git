@@ -272,7 +272,9 @@ describe("AuthShell", () => {
 
     renderAuthenticatedShell("influencers", "influencer-1");
 
-    expect(await screen.findByText("详情达人")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "详情达人", level: 2 }),
+    ).toBeInTheDocument();
     expect(
       within(screen.getByRole("complementary")).getByText("待选择"),
     ).toBeInTheDocument();

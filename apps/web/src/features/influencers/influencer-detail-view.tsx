@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Button, Card, Drawer, Space, Tag, Typography } from "antd";
+import { Alert, Button, Drawer, Space, Tag, Typography } from "antd";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -61,11 +61,9 @@ export function InfluencerDetailView({
   }
 
   const detailState = detailQuery.isPending ? (
-    <Card variant="borderless" className="influencer-detail-card">
-      <div className="influencer-list-state">
-        <AppLoading label="正在加载达人详情" />
-      </div>
-    </Card>
+    <div className="influencer-list-state">
+      <AppLoading label="正在加载达人详情" />
+    </div>
   ) : detailQuery.isError ? (
     <Alert
       type="error"
@@ -92,15 +90,13 @@ export function InfluencerDetailView({
   ) : (
     <>
       <InfluencerDetail detail={detailQuery.data} showTitle={!isDrawer} />
-      <Card variant="borderless" className="influencer-detail-card">
-        <MetricSnapshotList
-          accounts={detailQuery.data.platform_accounts}
-          page={snapshotPage}
-          pageSize={SNAPSHOT_PAGE_SIZE}
-          query={snapshotQuery}
-          onPageChange={setSnapshotPage}
-        />
-      </Card>
+      <MetricSnapshotList
+        accounts={detailQuery.data.platform_accounts}
+        page={snapshotPage}
+        pageSize={SNAPSHOT_PAGE_SIZE}
+        query={snapshotQuery}
+        onPageChange={setSnapshotPage}
+      />
     </>
   );
 
@@ -112,7 +108,8 @@ export function InfluencerDetailView({
       <Drawer
         rootClassName="influencer-detail-drawer"
         open
-        size="min(760px, calc(100vw - 48px))"
+        size="default"
+        width={740}
         title={<DrawerTitle detail={detailQuery.data} />}
         extra={stage ? <Tag color={stage.color}>{stage.label}</Tag> : null}
         closable={{ "aria-label": "关闭达人详情", placement: "end" }}
@@ -120,22 +117,24 @@ export function InfluencerDetailView({
         mask={{ closable: true }}
         onClose={closeDrawer}
       >
-        <div className="influencer-drawer-content">{detailState}</div>
+        <div className="influencer-drawer-content influencer-detail-layout">
+          {detailState}
+        </div>
       </Drawer>
     );
   }
 
   return (
     <section className="influencer-workspace influencer-detail-workspace">
-      <Card variant="borderless" className="influencer-detail-actions">
-        <Space wrap>
+      <div className="influencer-detail-workspace-content">
+        <Space className="influencer-detail-actions" size="middle">
           <Button aria-label="返回上一页" onClick={() => router.back()}>
             返回上一页
           </Button>
           <Link href="/influencers">返回达人库</Link>
         </Space>
-      </Card>
-      {detailState}
+        {detailState}
+      </div>
     </section>
   );
 }

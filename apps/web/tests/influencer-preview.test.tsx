@@ -1,9 +1,15 @@
 import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import DevInfluencerDetailDrawerPreviewPage from "../src/app/dev-ui-preview/influencers/drawer/[id]/page";
 import InfluencerVisualPreviewPage from "../src/app/dev-ui-preview/influencers/page";
 import { InfluencerPreviewWorkspace } from "../src/features/influencers/influencer-preview-workspace";
-import { createInfluencerPreviewItems } from "../src/features/influencers/preview-fixtures";
+import { DevInfluencerDetailDrawerPreview } from "../src/features/influencers/influencer-detail-drawer-preview";
+import {
+  createInfluencerPreviewDetailItems,
+  createInfluencerPreviewItems,
+  getInfluencerPreviewDetailById,
+} from "../src/features/influencers/preview-fixtures";
 
 const navigation = vi.hoisted(() => ({
   notFound: vi.fn(() => {
@@ -14,6 +20,13 @@ const navigation = vi.hoisted(() => ({
 vi.mock("next/navigation", () => ({
   notFound: navigation.notFound,
   usePathname: () => "/dev-ui-preview/influencers",
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    refresh: vi.fn(),
+  }),
 }));
 
 afterEach(() => {
@@ -103,5 +116,68 @@ describe("development influencer visual preview", () => {
     expect(screen.getAllByText("+3")).toHaveLength(2);
     expect(screen.getByText("共 8 位达人")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps drawer detail preview route development-only and in-memory", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+
+    await expect(
+      DevInfluencerDetailDrawerPreviewPage({
+        params: Promise.resolve({ id: "00000000-0000-0000-0000-000000000001" }),
+      }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(navigation.notFound).toHaveBeenCalledOnce();
+
+    vi.stubEnv("NODE_ENV", "development");
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const previewPage = await DevInfluencerDetailDrawerPreviewPage({
+      params: Promise.resolve({ id: "00000000-0000-0000-0000-000000000002" }),
+    });
+
+    render(previewPage);
+    expect(
+      screen.getByText("开发环境预览", { exact: false }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("仅用于视觉验收", { exact: false }),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reuses the same detail presentation for development drawer preview", () => {
+    const detailItems = createInfluencerPreviewDetailItems();
+    const fixture = detailItems[2];
+    const fixtureById = getInfluencerPreviewDetailById(fixture?.id ?? "");
+    const displayFixture = fixtureById ?? fixture;
+
+    render(
+      <DevInfluencerDetailDrawerPreview
+        detail={displayFixture}
+        backHref="/dev-ui-preview/influencers/drawer"
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "基本资料", level: 5 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "平台与指标", level: 5 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "联系方式", level: 5 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "管理信息", level: 5 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", {
+        name: new RegExp(displayFixture.display_name, "i"),
+        level: 2,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("粉丝").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("48.24万")).toBeInTheDocument();
+    expect(screen.getByText("24.12万")).toBeInTheDocument();
+    expect(screen.getByText("月面电台账号1")).toBeInTheDocument();
   });
 });
