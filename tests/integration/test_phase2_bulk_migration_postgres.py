@@ -605,7 +605,7 @@ def test_fresh_upgrade_repeat_and_alembic_check(
 
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == "0004_phase2_bulk_import"
+        assert _revision(connection) == "0005_phase2_refresh_queue"
         assert inspect(connection).has_table("import_job_files")
         assert inspect(connection).has_table("import_job_file_client_ids")
         assert inspect(connection).has_table("import_task_requests")

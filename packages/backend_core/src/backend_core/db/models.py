@@ -20,6 +20,7 @@ from backend_core.influencers.models import (
     InfluencerSourceState,
     PlatformAccountSourceIdentity,
 )
+from backend_core.refresh.models import RefreshQueue, RefreshQueueItem
 
 __all__ = [
     "AuditLog",
@@ -39,6 +40,8 @@ __all__ = [
     "InfluencerPlatformAccount",
     "InfluencerSourceState",
     "PlatformAccountSourceIdentity",
+    "RefreshQueue",
+    "RefreshQueueItem",
     "Operator",
     "StoredImportFile",
 ]

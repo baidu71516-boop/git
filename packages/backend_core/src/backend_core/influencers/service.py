@@ -16,6 +16,7 @@ from backend_core.influencers.freshness import (
     FreshnessPolicy,
     InfluencerFreshnessSummary,
 )
+from backend_core.influencers.metrics import followers_count_from_metrics
 from backend_core.influencers.models import (
     InfluencerContact,
     InfluencerCurrentMetrics,
@@ -193,11 +194,7 @@ def _contact_detail(contact: InfluencerContact, role: Role) -> InfluencerContact
 
 
 def _followers_count(metric: InfluencerCurrentMetrics) -> int | None:
-    metrics = metric.metrics
-    raw_value = metrics.get("followers_count") if isinstance(metrics, dict) else None
-    if type(raw_value) is int and raw_value >= 0:
-        return raw_value
-    return None
+    return followers_count_from_metrics(metric.metrics)
 
 
 def _current_metrics_summary(metric: InfluencerCurrentMetrics) -> CurrentMetricsSummary:

@@ -146,6 +146,12 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_import_job_collection_department",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["refresh_queue_id", "department_id"],
+            ["refresh_queues.id", "refresh_queues.department_id"],
+            name="fk_import_job_refresh_queue_department",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("file_size IS NULL OR file_size > 0", name="ck_import_job_file_size"),
         CheckConstraint("preview_revision >= 0", name="ck_import_job_preview_revision"),
         CheckConstraint(
@@ -161,6 +167,7 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     collection_job_id: Mapped[UUID] = mapped_column(nullable=False)
+    refresh_queue_id: Mapped[UUID | None] = mapped_column(nullable=True)
     department_id: Mapped[UUID] = mapped_column(
         ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
     )

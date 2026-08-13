@@ -136,3 +136,15 @@ async def require_import_mutation(
     if context.role == Role.VIEWER:
         raise ImportDomainError("PERMISSION_DENIED", "Viewer role is read-only", status_code=403)
     return context
+
+
+async def require_refresh_mutation(
+    context: Annotated[AuthContext, Depends(require_csrf_context)],
+) -> AuthContext:
+    """Require the shared mutation prerequisites for Refresh Queue actions."""
+
+    if context.operator is None:
+        raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+    if context.role == Role.VIEWER:
+        raise AuthError(403, "PERMISSION_DENIED", "Viewer role is read-only")
+    return context

@@ -6,7 +6,7 @@
 
 本文是 Phase 2 的唯一权威实施与验收协议。旧的 Phase 2 Browser Automation 方案以及“Phase 2 = SOP + Campaign + AI”的排期均已人工废弃。本次设计冻结不代表代码、Schema、Migration、API、Worker 或 Web 已实现，也不授权自动开始 Task 1。
 
-实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 7 Freshness Domain / Influencer Read API；Task 0 的冻结范围和任务顺序没有改变。Task 8 Refresh Queue、`0005` 及后续任务尚未开始，也未由 Task 7 获得实现授权。
+实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 8 Refresh Queue；Task 0 的冻结范围和任务顺序没有改变。Task 9 Refresh Return、Web 与部署尚未开始，也未由 Task 8 获得实现授权。
 
 若本文与旧版 Phase 2 描述冲突，以本文和已确认的 Phase 1A–1C 决策为准。Phase 1A–1C 的认证、权限、导入、去重、非破坏性合并、Contact 保护和不可变 Snapshot 语义不得被 Phase 2 改写。
 
@@ -598,6 +598,8 @@ MVP 不冻结复杂权重，使用 deterministic tier 和 reason codes：
 4. `aging`。
 5. fresh 但真实 `followers_count` 缺失。
 
+Task 8 实现将 `priority_tier` 持久化为整数 `1..5`，稳定 primary reason codes 依次为 `FRESHNESS_UNKNOWN / VERY_STALE / STALE / AGING / FOLLOWERS_MISSING`；tier 1–4 若同时缺少有效 followers，则在 primary reason 后追加 `FOLLOWERS_MISSING`。`policy_version=1`、criteria/identity `schema_version=1`，`requested_limit` 最大 2000。
+
 稳定排序：
 
 ```text
@@ -710,6 +712,8 @@ Item 状态固定为：
 - `created_by_operator_id` 是独立 Audit FK；允许 super_admin 以管理部门 Operator 为其他业务部门创建 Queue，Operator 不改变目标 Department Scope。
 
 `identity_snapshot` 只保存创建 Queue 时真实存在的公开定位字段，不保存 Contact 或完整 Metrics。
+
+Task 8 的 snapshot 选择规则固定为：字符串按完整 Unicode whitespace trim 后才算 locator；同一 Huitun account/source 的多个非空 external account ID 取字典序最小值并以 `external_source_id` 输出；`followers_count` 只冻结经过现有 strict nonnegative-int 语义验证的单一标量，不复制 Metrics JSON。`baseline_source_updated_at` 取该账号 Huitun `InfluencerSourceState.source_updated_at`，与同一 candidate statement 中的 observation、priority 和 Identity 一起冻结。
 
 ### 13.3 CSV
 
@@ -1338,7 +1342,7 @@ MVP 最终交付：
 
 每个 Task 必须独立人工验收，不能自动进入下一 Task。
 
-当前实施检查点：Task 7 只关闭 Freshness Domain 与现有 Influencer Read API 的 additive 字段/筛选；`0005`、Refresh Queue、Refresh Return、Web 与部署仍按上表等待各自独立人工授权。
+当前实施检查点：Task 8 关闭 Department-owned Refresh Queue、`0005`、deterministic priority、真实 Identity CSV 与六个 Queue API；Refresh Return、Web 与部署仍按上表等待各自独立人工授权。
 
 ---
 

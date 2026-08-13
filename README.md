@@ -2,7 +2,7 @@
 
 > 面向公司内部使用的达人开发、邮件触达、CRM 与数据优化系统。
 
-当前状态：**Phase 1A–1C 已完成、部署并通过真实服务器 E2E；Phase 2 Task 0 Design Freeze 已完成，但 Phase 2 代码尚未实现。** 当前运行版本仍为 `main@4c973c1`、tag `phase-1c-final`。
+当前状态：**Phase 1A–1C 已部署；Phase 2 Task 1–8 已在开发分支本地实现并通过门禁，尚未 merge 或 deploy。** 当前运行版本仍为 `main@4c973c1`、tag `phase-1c-final`。
 
 ## 1. 项目目标
 
@@ -149,6 +149,13 @@ Phase 1C 达人库只读接口：
 - `GET /api/v1/influencers/{influencer_id}`：读取主体、active 平台账号、Contact、来源追溯和真实 Current Metrics。
 - `GET /api/v1/influencers/{influencer_id}/metric-snapshots`：按稳定顺序分页读取不可变指标历史。
 
+Phase 2 Task 8 Refresh Queue 接口：
+
+- `POST /api/v1/refresh-queues`：用同一 UTC `as_of` 生成 Department-owned、company-candidate Queue。
+- `GET /api/v1/refresh-queues`、`GET /api/v1/refresh-queues/{id}`、`GET /api/v1/refresh-queues/{id}/items`：稳定分页与数据库聚合摘要。
+- `POST /api/v1/refresh-queues/{id}/export`：导出只含冻结公开 Identity 的公式注入安全 CSV。
+- `POST /api/v1/refresh-queues/{id}/cancel`：原子取消 Queue 与所有 active Items。
+
 Web 入口为 `/influencers`，详情路由为 `/influencers/{id}`。达人库只返回 active 且未软删除的数据，Owner 和 Import 来源部门不是数据 ACL。四个 GET 只要求有效 Session，无 Operator 也可读取且无需 CSRF；`viewer` 的非空 Contact 固定显示 `***`，其他正式角色可读取完整 current Contact。Phase 1B Import Mutation 仍要求已选择 Operator、CSRF 和后端权限。
 
 ### 常用命令
@@ -157,6 +164,7 @@ Web 入口为 `/influencers`，详情路由为 `/influencers/{id}`。达人库�
 make lint              # Python/TypeScript lint、格式与类型检查
 make test              # Python 与 Web 单元测试
 make test-freshness-postgres # 显式 PG16 Freshness lineage/query/performance Gate
+make test-refresh-queue-postgres # 显式 PG16 Queue migration/concurrency/race/2k Gate
 make health            # 七服务状态、HTTP readiness、Celery ping
 make migrate           # 执行 Alembic migration
 make compose-validate  # 校验 Compose 配置
@@ -186,8 +194,8 @@ docker-compose exec api bootstrap-admin \
 - `apps/worker` 只负责 Celery 任务入口。
 - Phase 1A 至 Phase 1C 的规则只存在于 `backend_core.auth`、`backend_core.audit`、`backend_core.imports` 与 `backend_core.influencers`。
 - Phase 1C 复用 `0003_phase1b` 的公司级 Influencer、PlatformAccount、Source State、Contact、Current Metrics 与 Metric Snapshot，实现只读查询层、四个 GET 和 Web 列表/详情；没有 `0004`、Schema 变更或 Influencer 写接口。
-- Phase 2 已完成文档冻结但尚未实现；计划依次使用 `0004_phase2_bulk_import` 与 `0005_phase2_refresh_queue`，不得提前创建空 Migration。
-- Phase 2 继续只在 `backend_core.imports` 与 `backend_core.influencers` 扩展业务规则，不创建 `ImportBatch`、`BatchRow`、根目录 `services/` 或 API 内重复 Service。
+- Phase 2 Task 1–8 已在开发分支实现，Alembic head 为 `0005_phase2_refresh_queue`；`0004` 未被 Task 8 修改，未创建 `0006`。
+- Phase 2 继续只在 `backend_core.imports`、`backend_core.influencers` 与 `backend_core.refresh` 扩展业务规则，不创建 `ImportBatch`、`BatchRow`、根目录 `services/` 或 API 内重复 Service。
 - 当前仍不包含 Campaign、真实 AI、真实邮件、Inbox、CRM、Analytics 或其他平台 Connector。
 
 ### 数据与日志

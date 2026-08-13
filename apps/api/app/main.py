@@ -23,6 +23,7 @@ from app.http.import_tasks import ImportTaskDispatcher
 from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
 from app.http.operators import router as operators_router
+from app.http.refresh_queues import router as refresh_queues_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -68,4 +69,5 @@ app.include_router(admin_router)
 app.include_router(collection_jobs_router)
 app.include_router(import_jobs_router)
 app.include_router(influencers_router)
+app.include_router(refresh_queues_router)
 register_exception_handlers(app)

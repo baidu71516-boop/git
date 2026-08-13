@@ -6,6 +6,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -84,11 +85,177 @@ class AccountSourceFreshnessRecord:
     last_imported_at: datetime | None
 
 
-def _visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
+def visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
+    """Return the company-level visibility predicate shared by read domains."""
+
     return (
         Influencer.status == InfluencerStatus.ACTIVE,
         Influencer.deleted_at.is_(None),
     )
+
+
+def huitun_confirmed_lineage() -> Subquery:
+    """Aggregate successful Huitun Confirm evidence once per account.
+
+    Imported time deliberately includes the Legacy compatibility path.
+    Observed time additionally requires a Bulk occurrence carrying a
+    confirmed acquisition timestamp; committed time never fills it.
+    """
+
+    committed_actions = (
+        ImportRowAction.CREATE,
+        ImportRowAction.UPDATE,
+        ImportRowAction.NO_CHANGE,
+    )
+    reliable_observation = and_(
+        ImportJob.stored_file_id.is_(None),
+        ImportJobFile.source_acquired_at.is_not(None),
+        ImportJobFile.source_acquired_at_confirmation_required.is_(False),
+    )
+    return (
+        select(
+            ImportRow.matched_platform_account_id.label("platform_account_id"),
+            func.max(
+                case(
+                    (reliable_observation, ImportJobFile.source_acquired_at),
+                    else_=None,
+                )
+            ).label("last_observed_at"),
+            func.max(ImportRow.committed_at).label("last_imported_at"),
+        )
+        .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+        .join(
+            ImportJobFile,
+            and_(
+                ImportJobFile.id == ImportRow.import_job_file_id,
+                ImportJobFile.import_job_id == ImportRow.import_job_id,
+            ),
+        )
+        .where(
+            ImportRow.matched_platform_account_id.is_not(None),
+            ImportRow.committed_at.is_not(None),
+            ImportRow.committed_action.in_(committed_actions),
+            ImportJob.status == ImportJobStatus.COMPLETED,
+            ImportJob.confirmed_revision.is_not(None),
+            ImportRow.preview_revision == ImportJob.confirmed_revision,
+            ImportJob.source_type == ImportSourceType.MANUAL_HUITUN_EXPORT,
+            ImportJobFile.status == ImportJobFileStatus.READY,
+        )
+        .group_by(ImportRow.matched_platform_account_id)
+        .subquery("huitun_confirmed_lineage")
+    )
+
+
+def eligible_huitun_freshness() -> CTE:
+    """Return active accounts with real Huitun source evidence.
+
+    The account's creation source is not sufficient: an account is eligible
+    only through Huitun SourceState, SourceIdentity, or successful Huitun
+    Confirm lineage. Queue and library reads deliberately share this truth.
+    """
+
+    lineage = huitun_confirmed_lineage()
+    has_source_state = exists(
+        select(1)
+        .select_from(InfluencerSourceState)
+        .where(
+            InfluencerSourceState.platform_account_id == InfluencerPlatformAccount.id,
+            InfluencerSourceState.influencer_id == InfluencerPlatformAccount.influencer_id,
+            InfluencerSourceState.source == DataSource.HUITUN,
+        )
+    )
+    has_source_identity = exists(
+        select(1)
+        .select_from(PlatformAccountSourceIdentity)
+        .where(
+            PlatformAccountSourceIdentity.platform_account_id == InfluencerPlatformAccount.id,
+            PlatformAccountSourceIdentity.source == DataSource.HUITUN,
+        )
+    )
+    return (
+        select(
+            InfluencerPlatformAccount.id.label("platform_account_id"),
+            InfluencerPlatformAccount.influencer_id.label("influencer_id"),
+            lineage.c.last_observed_at,
+            lineage.c.last_imported_at,
+        )
+        .outerjoin(
+            lineage,
+            lineage.c.platform_account_id == InfluencerPlatformAccount.id,
+        )
+        .where(
+            InfluencerPlatformAccount.is_active.is_(True),
+            or_(
+                lineage.c.platform_account_id.is_not(None),
+                has_source_state,
+                has_source_identity,
+            ),
+        )
+        .cte("eligible_huitun_freshness")
+    )
+
+
+def freshness_status_expression(
+    eligible: CTE,
+    *,
+    as_of: datetime,
+    policy: FreshnessPolicy,
+) -> ColumnElement[str]:
+    """Build the SQL status expression from the same validated policy object."""
+
+    observed_at = eligible.c.last_observed_at
+    return case(
+        (observed_at.is_(None), literal(FreshnessStatus.UNKNOWN.value)),
+        (
+            observed_at >= as_of - policy.fresh_duration,
+            literal(FreshnessStatus.FRESH.value),
+        ),
+        (
+            observed_at >= as_of - policy.aging_duration,
+            literal(FreshnessStatus.AGING.value),
+        ),
+        (
+            observed_at >= as_of - policy.stale_duration,
+            literal(FreshnessStatus.STALE.value),
+        ),
+        else_=literal(FreshnessStatus.VERY_STALE.value),
+    )
+
+
+def followers_count_expression(dialect_name: str) -> ColumnElement[Any]:
+    """Return the shared strict non-coercing current follower projection."""
+
+    if dialect_name == "postgresql":
+        json_value = cast(InfluencerCurrentMetrics.metrics, JSONB)["followers_count"]
+        text_value = json_value.as_string()
+        valid_integer = and_(
+            func.jsonb_typeof(json_value) == "number",
+            text_value.op("~")(r"^(0|[1-9][0-9]*)$"),
+        )
+        return case(
+            (valid_integer, cast(text_value, Numeric())),
+            else_=None,
+        )
+    return case(
+        (
+            func.json_type(
+                InfluencerCurrentMetrics.metrics,
+                "$.followers_count",
+            )
+            == "integer",
+            func.json_extract(
+                InfluencerCurrentMetrics.metrics,
+                "$.followers_count",
+            ),
+        ),
+        else_=None,
+    )
+
+
+def _visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
+    """Backward-compatible private alias for the original Task 7 helper."""
+
+    return visible_influencer_criteria()
 
 
 def _literal_contains_pattern(value: str) -> str:
@@ -127,55 +294,7 @@ class InfluencerRepository:
 
     @staticmethod
     def _huitun_confirmed_lineage() -> Subquery:
-        """Aggregate successful Huitun Confirm evidence once per account.
-
-        Imported time deliberately includes the Legacy compatibility path.
-        Observed time additionally requires a Bulk occurrence carrying a
-        confirmed acquisition timestamp; committed time never fills it.
-        """
-
-        committed_actions = (
-            ImportRowAction.CREATE,
-            ImportRowAction.UPDATE,
-            ImportRowAction.NO_CHANGE,
-        )
-        reliable_observation = and_(
-            ImportJob.stored_file_id.is_(None),
-            ImportJobFile.source_acquired_at.is_not(None),
-            ImportJobFile.source_acquired_at_confirmation_required.is_(False),
-        )
-        return (
-            select(
-                ImportRow.matched_platform_account_id.label("platform_account_id"),
-                func.max(
-                    case(
-                        (reliable_observation, ImportJobFile.source_acquired_at),
-                        else_=None,
-                    )
-                ).label("last_observed_at"),
-                func.max(ImportRow.committed_at).label("last_imported_at"),
-            )
-            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
-            .join(
-                ImportJobFile,
-                and_(
-                    ImportJobFile.id == ImportRow.import_job_file_id,
-                    ImportJobFile.import_job_id == ImportRow.import_job_id,
-                ),
-            )
-            .where(
-                ImportRow.matched_platform_account_id.is_not(None),
-                ImportRow.committed_at.is_not(None),
-                ImportRow.committed_action.in_(committed_actions),
-                ImportJob.status == ImportJobStatus.COMPLETED,
-                ImportJob.confirmed_revision.is_not(None),
-                ImportRow.preview_revision == ImportJob.confirmed_revision,
-                ImportJob.source_type == ImportSourceType.MANUAL_HUITUN_EXPORT,
-                ImportJobFile.status == ImportJobFileStatus.READY,
-            )
-            .group_by(ImportRow.matched_platform_account_id)
-            .subquery("huitun_confirmed_lineage")
-        )
+        return huitun_confirmed_lineage()
 
     @classmethod
     def _eligible_huitun_freshness(cls) -> CTE:
@@ -186,45 +305,7 @@ class InfluencerRepository:
         Huitun Confirm lineage.
         """
 
-        lineage = cls._huitun_confirmed_lineage()
-        has_source_state = exists(
-            select(1)
-            .select_from(InfluencerSourceState)
-            .where(
-                InfluencerSourceState.platform_account_id == InfluencerPlatformAccount.id,
-                InfluencerSourceState.influencer_id == InfluencerPlatformAccount.influencer_id,
-                InfluencerSourceState.source == DataSource.HUITUN,
-            )
-        )
-        has_source_identity = exists(
-            select(1)
-            .select_from(PlatformAccountSourceIdentity)
-            .where(
-                PlatformAccountSourceIdentity.platform_account_id == InfluencerPlatformAccount.id,
-                PlatformAccountSourceIdentity.source == DataSource.HUITUN,
-            )
-        )
-        return (
-            select(
-                InfluencerPlatformAccount.id.label("platform_account_id"),
-                InfluencerPlatformAccount.influencer_id.label("influencer_id"),
-                lineage.c.last_observed_at,
-                lineage.c.last_imported_at,
-            )
-            .outerjoin(
-                lineage,
-                lineage.c.platform_account_id == InfluencerPlatformAccount.id,
-            )
-            .where(
-                InfluencerPlatformAccount.is_active.is_(True),
-                or_(
-                    lineage.c.platform_account_id.is_not(None),
-                    has_source_state,
-                    has_source_identity,
-                ),
-            )
-            .cte("eligible_huitun_freshness")
-        )
+        return eligible_huitun_freshness()
 
     @staticmethod
     def _freshness_status_expression(
@@ -233,23 +314,7 @@ class InfluencerRepository:
         as_of: datetime,
         policy: FreshnessPolicy,
     ) -> ColumnElement[str]:
-        observed_at = eligible.c.last_observed_at
-        return case(
-            (observed_at.is_(None), literal(FreshnessStatus.UNKNOWN.value)),
-            (
-                observed_at >= as_of - policy.fresh_duration,
-                literal(FreshnessStatus.FRESH.value),
-            ),
-            (
-                observed_at >= as_of - policy.aging_duration,
-                literal(FreshnessStatus.AGING.value),
-            ),
-            (
-                observed_at >= as_of - policy.stale_duration,
-                literal(FreshnessStatus.STALE.value),
-            ),
-            else_=literal(FreshnessStatus.VERY_STALE.value),
-        )
+        return freshness_status_expression(eligible, as_of=as_of, policy=policy)
 
     def _search_criterion(self, value: str) -> ColumnElement[bool]:
         pattern = _literal_contains_pattern(value)
@@ -295,17 +360,8 @@ class InfluencerRepository:
         followers_min: int | None,
         followers_max: int | None,
     ) -> ColumnElement[bool]:
+        comparable_value = followers_count_expression(self._dialect_name)
         if self._dialect_name == "postgresql":
-            json_value = cast(InfluencerCurrentMetrics.metrics, JSONB)["followers_count"]
-            text_value = json_value.as_string()
-            valid_integer = and_(
-                func.jsonb_typeof(json_value) == "number",
-                text_value.op("~")(r"^(0|[1-9][0-9]*)$"),
-            )
-            comparable_value = case(
-                (valid_integer, cast(text_value, Numeric())),
-                else_=None,
-            )
             lower_bound: Decimal | int | None = (
                 Decimal(followers_min) if followers_min is not None else None
             )
@@ -771,4 +827,9 @@ __all__ = [
     "InfluencerDetailRecord",
     "InfluencerListRecord",
     "InfluencerRepository",
+    "eligible_huitun_freshness",
+    "freshness_status_expression",
+    "followers_count_expression",
+    "huitun_confirmed_lineage",
+    "visible_influencer_criteria",
 ]

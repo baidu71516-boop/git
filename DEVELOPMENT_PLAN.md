@@ -68,7 +68,7 @@ V1 推荐 5 个阶段。
 
 旧的 Phase 2 Browser Automation 方案以及“SOP + Campaign + AI”排期已经人工废弃。Phase 2 的唯一权威范围见 `docs/PHASE_2_SCOPE.md`。
 
-当前开发检查点（2026-08-13）：Task 0–7 已完成本地实现与对应功能/性能门禁；Task 7 收口后只保留本地提交，不 push、merge、tag 或 deploy。Task 8 Refresh Queue、`0005` 与后续任务未开始，每个后续 Task 仍需独立人工授权。
+当前开发检查点（2026-08-13）：Task 0–8 已完成本地实现与对应功能/性能门禁；Task 8 收口后只保留本地提交，不 push、merge、tag 或 deploy。Task 9 Refresh Return 与后续任务未开始，每个后续 Task 仍需独立人工授权。
 
 目标：
 

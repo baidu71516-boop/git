@@ -6,7 +6,7 @@ Base：`/api/v1`
 
 - Phase 1A–1C 接口已实现；以 Router、Schema 和测试为运行事实源。
 - 当前开发分支已实现 Phase 2 Task 1–6 的 Bulk Import、Structured Screening、Unified Preview 与 Atomic Confirm/Recovery 接口；仍以 Router、Schema 和测试为运行事实源。
-- Task 7 Freshness 已作为现有 Influencer Read API 的 additive contract 实现；Task 8–9 Refresh Queue/Return 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称服务端当前可调用。
+- Task 7 Freshness 与 Task 8 Refresh Queue 已实现；Task 9 Refresh Return 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称服务端当前可调用。
 - Phase 2 详细语义以 `docs/PHASE_2_SCOPE.md` 为准。
 - 旧的 `/imports` 草案路径已废弃；正式导入资源前缀为 `/import-jobs`。
 
@@ -122,7 +122,7 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 
 `0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`、`source_acquired_at_confirmation_required=false`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
-`0004`/Task 2 阶段的 `POST /import-jobs/bulk` JSON 只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 部署后才 additive 接受可选 `refresh_queue_id`；Queue 必须属于目标 Department 且状态为 open/exported，completed/cancelled 返回 409。一个 Job 最多关联一个 Queue，但一个未完成 Queue 可以接收多个回流 Job。
+Task 8 的 `POST /import-jobs/bulk` JSON 仍只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 只先建立 nullable 同部门 FK；可选 `refresh_queue_id` 请求、状态校验与回流处理属于 Task 9，尚未实现。一个 Job 最多关联一个 Queue、一个未完成 Queue 可接收多个回流 Job仍是 Task 9 冻结契约。
 
 `POST /import-jobs/{id}/files` multipart 至少包含：
 
@@ -254,7 +254,7 @@ Legacy 没有可靠 acquisition time 时 `last_huitun_observed_at=null`。不得
 
 ---
 
-## 5. Refresh Queues（Phase 2 Planned）
+## 5. Refresh Queues（Phase 2 Task 8 Implemented）
 
 - `POST /refresh-queues`
 - `GET /refresh-queues`
@@ -276,7 +276,9 @@ Queue 由 Department 拥有；创建与导出要求非 Viewer、selected Operato
 }
 ```
 
-`department_id` 缺省为 Session Department；只有 `super_admin` 可显式指定其他部门，manager/operator 跨部门请求返回 403。`as_of`、`policy_version` 和 `criteria_snapshot` 由服务器生成，不接受客户端传入；MVP 也不接受任意 `criteria` JSON。三个 limit 必须为正整数，并满足 `requested_limit <= refresh_limit <= today_total_limit`。额度只是本 Queue 的用户输入参数，系统不宣称知道灰豚真实剩余额度。
+`department_id` 缺省为 Session Department；只有 `super_admin` 可显式指定其他部门，manager/operator 跨部门请求返回 403。`as_of`、`policy_version` 和 `criteria_snapshot` 由服务器生成，不接受客户端传入；MVP 也不接受任意 `criteria` JSON。三个 limit 必须为严格正整数，并满足 `requested_limit <= refresh_limit <= today_total_limit`，其中 `requested_limit <= 2000`。额度只是本 Queue 的用户输入参数，系统不宣称知道灰豚真实剩余额度。
+
+Task 8 固定 `policy_version=1`，priority tier 为整数 1–5，reason codes 为 `FRESHNESS_UNKNOWN / VERY_STALE / STALE / AGING / FOLLOWERS_MISSING`。Queue creation、priority、baseline 与 Identity snapshot 使用同一个 server UTC `as_of` 和同一 candidate statement；不接受 `priority_score`、自定义权重或客户端 reason。
 
 Queue/Item GET 使用 `offset=0`、`limit=50`、最大 200。Queue 按 `created_at DESC, id DESC`；Item 按创建时冻结字段 `priority_tier ASC, baseline_last_observed_at ASC NULLS FIRST, influencer_id ASC, platform_account_id ASC, id ASC`，不用 live Freshness 导致翻页漂移。
 
@@ -304,9 +306,12 @@ Phase 2 Task 1–6 已实现 AuditAction：
 - IMPORT_FILE_SOURCE_ACQUIRED_AT_UPDATED
 - COLLECTION_SCREENING_RULES_UPDATED
 
-Stale Confirm 复用现有 `IMPORT_PREVIEW_STALE`。下列仍属对应后续任务的 Planned AuditAction，当前不能据此宣称功能已实现：
+Stale Confirm 复用现有 `IMPORT_PREVIEW_STALE`。`IMPORT_FILE_REPLACED` 仍属后续 planned action：
 
 - IMPORT_FILE_REPLACED
+
+Task 8 已实现：
+
 - REFRESH_QUEUE_CREATED
 - REFRESH_QUEUE_EXPORTED
 - REFRESH_QUEUE_CANCELLED

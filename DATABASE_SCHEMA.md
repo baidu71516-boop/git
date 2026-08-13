@@ -16,8 +16,8 @@
 
 - Phase 1A–1C 使用 `Influencer + InfluencerPlatformAccount + SourceState/SourceIdentity + Contact + CurrentMetrics + MetricSnapshot`，不是把小红书/灰豚字段直接塞入 Influencer。
 - Import 使用 `StoredImportFile + CollectionJob + ImportJob + ImportRow`、持久化 Preview Revision 和人工 Confirm。
-- 当前 Phase 2 开发分支 Alembic head 是 `0004_phase2_bulk_import`；正式测试服务器仍停留在 `0003_phase1b`。
-- `0004` 尚未 merge/deploy，已授权直接完善 client-ID alias 与 occurrence-level acquisition confirmation 结构；不得为此创建新 Migration，`0005` 仍保留给 Refresh Queue。
+- 当前 Phase 2 开发分支 Alembic head 是 `0005_phase2_refresh_queue`；正式测试服务器仍停留在 `0003_phase1b`。
+- `0004` 保持冻结；Task 8 已以唯一新 Revision `0005` 实现 Refresh Queue Schema，未创建 `0006`。
 
 ---
 
@@ -168,7 +168,7 @@ Task 6 运行时状态约束：
 - 阈值来自 validated Settings，并按 UTC elapsed duration：fresh `<=7*24h`、aging `>7*24h且<=30*24h`、stale `>30*24h且<=90*24h`、very_stale `>90*24h`。
 - 不新增 FreshnessPolicy 表、Influencer.last_observed_at 或 Metrics 投影列。
 
-### A.6 `refresh_queues`（计划由 0005 新增）
+### A.6 `refresh_queues`（已由 0005 新增）
 
 - id UUID PK
 - department_id UUID FK
@@ -184,7 +184,7 @@ Task 6 运行时状态约束：
 
 Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQuotaPlan。`criteria_snapshot` 是服务器生成的 validated rule/limit 快照，MVP 不接受任意客户端 criteria JSON。
 
-### A.7 `refresh_queue_items`（计划由 0005 新增）
+### A.7 `refresh_queue_items`（已由 0005 新增）
 
 - id UUID PK
 - department_id UUID FK
@@ -204,6 +204,8 @@ Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQu
 - last_return_import_job_id UUID nullable
 - last_return_import_row_id UUID nullable
 - created_at / updated_at
+
+Task 8 按 frozen deterministic tier 实现，没有添加 weighted `priority_score`。`priority_reasons`、`identity_snapshot` 与 `criteria_snapshot` 均由 closed typed schema 生成；policy/schema version 为 1，Identity 仅含公开 locator 与冻结的单一 `followers_count` 标量。`baseline_source_updated_at` 取 Huitun SourceState，多个真实 external account ID 稳定选择非空字典序最小值。
 
 约束：
 

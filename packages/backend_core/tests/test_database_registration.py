@@ -49,6 +49,8 @@ expected = {{
     "influencer_contacts",
     "influencers",
     "operators",
+    "refresh_queue_items",
+    "refresh_queues",
     "stored_import_files",
 }}
 missing = expected.difference(Base.metadata.tables)

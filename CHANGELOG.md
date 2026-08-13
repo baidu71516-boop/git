@@ -4,6 +4,31 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 8 — Refresh Queue / Deterministic Export
+
+#### Added
+
+- 新增唯一 Migration `0005_phase2_refresh_queue`：Department-owned Queue、account/source Item、状态/时间/limit CHECK、同部门 active candidate partial unique、Queue/Account/Import 复合 FK、ImportJob nullable Queue FK 与 CREATED/EXPORTED/CANCELLED Audit enum；有 Queue/Item/Import reference 时危险 downgrade 安全拒绝。
+- 新增 `backend_core.refresh` domain/repository/service：复用 Task 7 Freshness policy 与 Huitun evidence projection，按 account+source 生成整数 tier 1–5、稳定 reason codes、closed criteria/identity snapshot、同一个 UTC `as_of` 和稳定排序。
+- 新增六个 `/api/v1/refresh-queues` endpoint：create/list/detail/paginated items/export/cancel；成功 CSV export 是 raw attachment，其余保持统一 Envelope。
+- 新增固定字段 CSV exporter，防 `= + - @ TAB CR` 公式注入并使用标准 quoting；只导出冻结的公开 Identity 和 strict followers scalar，不含 Contact、raw row 或完整 Metrics。
+- 新增 `make test-refresh-queue-postgres`，覆盖 0005 Migration、候选/priority/identity、同部门并发补位、跨部门复用、事务回滚、Freshness writer race 与 2000-item Service Gate。
+
+#### Reliability and Boundaries
+
+- 创建先获取 Department transaction advisory lock，再按 Department+Account+Source 稳定锁候选并重选补位；数据库 partial unique 是最终 backstop。Queue、Items 与 Audit 同事务提交，不使用 Redis 一致性锁。
+- Huitun eligibility 只能来自 SourceState、SourceIdentity 或成功 Huitun Confirm lineage；账号初始 source 不构成证据。Identity 使用 SQL/Python 共用的完整 Unicode whitespace 定义，多个非空 external ID 稳定选字典序最小值。
+- `baseline_last_observed_at` 与 Huitun SourceState `baseline_source_updated_at` 从同一 candidate statement 冻结；重复导出只读取 Item snapshot，不因 live name、followers 或 Freshness 改变。
+- Mutation 强制 Session、selected Operator、CSRF、Service RBAC 与最小 Audit；Viewer 只读，普通角色本部门 scope，super_admin 可指定 active target Department。GET 为 0 business Audit。
+- Task 8 只建立未来 fulfillment 所需 nullable Schema；没有开放 Queue-linked Import payload，也没有实现 Refresh Return、自动核销、Web、Browser Automation、灰豚登录或部署。
+
+#### Verification
+
+- Task 8 PostgreSQL 16 Gate 为 13 passed；2000-item 真实 Service create 为 16 SQL、4 DML、2 advisory-lock SQL、1.061177s，RSS high-water 145,342,464 bytes。
+- 所有既有显式 opt-in PG gates 实跑为 14 passed：Task 6 2000 Confirm measured P95=6.275921s/55 SQL/RSS 349,388,800 bytes，5000 Confirm=16.508568s/106 SQL/RSS 640,516,096 bytes；Task 4 5k/10k prefetch 与 Task 5 5k/10k Preview correctness/no-OOM 通过。
+- 显式 PostgreSQL 16 的最终 `make test` 通过：Backend/Integration/Smoke 526 passed、5 skipped（4 个 opt-in 已在独立命令实跑，仓库外真实附件未提供）；API 26、Worker 20、Web 29 passed。
+- `make lint`、`make compose-validate` 与真实 PostgreSQL 16 Alembic fresh/current/check 通过；唯一 head 为 `0005_phase2_refresh_queue`。
+
 ### Phase 2 Task 7 — Influencer Freshness Domain
 
 #### Added
