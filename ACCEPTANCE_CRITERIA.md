@@ -53,7 +53,7 @@
 
 ## 4. Phase 2 — 批量获取、智能筛选、数据新鲜度与定向刷新
 
-文档状态：Phase 2 设计仍按 Task 0 冻结。下方原有主题清单是完整 MVP release checklist；新增的 Task 6 小节单独记录当前 Atomic Confirm/Revalidation/Recovery 的任务级验收，不代表 Task 7+ 已实现或获得授权。
+文档状态：Phase 2 设计仍按 Task 0 冻结。下方原有主题清单是完整 MVP release checklist；Task 6/7 小节分别记录 Atomic Confirm 与 Freshness 的任务级验收，不代表 Task 8+ 已实现或获得授权。
 
 ### Task 0 设计冻结
 
@@ -114,11 +114,36 @@
 - [x] AC24：Alembic head/current 仍为 `0004_phase2_bulk_import`，真实 PG16 `alembic check` 返回 no new operations；Task 6 未创建 `0005`。
 - [x] AC25：本次 Task 6 未实现、提交、迁移或部署 Task 7+、Web UI 或 Server changes。
 
+### Task 7 — Freshness Domain / Influencer Read API
+
+当前证据口径：Task 7 的真实 PostgreSQL 16 Gate 为 3 passed；列表在 50/500/2000 Influencer 下均为固定 6 SQL（5 SELECT、0 DML），本轮 wall 分别为 0.012543s/0.016759s/0.019685s。2000 规模的全部既有筛选 + Freshness 组合路径仍为 6 SQL、0 DML、wall=0.079464s；对该生产 count statement 原样执行的 EXPLAIN 使用现有 `ix_import_rows_job_action`，execution=28.336ms，扫描 2000 行且未移除行，同时核验 frozen `ix_import_rows_account_committed_job` metadata。显式 PG16 全仓回归为 Backend/Integration/Smoke 420 passed、API 24、Worker 20、Web 29；只有仓库外真实附件及明确的 5k/10k opt-in capacity benchmark 按设计跳过。
+
+- [x] AC1：Freshness 正式粒度为 active `PlatformAccount + Source`，达人只做账号结果汇总。
+- [x] AC2：`last_huitun_observed_at` 只取 completed Confirm、成功 committed action、当前账号、included ready occurrence 与已确认 acquisition 的最大 `source_acquired_at`。
+- [x] AC3：Legacy occurrence 不伪造 observed time，保留 `last_huitun_observed_at=null`。
+- [x] AC4：`last_huitun_imported_at` 独立取真实 committed lineage，绝不填充 observed time。
+- [x] AC5：validated Settings 单点提供严格递增的 7/30/90 UTC elapsed 阈值，精确边界与最小微秒边界通过测试。
+- [x] AC6：无可靠 observation 的 eligible Huitun account 为 unknown；零 eligible account 汇总为 unknown 但 `requires_refresh=false`。
+- [x] AC7：多账号采用最差状态顺序，任一 unknown/stale/very_stale 均使达人 `requires_refresh=true`。
+- [x] AC8：inactive account 不参与 hydration、筛选或达人汇总；Influencer 继续只读 active 且 `deleted_at IS NULL`。
+- [x] AC9：Generic/Manual source lineage 不推进 Huitun Freshness；账号初始 `source` 列本身不作为 Huitun eligibility 证据。
+- [x] AC10：相同 Metrics 的新 observation 和 older Metrics + 新 acquisition 均可推进 Freshness，不依赖新 Snapshot 或 CurrentMetrics 覆盖。
+- [x] AC11：四个 additive filter 可与 q/tag/followers/owner/crm_stage/pagination 全部 AND 组合，并保持稳定排序。
+- [x] AC12：列表固定查询数，不按 Influencer/Account 逐条查询 Import lineage；50 条 portable Gate 与 50/500/2000 PG Gate 均无 N+1。
+- [x] AC13：真实 PostgreSQL 16 的 2000-scale Gate、索引 metadata 与 EXPLAIN 通过，无需新增 speculative index。
+- [x] AC14：list/detail/filter-options/snapshot GET 继续不写 business Audit；Freshness 只读查询为 0 DML。
+- [x] AC15：super_admin/manager/operator/viewer 均保持公司级读取；selected Operator 不改变 Freshness 可见性，未认证仍为 401。
+- [x] AC16：Phase 1A–1C list/detail/snapshot/filter-options 与 Viewer Contact masking 全部回归通过。
+- [x] AC17：Task 1–6 Upload/Parse/Preview/Confirm/Recovery 的显式 PostgreSQL 16 回归通过。
+- [x] AC18：`make test`、`make lint` 与 `make compose-validate` 通过；opt-in Freshness PG Gate 已实际运行。
+- [x] AC19：Alembic head/current 保持 `0004_phase2_bulk_import`，真实 PG16 `alembic check` 无 drift；Task 7 无 Migration。
+- [x] AC20：本次未实现 Task 8、Refresh Queue、`0005`、Refresh Return、Web UI、部署或其他禁区。
+
 ### Freshness 与 Refresh Queue
 
 - [ ] 新 Bulk Draft 上传文件的 `source_acquired_at` 默认服务器接受时间，可在首次 Preview 前人工修改，之后冻结；普通 server-default 上传为 confirmation required=false，历史 SHA + server-default 的新 occurrence 为 true，显式时间或 PATCH 确认后为 false；不得从文件名、mtime 或未知来源字段推断。Legacy 单文件兼容路径保持 NULL/legacy_unknown/false。
-- [ ] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
-- [ ] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
+- [x] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
+- [x] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
 - [ ] Refresh Queue 由 Department 拥有，候选来自公司级 Influencer Library；Owner 或导入部门不改变公司级读取语义。
 - [ ] Queue quota 仅为创建参数，系统不宣称知道灰豚真实剩余额度；不创建 DailyQuotaPlan。
 - [ ] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline 且 `source_acquired_at_confirmation_required=false` 时可 fulfill；baseline 为空或 confirmation required=true 均 unresolved。

@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
 from backend_core.auth.enums import Role
 from backend_core.auth.models import Operator
 from backend_core.auth.service import AuthContext
-from backend_core.influencers.enums import CRMStage
+from backend_core.influencers.enums import CRMStage, DataSource
+from backend_core.influencers.freshness import (
+    FreshnessEvaluation,
+    FreshnessPolicy,
+    InfluencerFreshnessSummary,
+)
 from backend_core.influencers.models import (
     InfluencerContact,
     InfluencerCurrentMetrics,
@@ -18,6 +25,7 @@ from backend_core.influencers.models import (
     PlatformAccountSourceIdentity,
 )
 from backend_core.influencers.repository import (
+    AccountSourceFreshnessRecord,
     InfluencerDetailRecord,
     InfluencerListRecord,
 )
@@ -72,7 +80,11 @@ class InfluencerPermissionError(InfluencerServiceError):
 
 class InfluencerReadRepository(Protocol):
     async def list_influencers(
-        self, query: InfluencerListQuery
+        self,
+        query: InfluencerListQuery,
+        *,
+        as_of: datetime | None = None,
+        policy: FreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]: ...
 
     async def get_influencer_detail(self, influencer_id: UUID) -> InfluencerDetailRecord | None: ...
@@ -102,6 +114,8 @@ def _source_tags(account: InfluencerPlatformAccount) -> list[str]:
 
 def _platform_account_summary(
     account: InfluencerPlatformAccount,
+    freshness: AccountSourceFreshnessRecord | None = None,
+    evaluation: FreshnessEvaluation | None = None,
 ) -> PlatformAccountSummary:
     return PlatformAccountSummary(
         id=account.id,
@@ -113,12 +127,21 @@ def _platform_account_summary(
         source=account.source,
         is_active=account.is_active,
         source_tags=_source_tags(account),
+        last_huitun_observed_at=(freshness.last_observed_at if freshness is not None else None),
+        last_huitun_imported_at=(freshness.last_imported_at if freshness is not None else None),
+        freshness_status=(evaluation.status if evaluation is not None else None),
+        freshness_age_days=(evaluation.age_days if evaluation is not None else None),
+        requires_refresh=(evaluation.requires_refresh if evaluation is not None else False),
     )
 
 
-def _platform_account_detail(account: InfluencerPlatformAccount) -> PlatformAccountDetail:
+def _platform_account_detail(
+    account: InfluencerPlatformAccount,
+    freshness: AccountSourceFreshnessRecord | None = None,
+    evaluation: FreshnessEvaluation | None = None,
+) -> PlatformAccountDetail:
     return PlatformAccountDetail(
-        **_platform_account_summary(account).model_dump(),
+        **_platform_account_summary(account, freshness, evaluation).model_dump(),
         bio=account.bio,
         gender=account.gender,
         region_raw=account.region_raw,
@@ -251,8 +274,16 @@ def _snapshot_item(snapshot: InfluencerMetricSnapshot) -> MetricSnapshotItem:
 class InfluencerService:
     """Authorize company-level reads and build the frozen public contracts."""
 
-    def __init__(self, repository: InfluencerReadRepository) -> None:
+    def __init__(
+        self,
+        repository: InfluencerReadRepository,
+        *,
+        freshness_policy: FreshnessPolicy | None = None,
+        now_factory: Callable[[], datetime] | None = None,
+    ) -> None:
         self.repository = repository
+        self.freshness_policy = freshness_policy or FreshnessPolicy()
+        self._now_factory = now_factory or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _require_read(context: AuthContext) -> None:
@@ -265,8 +296,13 @@ class InfluencerService:
         query: InfluencerListQuery,
     ) -> InfluencerListPage:
         self._require_read(context)
-        records, total = await self.repository.list_influencers(query)
-        items = [self._list_item(record, context.role) for record in records]
+        as_of = self._now_factory()
+        records, total = await self.repository.list_influencers(
+            query,
+            as_of=as_of,
+            policy=self.freshness_policy,
+        )
+        items = [self._list_item(record, context.role, as_of) for record in records]
         return InfluencerListPage(
             items=items,
             page=query.page,
@@ -284,6 +320,8 @@ class InfluencerService:
         if record is None:
             raise InfluencerNotFoundError
         influencer = record.influencer
+        as_of = self._now_factory()
+        freshness, summary = self._evaluate_freshness(record.huitun_freshness, as_of)
         return InfluencerDetail(
             id=influencer.id,
             display_name=influencer.display_name,
@@ -293,7 +331,12 @@ class InfluencerService:
             created_at=influencer.created_at,
             updated_at=influencer.updated_at,
             platform_accounts=[
-                _platform_account_detail(account) for account in record.platform_accounts
+                _platform_account_detail(
+                    account,
+                    freshness.get(account.id, (None, None))[0],
+                    freshness.get(account.id, (None, None))[1],
+                )
+                for account in record.platform_accounts
             ],
             contacts=[_contact_detail(contact, context.role) for contact in record.contacts],
             source_states=[_source_state_detail(state) for state in record.source_states],
@@ -301,6 +344,8 @@ class InfluencerService:
                 _source_identity_detail(identity) for identity in record.source_identities
             ],
             current_metrics=[_current_metrics_detail(metric) for metric in record.current_metrics],
+            freshness_status=summary.status,
+            requires_refresh=summary.requires_refresh,
         )
 
     async def list_metric_snapshots(
@@ -337,9 +382,38 @@ class InfluencerService:
             crm_stages=list(CRMStage),
         )
 
-    @staticmethod
-    def _list_item(record: InfluencerListRecord, role: Role) -> InfluencerListItem:
+    def _evaluate_freshness(
+        self,
+        records: tuple[AccountSourceFreshnessRecord, ...],
+        as_of: datetime,
+    ) -> tuple[
+        dict[
+            UUID,
+            tuple[AccountSourceFreshnessRecord | None, FreshnessEvaluation | None],
+        ],
+        InfluencerFreshnessSummary,
+    ]:
+        by_account: dict[
+            UUID,
+            tuple[AccountSourceFreshnessRecord | None, FreshnessEvaluation | None],
+        ] = {}
+        evaluations: list[FreshnessEvaluation] = []
+        for record in records:
+            if record.source is not DataSource.HUITUN:
+                continue
+            evaluation = self.freshness_policy.evaluate(record.last_observed_at, as_of)
+            by_account[record.platform_account_id] = (record, evaluation)
+            evaluations.append(evaluation)
+        return by_account, self.freshness_policy.aggregate(evaluations)
+
+    def _list_item(
+        self,
+        record: InfluencerListRecord,
+        role: Role,
+        as_of: datetime,
+    ) -> InfluencerListItem:
         influencer = record.influencer
+        freshness, summary = self._evaluate_freshness(record.huitun_freshness, as_of)
         return InfluencerListItem(
             id=influencer.id,
             display_name=influencer.display_name,
@@ -347,7 +421,12 @@ class InfluencerService:
             crm_stage=influencer.crm_stage,
             owner=_owner_summary(record.owner),
             platform_accounts=[
-                _platform_account_summary(account) for account in record.platform_accounts
+                _platform_account_summary(
+                    account,
+                    freshness.get(account.id, (None, None))[0],
+                    freshness.get(account.id, (None, None))[1],
+                )
+                for account in record.platform_accounts
             ],
             current_metrics=[_current_metrics_summary(metric) for metric in record.current_metrics],
             current_contacts=[
@@ -356,6 +435,8 @@ class InfluencerService:
             possible_duplicate_contact=any(
                 contact.possible_duplicate_contact for contact in record.current_contacts
             ),
+            freshness_status=summary.status,
+            requires_refresh=summary.requires_refresh,
             created_at=influencer.created_at,
             updated_at=influencer.updated_at,
         )

@@ -4,6 +4,28 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 7 — Influencer Freshness Domain
+
+#### Added
+
+- 新增 validated Freshness Settings 与唯一纯 domain policy：按 timezone-aware UTC elapsed duration 计算 `unknown/fresh/aging/stale/very_stale`、整日 age 和 account/influencer `requires_refresh`，精确覆盖 7/30/90 天及最小微秒边界。
+- 扩展现有 Influencer list/detail DTO 与 typed OpenAPI success envelope：每个 eligible active Huitun PlatformAccount 返回独立 `last_huitun_observed_at`、`last_huitun_imported_at`、Freshness status/age/refresh decision；达人级采用最差账号汇总，零 eligible account 为 unknown 但不可刷新。
+- 扩展现有 `GET /api/v1/influencers`，增加 `freshness_status`、`requires_refresh`、`last_huitun_observed_before/after` 四个严格单值筛选；支持时区校验、inclusive range、unknown null semantics、重复参数 422，并与既有筛选和稳定分页组合。
+- 新增显式 `make test-freshness-postgres` Gate，覆盖真实 Confirm lineage、Legacy fallback、source isolation、inactive/multi-account、same/older Metrics observation、query count、2k scale 与 EXPLAIN。
+
+#### Reliability and Boundaries
+
+- `last_huitun_observed_at` 只从 completed Huitun Confirm 的成功 committed row 与 ready included occurrence 的可靠 acquisition time 推导；`committed_at` 仅形成独立 imported fallback，Legacy 不伪造 observation。
+- Huitun eligibility 必须由 Huitun SourceState、SourceIdentity 或成功 Huitun Import lineage 证明；PlatformAccount 初始 `source` 字段和其他来源 observation 都不能刷新 Huitun Freshness。
+- list 使用集合聚合与当前页 batch hydration，无逐达人 lineage N+1；GET 保持公司级读取、四角色 RBAC、Viewer Contact masking 和 0 business Audit/DML。
+- 本 Task 不创建 Migration、FreshnessPolicy 表或冗余列；Alembic 保持 `0004_phase2_bulk_import`，未开始 Task 8、`0005`、Refresh Queue/Return、Web 或部署。
+
+#### Verification
+
+- Freshness PostgreSQL 16 Gate 为 3 passed：50/500/2000 Influencer 均固定 6 SQL（5 SELECT、0 DML），本轮 wall 分别为 0.012543s/0.016759s/0.019685s；detail 固定 7 SQL。2000 规模的全部既有筛选 + Freshness 组合路径仍为 6 SQL、0 DML、wall=0.079464s；生产 count statement EXPLAIN 使用现有 `ix_import_rows_job_action`，execution=28.336ms，扫描 2000 行且未移除行，并核验 frozen `ix_import_rows_account_committed_job` metadata。
+- 显式 PostgreSQL 16 的全仓 `make test` 通过：Backend/Integration/Smoke 420 passed、API 24、Worker 20、Web 29；仅仓库外真实附件与明确的 5k/10k opt-in capacity benchmark 按设计跳过。
+- `make lint`、`make compose-validate`、Alembic unique head/current/check 均通过；真实 PG16 `alembic check` 返回 no new upgrade operations。
+
 ### Phase 2 Task 6 — Atomic Bulk Confirm / Revalidation / Recovery
 
 #### Added

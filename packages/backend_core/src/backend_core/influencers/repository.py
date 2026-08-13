@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from sqlalchemy import (
     cast,
     exists,
     func,
+    literal,
     or_,
     select,
     true,
@@ -22,9 +24,18 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import CTE, Subquery
 
 from backend_core.auth.models import Operator
-from backend_core.influencers.enums import InfluencerStatus
+from backend_core.imports.enums import (
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportRowAction,
+    ImportSourceType,
+)
+from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
+from backend_core.influencers.enums import DataSource, InfluencerStatus
+from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -46,6 +57,7 @@ class InfluencerListRecord:
     platform_accounts: tuple[InfluencerPlatformAccount, ...]
     current_metrics: tuple[InfluencerCurrentMetrics, ...]
     current_contacts: tuple[InfluencerContact, ...]
+    huitun_freshness: tuple[AccountSourceFreshnessRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +71,17 @@ class InfluencerDetailRecord:
     source_states: tuple[InfluencerSourceState, ...]
     source_identities: tuple[PlatformAccountSourceIdentity, ...]
     current_metrics: tuple[InfluencerCurrentMetrics, ...]
+    huitun_freshness: tuple[AccountSourceFreshnessRecord, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class AccountSourceFreshnessRecord:
+    """Confirmed import lineage for one eligible account/source pair."""
+
+    platform_account_id: UUID
+    source: DataSource
+    last_observed_at: datetime | None
+    last_imported_at: datetime | None
 
 
 def _visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
@@ -75,6 +98,23 @@ def _literal_contains_pattern(value: str) -> str:
     return f"%{escaped}%"
 
 
+def _utc_database_timestamp(value: datetime | None) -> datetime | None:
+    """Normalize TIMESTAMPTZ values; SQLite drops offsets in portable tests."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _utc_as_of(value: datetime | None) -> datetime:
+    resolved = value or datetime.now(UTC)
+    if resolved.tzinfo is None or resolved.utcoffset() is None:
+        raise ValueError("freshness as_of must be timezone-aware")
+    return resolved.astimezone(UTC)
+
+
 class InfluencerRepository:
     """Explicit, fixed-query-count reads without ORM lazy relationships."""
 
@@ -84,6 +124,132 @@ class InfluencerRepository:
     @property
     def _dialect_name(self) -> str:
         return self.session.get_bind().dialect.name
+
+    @staticmethod
+    def _huitun_confirmed_lineage() -> Subquery:
+        """Aggregate successful Huitun Confirm evidence once per account.
+
+        Imported time deliberately includes the Legacy compatibility path.
+        Observed time additionally requires a Bulk occurrence carrying a
+        confirmed acquisition timestamp; committed time never fills it.
+        """
+
+        committed_actions = (
+            ImportRowAction.CREATE,
+            ImportRowAction.UPDATE,
+            ImportRowAction.NO_CHANGE,
+        )
+        reliable_observation = and_(
+            ImportJob.stored_file_id.is_(None),
+            ImportJobFile.source_acquired_at.is_not(None),
+            ImportJobFile.source_acquired_at_confirmation_required.is_(False),
+        )
+        return (
+            select(
+                ImportRow.matched_platform_account_id.label("platform_account_id"),
+                func.max(
+                    case(
+                        (reliable_observation, ImportJobFile.source_acquired_at),
+                        else_=None,
+                    )
+                ).label("last_observed_at"),
+                func.max(ImportRow.committed_at).label("last_imported_at"),
+            )
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .join(
+                ImportJobFile,
+                and_(
+                    ImportJobFile.id == ImportRow.import_job_file_id,
+                    ImportJobFile.import_job_id == ImportRow.import_job_id,
+                ),
+            )
+            .where(
+                ImportRow.matched_platform_account_id.is_not(None),
+                ImportRow.committed_at.is_not(None),
+                ImportRow.committed_action.in_(committed_actions),
+                ImportJob.status == ImportJobStatus.COMPLETED,
+                ImportJob.confirmed_revision.is_not(None),
+                ImportRow.preview_revision == ImportJob.confirmed_revision,
+                ImportJob.source_type == ImportSourceType.MANUAL_HUITUN_EXPORT,
+                ImportJobFile.status == ImportJobFileStatus.READY,
+            )
+            .group_by(ImportRow.matched_platform_account_id)
+            .subquery("huitun_confirmed_lineage")
+        )
+
+    @classmethod
+    def _eligible_huitun_freshness(cls) -> CTE:
+        """Return active accounts with real Huitun source evidence.
+
+        The account's creation source is not sufficient: an account is
+        eligible only through Huitun SourceState, SourceIdentity, or successful
+        Huitun Confirm lineage.
+        """
+
+        lineage = cls._huitun_confirmed_lineage()
+        has_source_state = exists(
+            select(1)
+            .select_from(InfluencerSourceState)
+            .where(
+                InfluencerSourceState.platform_account_id == InfluencerPlatformAccount.id,
+                InfluencerSourceState.influencer_id == InfluencerPlatformAccount.influencer_id,
+                InfluencerSourceState.source == DataSource.HUITUN,
+            )
+        )
+        has_source_identity = exists(
+            select(1)
+            .select_from(PlatformAccountSourceIdentity)
+            .where(
+                PlatformAccountSourceIdentity.platform_account_id == InfluencerPlatformAccount.id,
+                PlatformAccountSourceIdentity.source == DataSource.HUITUN,
+            )
+        )
+        return (
+            select(
+                InfluencerPlatformAccount.id.label("platform_account_id"),
+                InfluencerPlatformAccount.influencer_id.label("influencer_id"),
+                lineage.c.last_observed_at,
+                lineage.c.last_imported_at,
+            )
+            .outerjoin(
+                lineage,
+                lineage.c.platform_account_id == InfluencerPlatformAccount.id,
+            )
+            .where(
+                InfluencerPlatformAccount.is_active.is_(True),
+                or_(
+                    lineage.c.platform_account_id.is_not(None),
+                    has_source_state,
+                    has_source_identity,
+                ),
+            )
+            .cte("eligible_huitun_freshness")
+        )
+
+    @staticmethod
+    def _freshness_status_expression(
+        eligible: CTE,
+        *,
+        as_of: datetime,
+        policy: FreshnessPolicy,
+    ) -> ColumnElement[str]:
+        observed_at = eligible.c.last_observed_at
+        return case(
+            (observed_at.is_(None), literal(FreshnessStatus.UNKNOWN.value)),
+            (
+                observed_at >= as_of - policy.fresh_duration,
+                literal(FreshnessStatus.FRESH.value),
+            ),
+            (
+                observed_at >= as_of - policy.aging_duration,
+                literal(FreshnessStatus.AGING.value),
+            ),
+            (
+                observed_at >= as_of - policy.stale_duration,
+                literal(FreshnessStatus.STALE.value),
+            ),
+            else_=literal(FreshnessStatus.VERY_STALE.value),
+        )
 
     def _search_criterion(self, value: str) -> ColumnElement[bool]:
         pattern = _literal_contains_pattern(value)
@@ -203,7 +369,13 @@ class InfluencerRepository:
             .where(*conditions)
         )
 
-    def _list_criteria(self, query: InfluencerListQuery) -> list[ColumnElement[bool]]:
+    def _list_criteria(
+        self,
+        query: InfluencerListQuery,
+        *,
+        as_of: datetime,
+        policy: FreshnessPolicy,
+    ) -> list[ColumnElement[bool]]:
         criteria = list(_visible_influencer_criteria())
         if query.q is not None:
             criteria.append(self._search_criterion(query.q))
@@ -215,15 +387,78 @@ class InfluencerRepository:
             criteria.append(Influencer.owner_operator_id == query.owner_operator_id)
         if query.crm_stage is not None:
             criteria.append(Influencer.crm_stage == query.crm_stage)
+        if (
+            query.freshness_status is not None
+            or query.requires_refresh is not None
+            or query.last_huitun_observed_before is not None
+            or query.last_huitun_observed_after is not None
+        ):
+            eligible = self._eligible_huitun_freshness()
+            correlated = [eligible.c.influencer_id == Influencer.id]
+            if query.freshness_status is not None:
+                status_expression = self._freshness_status_expression(
+                    eligible,
+                    as_of=as_of,
+                    policy=policy,
+                )
+                criteria.append(
+                    exists(
+                        select(1)
+                        .select_from(eligible)
+                        .where(
+                            *correlated,
+                            status_expression == query.freshness_status.value,
+                        )
+                    )
+                )
+            if query.requires_refresh is not None:
+                needs_refresh = or_(
+                    eligible.c.last_observed_at.is_(None),
+                    eligible.c.last_observed_at < as_of - policy.aging_duration,
+                )
+                has_refresh_required_account = exists(
+                    select(1).select_from(eligible).where(*correlated, needs_refresh)
+                )
+                criteria.append(
+                    has_refresh_required_account
+                    if query.requires_refresh
+                    else ~has_refresh_required_account
+                )
+            if (
+                query.last_huitun_observed_before is not None
+                or query.last_huitun_observed_after is not None
+            ):
+                observed_criteria = [
+                    *correlated,
+                    eligible.c.last_observed_at.is_not(None),
+                ]
+                if query.last_huitun_observed_before is not None:
+                    observed_criteria.append(
+                        eligible.c.last_observed_at <= query.last_huitun_observed_before
+                    )
+                if query.last_huitun_observed_after is not None:
+                    observed_criteria.append(
+                        eligible.c.last_observed_at >= query.last_huitun_observed_after
+                    )
+                criteria.append(exists(select(1).select_from(eligible).where(*observed_criteria)))
         return criteria
 
     async def list_influencers(
         self,
         query: InfluencerListQuery,
+        *,
+        as_of: datetime | None = None,
+        policy: FreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]:
         """Return one aggregate per visible influencer and the exact subject total."""
 
-        criteria = self._list_criteria(query)
+        resolved_as_of = _utc_as_of(as_of)
+        resolved_policy = policy or FreshnessPolicy()
+        criteria = self._list_criteria(
+            query,
+            as_of=resolved_as_of,
+            policy=resolved_policy,
+        )
         total_value = await self.session.scalar(select(func.count(Influencer.id)).where(*criteria))
         total = int(total_value or 0)
         page_rows = (
@@ -288,18 +523,24 @@ class InfluencerRepository:
                 )
             )
         )
+        freshness_records = await self._list_huitun_freshness(influencer_ids)
 
         accounts_by_influencer: defaultdict[UUID, list[InfluencerPlatformAccount]] = defaultdict(
             list
         )
         metrics_by_influencer: defaultdict[UUID, list[InfluencerCurrentMetrics]] = defaultdict(list)
         contacts_by_influencer: defaultdict[UUID, list[InfluencerContact]] = defaultdict(list)
+        freshness_by_influencer: defaultdict[UUID, list[AccountSourceFreshnessRecord]] = (
+            defaultdict(list)
+        )
         for account in accounts:
             accounts_by_influencer[account.influencer_id].append(account)
         for metric in metrics:
             metrics_by_influencer[metric.influencer_id].append(metric)
         for contact in contacts:
             contacts_by_influencer[contact.influencer_id].append(contact)
+        for influencer_id, freshness in freshness_records:
+            freshness_by_influencer[influencer_id].append(freshness)
 
         return [
             InfluencerListRecord(
@@ -308,6 +549,7 @@ class InfluencerRepository:
                 platform_accounts=tuple(accounts_by_influencer[influencer.id]),
                 current_metrics=tuple(metrics_by_influencer[influencer.id]),
                 current_contacts=tuple(contacts_by_influencer[influencer.id]),
+                huitun_freshness=tuple(freshness_by_influencer[influencer.id]),
             )
             for influencer, owner in page_rows
         ], total
@@ -394,6 +636,7 @@ class InfluencerRepository:
             source_states = ()
             source_identities = ()
             current_metrics = ()
+        freshness_records = await self._list_huitun_freshness([influencer_id])
 
         return InfluencerDetailRecord(
             influencer=influencer,
@@ -403,7 +646,48 @@ class InfluencerRepository:
             source_states=source_states,
             source_identities=source_identities,
             current_metrics=current_metrics,
+            huitun_freshness=tuple(record for _, record in freshness_records),
         )
+
+    async def _list_huitun_freshness(
+        self,
+        influencer_ids: list[UUID],
+    ) -> list[tuple[UUID, AccountSourceFreshnessRecord]]:
+        """Batch-load eligible Huitun freshness without per-influencer queries."""
+
+        if not influencer_ids:
+            return []
+        eligible = self._eligible_huitun_freshness()
+        rows = (
+            await self.session.execute(
+                select(
+                    eligible.c.influencer_id,
+                    eligible.c.platform_account_id,
+                    eligible.c.last_observed_at,
+                    eligible.c.last_imported_at,
+                )
+                .select_from(eligible)
+                .where(eligible.c.influencer_id.in_(influencer_ids))
+                .order_by(eligible.c.influencer_id, eligible.c.platform_account_id)
+            )
+        ).all()
+        return [
+            (
+                influencer_id,
+                AccountSourceFreshnessRecord(
+                    platform_account_id=platform_account_id,
+                    source=DataSource.HUITUN,
+                    last_observed_at=_utc_database_timestamp(last_observed_at),
+                    last_imported_at=_utc_database_timestamp(last_imported_at),
+                ),
+            )
+            for (
+                influencer_id,
+                platform_account_id,
+                last_observed_at,
+                last_imported_at,
+            ) in rows
+        ]
 
     async def list_metric_snapshots(
         self,
@@ -483,6 +767,7 @@ class InfluencerRepository:
 
 
 __all__ = [
+    "AccountSourceFreshnessRecord",
     "InfluencerDetailRecord",
     "InfluencerListRecord",
     "InfluencerRepository",

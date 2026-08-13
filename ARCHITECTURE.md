@@ -4,7 +4,7 @@
 
 - Phase 1A–1C 的实际实现以 `packages/backend_core`、FastAPI/Worker 薄入口、`0001`–`0003_phase1b` migrations 和已通过测试为准。
 - Phase 2 的冻结目标以 `docs/PHASE_2_SCOPE.md` 为唯一详细设计；本文件只记录系统级架构边界。
-- 当前开发分支已经落地 Task 1–6；Task 6 只增加 Atomic Confirm、持久任务恢复和已冻结 Merge 的批量编排，不授权或提前实现 Task 7 Freshness/Refresh。
+- 当前开发分支已经落地 Task 1–7；Task 7 只增加从 confirmed lineage 推导的 Freshness Domain 和现有 Influencer GET 的 additive 字段/筛选，不授权或提前实现 Refresh Queue、Refresh Return 或 Web。
 - 旧的 Browser Automation 方案已废弃。当前 Phase 2 不包含灰豚登录、页面自动化或自动采集器。
 - 唯一共享 Python 业务核心是 `packages/backend_core`。`apps/api` 只负责 HTTP，`apps/worker` 只负责异步任务入口；禁止 API 内 Service、根目录 `services/` 或第二套 Matcher/Merge。
 
@@ -167,8 +167,8 @@ Phase 2 Bulk Batch 逐文件选择 Adapter，但通用 Planner/Matcher/Repositor
 
 ## 7. 数据库与 Migration 边界
 
-- 当前开发分支 Alembic head 为 `0004_phase2_bulk_import`；正式服务器仍停留在 `0003_phase1b`，Task 6 不执行部署。
-- `0004_phase2_bulk_import` 已包含 Bulk Import 与 durable `import_task_requests`；`0005_phase2_refresh_queue` 仍只保留给 Task 8，当前不存在且不得由 Task 6 创建。
+- 当前开发分支 Alembic head 为 `0004_phase2_bulk_import`；正式服务器仍停留在 `0003_phase1b`，Task 7 不执行部署。
+- `0004_phase2_bulk_import` 已包含 Bulk Import、durable `import_task_requests` 与 frozen Freshness 查询索引；Task 7 不创建 Migration。`0005_phase2_refresh_queue` 仍只保留给 Task 8，当前不存在且不得由 Task 7 创建。
 - 仍被 `ImportJobFile` lineage 引用的 `StoredImportFile` 不得被 cleaner 物理删除；`expires_at` 不是删除授权。
 - 含真实多文件或 Queue 数据时，破坏性 downgrade 必须安全拒绝并给出原因，不能静默丢失 lineage。
 

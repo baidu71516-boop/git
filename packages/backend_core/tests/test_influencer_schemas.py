@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -11,6 +11,7 @@ from backend_core.influencers.enums import (
     InfluencerStatus,
     Platform,
 )
+from backend_core.influencers.freshness import FreshnessStatus
 from backend_core.influencers.schemas import (
     CurrentContactSummary,
     CurrentMetricsDetail,
@@ -44,6 +45,10 @@ def test_list_query_defaults_and_exact_field_set() -> None:
         "followers_max",
         "owner_operator_id",
         "crm_stage",
+        "freshness_status",
+        "requires_refresh",
+        "last_huitun_observed_before",
+        "last_huitun_observed_after",
         "page",
         "page_size",
     }
@@ -114,6 +119,67 @@ def test_list_query_uses_real_uuid_and_crm_stage_enum() -> None:
         InfluencerListQuery(crm_stage="不存在的阶段")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("status", list(FreshnessStatus))
+def test_list_query_accepts_each_freshness_status(status: FreshnessStatus) -> None:
+    assert InfluencerListQuery(freshness_status=status).freshness_status is status
+    assert (
+        InfluencerListQuery.model_validate({"freshness_status": status.value}).freshness_status
+        is status
+    )
+
+    with pytest.raises(ValidationError):
+        InfluencerListQuery.model_validate({"freshness_status": "not-a-status"})
+
+
+def test_list_query_requires_exact_raw_boolean_spelling() -> None:
+    assert InfluencerListQuery(requires_refresh=True).requires_refresh is True
+    assert InfluencerListQuery(requires_refresh=False).requires_refresh is False
+    assert InfluencerListQuery.model_validate({"requires_refresh": "true"}).requires_refresh is True
+    assert (
+        InfluencerListQuery.model_validate({"requires_refresh": "false"}).requires_refresh is False
+    )
+
+    assert InfluencerListQuery.model_validate({"requires_refresh": None}).requires_refresh is None
+    for invalid in ("1", "0", "TRUE", "False", "yes", "on", " true", 1, 0):
+        with pytest.raises(ValidationError):
+            InfluencerListQuery.model_validate({"requires_refresh": invalid})
+
+
+def test_list_query_requires_aware_observed_range_and_normalizes_to_utc() -> None:
+    china_time = timezone(timedelta(hours=8))
+    query = InfluencerListQuery.model_validate(
+        {
+            "last_huitun_observed_after": datetime(2026, 8, 1, 12, 0, tzinfo=china_time),
+            "last_huitun_observed_before": "2026-08-02T12:00:00+08:00",
+        }
+    )
+
+    assert query.last_huitun_observed_after == datetime(2026, 8, 1, 4, 0, tzinfo=UTC)
+    assert query.last_huitun_observed_before == datetime(2026, 8, 2, 4, 0, tzinfo=UTC)
+    assert query.last_huitun_observed_after.tzinfo is UTC
+    assert query.last_huitun_observed_before.tzinfo is UTC
+
+    exact = datetime(2026, 8, 1, 4, 0, tzinfo=UTC)
+    equal_range = InfluencerListQuery(
+        last_huitun_observed_after=exact,
+        last_huitun_observed_before=exact,
+    )
+    assert equal_range.last_huitun_observed_after == equal_range.last_huitun_observed_before
+
+    for naive in (datetime(2026, 8, 1, 4, 0), "2026-08-01T04:00:00"):
+        with pytest.raises(ValidationError):
+            InfluencerListQuery.model_validate({"last_huitun_observed_after": naive})
+
+    with pytest.raises(ValidationError):
+        InfluencerListQuery.model_validate({"last_huitun_observed_after": "0"})
+
+    with pytest.raises(ValidationError):
+        InfluencerListQuery(
+            last_huitun_observed_after=datetime(2026, 8, 2, tzinfo=UTC),
+            last_huitun_observed_before=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize(
     "values",
     [
@@ -148,6 +214,8 @@ def test_list_output_expresses_nulls_empty_collections_and_zero_followers() -> N
     assert item.platform_accounts == []
     assert item.current_metrics == []
     assert item.current_contacts == []
+    assert item.freshness_status is FreshnessStatus.UNKNOWN
+    assert item.requires_refresh is False
 
     metric = CurrentMetricsSummary(
         platform_account_id=uuid4(),
@@ -179,6 +247,8 @@ def test_current_metrics_summary_requires_strict_nonnegative_integer(
 
 
 def test_platform_owner_and_contact_summaries_match_the_frozen_contract() -> None:
+    observed_at = datetime(2026, 8, 10, 3, 0, tzinfo=UTC)
+    imported_at = datetime(2026, 8, 10, 4, 0, tzinfo=UTC)
     owner = OwnerSummary(id=uuid4(), name="负责人", status=OperatorStatus.DISABLED)
     account = PlatformAccountSummary(
         id=uuid4(),
@@ -189,6 +259,11 @@ def test_platform_owner_and_contact_summaries_match_the_frozen_contract() -> Non
         profile_url=None,
         source=DataSource.HUITUN,
         is_active=True,
+        last_huitun_observed_at=observed_at,
+        last_huitun_imported_at=imported_at,
+        freshness_status=FreshnessStatus.FRESH,
+        freshness_age_days=0,
+        requires_refresh=False,
     )
     contact = CurrentContactSummary(
         id=uuid4(),
@@ -201,6 +276,20 @@ def test_platform_owner_and_contact_summaries_match_the_frozen_contract() -> Non
 
     assert owner.status is OperatorStatus.DISABLED
     assert account.source_tags == []
+    assert account.last_huitun_observed_at == observed_at
+    assert account.last_huitun_imported_at == imported_at
+    assert account.freshness_status is FreshnessStatus.FRESH
+    assert account.freshness_age_days == 0
+    assert account.requires_refresh is False
+    freshness_fields = {
+        "last_huitun_observed_at",
+        "last_huitun_imported_at",
+        "freshness_status",
+        "freshness_age_days",
+        "requires_refresh",
+    }
+    assert freshness_fields <= set(PlatformAccountSummary.model_fields)
+    assert freshness_fields <= set(PlatformAccountDetail.model_fields)
     assert contact.display_value == "***"
     assert "normalized_value" not in CurrentContactSummary.model_fields
 
@@ -211,6 +300,28 @@ def test_platform_owner_and_contact_summaries_match_the_frozen_contract() -> Non
                 "normalized_value": "sensitive@example.com",
             }
         )
+
+    non_eligible = PlatformAccountSummary(
+        id=uuid4(),
+        platform=Platform.XIAOHONGSHU,
+        platform_account_id=None,
+        account_name="非灰豚来源账号",
+        account_handle=None,
+        profile_url=None,
+        source=DataSource.MANUAL,
+        is_active=True,
+    )
+    assert non_eligible.last_huitun_observed_at is None
+    assert non_eligible.last_huitun_imported_at is None
+    assert non_eligible.freshness_status is None
+    assert non_eligible.freshness_age_days is None
+    assert non_eligible.requires_refresh is False
+
+    for invalid_age in (-1, True, 1.5, "1"):
+        with pytest.raises(ValidationError):
+            PlatformAccountSummary.model_validate(
+                {**account.model_dump(), "freshness_age_days": invalid_age}
+            )
 
 
 def test_metrics_preserve_recursive_json_types_and_missing_keys() -> None:
@@ -350,10 +461,14 @@ def test_detail_structurally_carries_only_frozen_sections() -> None:
         "source_states",
         "source_identities",
         "current_metrics",
+        "freshness_status",
+        "requires_refresh",
     }
     assert detail.platform_accounts[0].source_tags == ["动画"]
     assert detail.source_states[0].creator_tags == ["动画"]
     assert detail.current_metrics[0].metrics["followers_count"] == 0
+    assert detail.freshness_status is FreshnessStatus.UNKNOWN
+    assert detail.requires_refresh is False
 
     with pytest.raises(ValidationError):
         InfluencerDetail.model_validate({**detail.model_dump(), "ai_score": 99})

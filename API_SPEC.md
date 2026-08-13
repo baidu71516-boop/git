@@ -6,7 +6,7 @@ Base：`/api/v1`
 
 - Phase 1A–1C 接口已实现；以 Router、Schema 和测试为运行事实源。
 - 当前开发分支已实现 Phase 2 Task 1–6 的 Bulk Import、Structured Screening、Unified Preview 与 Atomic Confirm/Recovery 接口；仍以 Router、Schema 和测试为运行事实源。
-- Task 7 Freshness、Task 8–9 Refresh Queue/Return 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称服务端当前可调用。
+- Task 7 Freshness 已作为现有 Influencer Read API 的 additive contract 实现；Task 8–9 Refresh Queue/Return 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称服务端当前可调用。
 - Phase 2 详细语义以 `docs/PHASE_2_SCOPE.md` 为准。
 - 旧的 `/imports` 草案路径已废弃；正式导入资源前缀为 `/import-jobs`。
 
@@ -227,7 +227,7 @@ Task 6 Confirm/Recovery 契约：
 
 不得增加 Influencer POST/PUT/PATCH/DELETE 作为 Phase 2 范围。Influencer 继续公司级读取，不按 Owner、Import Department 或 Refresh Queue Department 分片。
 
-### Phase 2 Planned — Freshness additive fields
+### Phase 2 Task 7 Implemented — Freshness additive fields
 
 `GET /influencers` additive filters：
 
@@ -243,7 +243,14 @@ Task 6 Confirm/Recovery 契约：
 - freshness_status
 - freshness_age_days
 
+达人级 list/detail summary additive fields：
+
+- freshness_status
+- requires_refresh
+
 Legacy 没有可靠 acquisition time 时 `last_huitun_observed_at=null`。不得用 ImportRow.committed_at、Influencer.updated_at 或文件 mtime 伪造 observed time。
+
+筛选语义固定为：`freshness_status` 精确匹配任一 eligible active Huitun account/source；`requires_refresh` 精确匹配达人汇总布尔值；before/after 分别为 inclusive `<=`/`>=`，缺失 observation 不匹配日期范围。所有四个参数为单值，重复参数、无时区 datetime、非法布尔值或 after > before 均返回 422。四个正式角色继续进行公司级读取，GET 不写 business Audit。
 
 ---
 

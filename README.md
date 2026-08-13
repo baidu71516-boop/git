@@ -144,7 +144,7 @@ Preview Plan 持久化在 Import Row 中。Confirm 会重新运行相同 Planner
 
 Phase 1C 达人库只读接口：
 
-- `GET /api/v1/influencers`：一行一个 Influencer 的分页列表；搜索主体昵称和 active 平台账号名，并支持 `tag`、`followers_min`、`followers_max`、`owner_operator_id`、`crm_stage` 五个冻结筛选参数。
+- `GET /api/v1/influencers`：一行一个 Influencer 的分页列表；搜索主体昵称和 active 平台账号名，并支持既有筛选以及 `freshness_status`、`requires_refresh`、`last_huitun_observed_before/after`。响应按 active PlatformAccount 返回 Huitun observed/imported time、状态和 age，并提供达人级最差状态与 requires-refresh 汇总。
 - `GET /api/v1/influencers/filter-options`：读取当前可见数据实际使用的 Owner、Source Tag 与 CRM Stage 选项。
 - `GET /api/v1/influencers/{influencer_id}`：读取主体、active 平台账号、Contact、来源追溯和真实 Current Metrics。
 - `GET /api/v1/influencers/{influencer_id}/metric-snapshots`：按稳定顺序分页读取不可变指标历史。
@@ -156,6 +156,7 @@ Web 入口为 `/influencers`，详情路由为 `/influencers/{id}`。达人库�
 ```bash
 make lint              # Python/TypeScript lint、格式与类型检查
 make test              # Python 与 Web 单元测试
+make test-freshness-postgres # 显式 PG16 Freshness lineage/query/performance Gate
 make health            # 七服务状态、HTTP readiness、Celery ping
 make migrate           # 执行 Alembic migration
 make compose-validate  # 校验 Compose 配置

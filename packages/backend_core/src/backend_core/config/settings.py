@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     business_timezone: str = "Asia/Shanghai"
     api_prefix: str = "/api/v1"
+    freshness_fresh_days: int = Field(default=7, ge=0)
+    freshness_aging_days: int = Field(default=30, ge=0)
+    freshness_stale_days: int = Field(default=90, ge=0)
 
     session_cookie_name: str = "outreach_session"
     csrf_cookie_name: str = "outreach_csrf"
@@ -83,9 +86,14 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def require_production_master_key(self) -> "Settings":
+    def validate_runtime_invariants(self) -> "Settings":
         if self.app_env == "production" and self.app_master_key is None:
             raise ValueError("APP_MASTER_KEY is required in production")
+        if not (self.freshness_fresh_days < self.freshness_aging_days < self.freshness_stale_days):
+            raise ValueError(
+                "FRESHNESS_FRESH_DAYS, FRESHNESS_AGING_DAYS, and FRESHNESS_STALE_DAYS "
+                "must be strictly increasing"
+            )
         if self.import_task_heartbeat_seconds >= self.import_task_lease_seconds:
             raise ValueError(
                 "IMPORT_TASK_HEARTBEAT_SECONDS must be less than IMPORT_TASK_LEASE_SECONDS"

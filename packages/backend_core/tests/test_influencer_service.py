@@ -19,6 +19,7 @@ from backend_core.influencers.enums import (
     InfluencerStatus,
     Platform,
 )
+from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -29,6 +30,7 @@ from backend_core.influencers.models import (
     PlatformAccountSourceIdentity,
 )
 from backend_core.influencers.repository import (
+    AccountSourceFreshnessRecord,
     InfluencerDetailRecord,
     InfluencerListRecord,
 )
@@ -51,9 +53,13 @@ class FakeInfluencerRepository:
         self.calls: list[tuple[str, object]] = []
 
     async def list_influencers(
-        self, query: InfluencerListQuery
+        self,
+        query: InfluencerListQuery,
+        *,
+        as_of: datetime | None = None,
+        policy: FreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]:
-        self.calls.append(("list", query))
+        self.calls.append(("list", (query, as_of, policy)))
         return self.list_result
 
     async def get_influencer_detail(self, influencer_id: UUID) -> InfluencerDetailRecord | None:
@@ -154,9 +160,14 @@ def make_influencer(*, owner: Operator | None = None) -> Influencer:
     )
 
 
-def make_account(*, tags: list[str] | None = None) -> InfluencerPlatformAccount:
+def make_account(
+    *,
+    tags: list[str] | None = None,
+    account_id: UUID = ACCOUNT_ID,
+    source: DataSource = DataSource.HUITUN,
+) -> InfluencerPlatformAccount:
     return InfluencerPlatformAccount(
-        id=ACCOUNT_ID,
+        id=account_id,
         influencer_id=INFLUENCER_ID,
         platform=Platform.XIAOHONGSHU,
         platform_account_id="fixture-account",
@@ -164,7 +175,7 @@ def make_account(*, tags: list[str] | None = None) -> InfluencerPlatformAccount:
         account_handle="fixture-handle",
         profile_url="https://example.invalid/profile/fixture-account",
         normalized_profile_url="https://example.invalid/profile/fixture-account",
-        source=DataSource.HUITUN,
+        source=source,
         is_active=True,
         bio="公开简介",
         gender=None,
@@ -231,6 +242,7 @@ def make_list_record(
     metric_values: tuple[object, ...] = (100,),
     owner: Operator | None = None,
     duplicate: bool = False,
+    freshness: tuple[AccountSourceFreshnessRecord, ...] = (),
 ) -> InfluencerListRecord:
     contacts = tuple(
         make_contact(
@@ -247,6 +259,7 @@ def make_list_record(
         platform_accounts=(make_account(tags=["动画"]),),
         current_metrics=tuple(make_metrics(value) for value in metric_values),
         current_contacts=contacts,
+        huitun_freshness=freshness,
     )
 
 
@@ -255,6 +268,7 @@ def make_detail_record(
     contact_values: tuple[str, ...] = ("fixture@example.invalid",),
     creator_tags: object = ("动画", "电商"),
     owner: Operator | None = None,
+    freshness: tuple[AccountSourceFreshnessRecord, ...] = (),
 ) -> InfluencerDetailRecord:
     account = make_account(tags=["动画"])
     contacts = tuple(
@@ -308,6 +322,7 @@ def make_detail_record(
         source_states=(source_state,),
         source_identities=(source_identity,),
         current_metrics=(metric,),
+        huitun_freshness=freshness,
     )
 
 
@@ -326,6 +341,21 @@ def make_snapshot() -> InfluencerMetricSnapshot:
         snapshot_key=uuid4().hex * 2,
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def make_freshness(
+    *,
+    account_id: UUID = ACCOUNT_ID,
+    observed_at: datetime | None,
+    imported_at: datetime | None = NOW,
+    source: DataSource = DataSource.HUITUN,
+) -> AccountSourceFreshnessRecord:
+    return AccountSourceFreshnessRecord(
+        platform_account_id=account_id,
+        source=source,
+        last_observed_at=observed_at,
+        last_imported_at=imported_at,
     )
 
 
@@ -360,6 +390,85 @@ def test_all_roles_can_read_all_four_company_level_capabilities(role: Role) -> N
         ).total == 1
         options = await service.get_filter_options(context)
         assert options.tags == ["动画"]
+
+    asyncio.run(scenario())
+
+
+def test_list_and_detail_map_legacy_unknown_without_faking_observed_time() -> None:
+    async def scenario() -> None:
+        legacy = make_freshness(observed_at=None, imported_at=NOW - timedelta(days=1))
+        repository = FakeInfluencerRepository()
+        repository.list_result = ([make_list_record(freshness=(legacy,))], 1)
+        repository.detail_result = make_detail_record(freshness=(legacy,))
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+        context = make_context(Role.VIEWER)
+
+        item = (await service.list_influencers(context, InfluencerListQuery())).items[0]
+        detail = await service.get_influencer_detail(context, INFLUENCER_ID)
+        for output in (item, detail):
+            assert output.freshness_status is FreshnessStatus.UNKNOWN
+            assert output.requires_refresh is True
+            account = output.platform_accounts[0]
+            assert account.last_huitun_observed_at is None
+            assert account.last_huitun_imported_at == NOW - timedelta(days=1)
+            assert account.freshness_status is FreshnessStatus.UNKNOWN
+            assert account.freshness_age_days is None
+            assert account.requires_refresh is True
+
+    asyncio.run(scenario())
+
+
+def test_multi_account_summary_uses_worst_eligible_huitun_status() -> None:
+    async def scenario() -> None:
+        stale_account_id = UUID(int=ACCOUNT_ID.int + 10)
+        fresh = make_freshness(observed_at=NOW - timedelta(days=1))
+        stale = make_freshness(
+            account_id=stale_account_id,
+            observed_at=NOW - timedelta(days=31),
+        )
+        record = make_list_record(freshness=(fresh, stale))
+        record = InfluencerListRecord(
+            influencer=record.influencer,
+            owner=record.owner,
+            platform_accounts=(
+                record.platform_accounts[0],
+                make_account(account_id=stale_account_id, source=DataSource.GENERIC),
+            ),
+            current_metrics=record.current_metrics,
+            current_contacts=record.current_contacts,
+            huitun_freshness=record.huitun_freshness,
+        )
+        repository = FakeInfluencerRepository()
+        repository.list_result = ([record], 1)
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        item = (
+            await service.list_influencers(make_context(Role.OPERATOR), InfluencerListQuery())
+        ).items[0]
+        assert item.freshness_status is FreshnessStatus.STALE
+        assert item.requires_refresh is True
+        assert [account.freshness_status for account in item.platform_accounts] == [
+            FreshnessStatus.FRESH,
+            FreshnessStatus.STALE,
+        ]
+        assert item.platform_accounts[1].source is DataSource.GENERIC
+
+    asyncio.run(scenario())
+
+
+def test_zero_eligible_account_summary_is_unknown_but_not_refreshable() -> None:
+    async def scenario() -> None:
+        repository = FakeInfluencerRepository()
+        repository.list_result = ([make_list_record()], 1)
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        item = (
+            await service.list_influencers(make_context(Role.OPERATOR), InfluencerListQuery())
+        ).items[0]
+        assert item.freshness_status is FreshnessStatus.UNKNOWN
+        assert item.requires_refresh is False
+        assert item.platform_accounts[0].freshness_status is None
+        assert item.platform_accounts[0].requires_refresh is False
 
     asyncio.run(scenario())
 
@@ -630,6 +739,8 @@ def test_detail_maps_only_frozen_sections_and_preserves_metrics_document() -> No
             "source_states",
             "source_identities",
             "current_metrics",
+            "freshness_status",
+            "requires_refresh",
         }
         assert (
             detail.current_metrics[0].metrics == repository.detail_result.current_metrics[0].metrics
