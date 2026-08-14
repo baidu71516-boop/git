@@ -16,11 +16,20 @@ import {
 import { useState } from "react";
 
 import type {
+  FreshnessStatus,
   InfluencerFilterOptions,
   InfluencerListQueryParams,
 } from "../types";
 
 const { Text } = Typography;
+
+const freshnessOptions: Array<{ value: FreshnessStatus; label: string }> = [
+  { value: "fresh", label: "新鲜" },
+  { value: "aging", label: "较旧" },
+  { value: "stale", label: "陈旧" },
+  { value: "very_stale", label: "严重陈旧" },
+  { value: "unknown", label: "未知" },
+];
 
 type InfluencerFilterBarProps = {
   query: InfluencerListQueryParams;
@@ -172,7 +181,7 @@ export function InfluencerFilterBar({
         </Row>
 
         <Row gutter={[12, 12]} className="follower-filter-row">
-          <Col xs={24}>
+          <Col xs={24} lg={12}>
             <div className="influencer-follower-filter-compact">
               <span className="influencer-follower-filter-label">粉丝区间</span>
               <Input
@@ -205,6 +214,35 @@ export function InfluencerFilterBar({
                 应用
               </Button>
             </div>
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
+            <Select
+              aria-label="数据时效筛选"
+              className="full-width"
+              allowClear
+              placeholder="选择数据时效"
+              value={query.freshness_status as FreshnessStatus | undefined}
+              onChange={(value: FreshnessStatus | undefined) =>
+                onChange({ freshness_status: value })
+              }
+              options={freshnessOptions}
+            />
+          </Col>
+          <Col xs={24} sm={12} lg={6}>
+            <Select
+              aria-label="更新需求筛选"
+              className="full-width"
+              allowClear
+              placeholder="选择更新需求"
+              value={query.requires_refresh}
+              onChange={(value: string | undefined) =>
+                onChange({ requires_refresh: value })
+              }
+              options={[
+                { value: "true", label: "需要更新" },
+                { value: "false", label: "无需更新" },
+              ]}
+            />
           </Col>
         </Row>
 

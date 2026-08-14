@@ -17,6 +17,7 @@ import {
   platformLabel,
 } from "../formatters";
 import type { InfluencerListItem, PlatformAccountSummary } from "../types";
+import { FreshnessStatusText } from "./freshness-status-text";
 
 const { Text } = Typography;
 
@@ -172,6 +173,18 @@ const columns: ColumnsType<InfluencerListItem> = [
     },
   },
   {
+    title: "数据时效",
+    key: "freshness",
+    width: 112,
+    render: (_, item) => (
+      <FreshnessStatusText
+        status={item.freshness_status}
+        requiresRefresh={item.requires_refresh}
+        showRefreshNeed
+      />
+    ),
+  },
+  {
     title: "联系方式",
     key: "contacts",
     width: 124,
@@ -235,7 +248,7 @@ export function InfluencerTable({ items }: { items: InfluencerListItem[] }) {
       columns={columns}
       dataSource={items}
       pagination={false}
-      scroll={{ x: 1100 }}
+      scroll={{ x: 1212 }}
       onRow={() => ({ className: "influencer-row" })}
     />
   );

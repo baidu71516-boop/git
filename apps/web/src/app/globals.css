@@ -1281,6 +1281,43 @@ body {
   color: var(--app-text-secondary);
 }
 
+.freshness-status-stack {
+  display: inline-grid;
+  gap: 3px;
+  width: fit-content;
+}
+
+.freshness-status {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.freshness-status-fresh {
+  color: #31715d;
+}
+
+.freshness-status-aging {
+  color: #826b32;
+}
+
+.freshness-status-stale {
+  color: #9a6035;
+}
+
+.freshness-status-very_stale {
+  color: #9b4f4f;
+}
+
+.freshness-status-unknown,
+.freshness-status-unavailable {
+  color: var(--app-text-secondary);
+}
+
+.freshness-refresh-needed {
+  color: #8d5f3a;
+  font-size: 11px;
+}
+
 .influencer-view-link {
   color: var(--app-primary);
 }

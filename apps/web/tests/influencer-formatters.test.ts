@@ -5,6 +5,8 @@ import {
   crmStageDisplay,
   formatExactFollowers,
   formatFollowers,
+  freshnessDisplay,
+  freshnessExplanation,
   formatMetricsTimestamp,
   formatMetricsTimestampTooltip,
   latestMetricsTimestamp,
@@ -35,6 +37,26 @@ describe("influencer list formatters", () => {
       color: "orange",
     });
     expect(crmStageDisplay(undefined)).toEqual({ label: "未设置" });
+  });
+
+  it.each([
+    ["fresh", "新鲜"],
+    ["aging", "较旧"],
+    ["stale", "陈旧"],
+    ["very_stale", "严重陈旧"],
+    ["unknown", "未知"],
+  ] as const)("maps backend freshness status %s", (status, label) => {
+    expect(freshnessDisplay(status).label).toBe(label);
+  });
+
+  it("keeps both backend-defined unknown semantics as explanations", () => {
+    expect(freshnessExplanation("unknown", true)).toBe(
+      "暂无可靠采集记录，需要更新",
+    );
+    expect(freshnessExplanation("unknown", false)).toBe(
+      "暂无可参与灰豚更新的数据",
+    );
+    expect(freshnessExplanation("stale", true)).toBeNull();
   });
 
   it("selects the latest real metrics source timestamp", () => {

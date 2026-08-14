@@ -28,6 +28,8 @@ const listData = {
       display_name: "零粉多账号达人",
       status: "active",
       crm_stage: "高意向",
+      freshness_status: "stale",
+      requires_refresh: true,
       owner: {
         id: "00000000-0000-0000-0000-000000000001",
         name: "已停用负责人",
@@ -44,6 +46,11 @@ const listData = {
           source: "huitun",
           is_active: true,
           source_tags: ["动画", "二次元", "生活方式", "超长标签".repeat(41)],
+          last_huitun_observed_at: "2026-07-01T08:00:00Z",
+          last_huitun_imported_at: "2026-08-02T08:00:00Z",
+          freshness_status: "stale",
+          freshness_age_days: 41,
+          requires_refresh: true,
         },
         {
           id: "account-2",
@@ -55,6 +62,11 @@ const listData = {
           source: "huitun",
           is_active: true,
           source_tags: [],
+          last_huitun_observed_at: null,
+          last_huitun_imported_at: null,
+          freshness_status: "unknown",
+          freshness_age_days: null,
+          requires_refresh: true,
         },
       ],
       current_metrics: [
@@ -224,6 +236,8 @@ describe("InfluencerWorkspace", () => {
     expect(within(row).getByText("+2")).toBeInTheDocument();
     expect(within(row).getByText("20.66万")).toBeInTheDocument();
     expect(within(row).getByText("高意向")).toBeInTheDocument();
+    expect(within(row).getByText("陈旧")).toBeInTheDocument();
+    expect(within(row).getByText("需要更新")).toBeInTheDocument();
     expect(within(row).getByText("邮箱 · 手机")).toBeInTheDocument();
     expect(within(row).getByText("需核对")).toBeInTheDocument();
     expect(within(row).queryByText("***")).not.toBeInTheDocument();
@@ -247,7 +261,7 @@ describe("InfluencerWorkspace", () => {
 
   it("restores URL filters and resets the page for search and filters", async () => {
     navigation.search =
-      "q=%E6%97%A7%E6%90%9C%E7%B4%A2&tag=%E5%8A%A8%E7%94%BB&followers_min=0&followers_max=100&owner_operator_id=00000000-0000-0000-0000-000000000001&crm_stage=%E9%AB%98%E6%84%8F%E5%90%91&page=3&page_size=50";
+      "q=%E6%97%A7%E6%90%9C%E7%B4%A2&tag=%E5%8A%A8%E7%94%BB&followers_min=0&followers_max=100&owner_operator_id=00000000-0000-0000-0000-000000000001&crm_stage=%E9%AB%98%E6%84%8F%E5%90%91&freshness_status=very_stale&requires_refresh=false&page=3&page_size=50";
     mockApi();
     renderWorkspace();
 
@@ -255,6 +269,8 @@ describe("InfluencerWorkspace", () => {
     expect(search).toHaveValue("旧搜索");
     expect(search).toHaveAttribute("placeholder", "搜索达人昵称或账号名");
     expect(search).toHaveAttribute("maxlength", "160");
+    expect(screen.getByText("严重陈旧")).toBeInTheDocument();
+    expect(screen.getByText("无需更新")).toBeInTheDocument();
     fireEvent.change(search, { target: { value: "  新搜索  " } });
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
     expect(navigation.replace).toHaveBeenLastCalledWith(
@@ -384,6 +400,29 @@ describe("InfluencerWorkspace", () => {
         "/influencers?page_size=50&crm_stage=%E9%AB%98%E6%84%8F%E5%90%91",
       ),
     );
+  });
+
+  it("writes backend freshness filters to URL without adding a sort", async () => {
+    navigation.search =
+      "freshness_status=stale&requires_refresh=true&page=3&page_size=50";
+    mockApi();
+    renderWorkspace();
+    await screen.findByRole("link", { name: "零粉多账号达人" });
+
+    expect(screen.getAllByText("陈旧").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("需要更新").length).toBeGreaterThanOrEqual(2);
+    const search = screen.getByRole("textbox", { name: "昵称搜索" });
+    fireEvent.change(search, { target: { value: "国风" } });
+    fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?freshness_status=stale&requires_refresh=true&page_size=50&q=%E5%9B%BD%E9%A3%8E",
+    );
+
+    expect(navigation.replace.mock.calls.flat().join(" ")).not.toContain(
+      "sort",
+    );
+    expect(screen.queryByRole("button", { name: /刷新此达人/ })).toBeNull();
+    expect(screen.queryByText(/Refresh Queue|刷新队列/)).toBeNull();
   });
 
   it("shows empty account, metric, tag, and contact collections as missing", async () => {

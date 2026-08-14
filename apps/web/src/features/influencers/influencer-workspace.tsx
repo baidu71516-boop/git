@@ -101,7 +101,9 @@ export function InfluencerWorkspace() {
     query.followers_min ||
     query.followers_max ||
     query.owner_operator_id ||
-    query.crm_stage,
+    query.crm_stage ||
+    query.freshness_status ||
+    query.requires_refresh,
   );
 
   return (

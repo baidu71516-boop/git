@@ -12,6 +12,7 @@ import {
   platformLabel,
 } from "../formatters";
 import type { InfluencerDetail as InfluencerDetailData } from "../types";
+import { FreshnessStatusText } from "./freshness-status-text";
 
 const { Title } = Typography;
 
@@ -174,6 +175,36 @@ function PlatformMetricGrid({
             )}
           </span>
         </div>
+        {rowItem(
+          "数据时效",
+          <FreshnessStatusText
+            status={account.freshness_status}
+            requiresRefresh={account.requires_refresh}
+          />,
+          `${account.id}-freshness`,
+        )}
+        {rowItem(
+          "最近可靠采集时间",
+          formatDateForDetailField(account.last_huitun_observed_at),
+          `${account.id}-observed`,
+        )}
+        {rowItem(
+          "最近导入时间",
+          formatDateForDetailField(account.last_huitun_imported_at),
+          `${account.id}-imported`,
+        )}
+        {account.freshness_age_days !== null
+          ? rowItem(
+              "距可靠采集",
+              `${account.freshness_age_days} 天`,
+              `${account.id}-freshness-age`,
+            )
+          : null}
+        {rowItem(
+          "是否需要更新",
+          account.requires_refresh ? "是" : "否",
+          `${account.id}-requires-refresh`,
+        )}
         {rowItem(
           "指标更新时间",
           metric?.source_updated_at

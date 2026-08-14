@@ -28,6 +28,8 @@ const detailData = {
   display_name: "多账号达人",
   status: "active",
   crm_stage: "高意向",
+  freshness_status: "stale",
+  requires_refresh: true,
   owner: {
     id: "00000000-0000-0000-0000-000000000001",
     name: "已停用负责人",
@@ -46,6 +48,11 @@ const detailData = {
       source: "huitun",
       is_active: true,
       source_tags: ["美妆", "动画"],
+      last_huitun_observed_at: "2026-08-08T08:00:00Z",
+      last_huitun_imported_at: "2026-08-09T08:00:00Z",
+      freshness_status: "stale",
+      freshness_age_days: 3,
+      requires_refresh: true,
       bio: "真实简介 <b>不能作为 HTML</b>",
       gender: "女",
       region_raw: "上海",
@@ -64,6 +71,11 @@ const detailData = {
       source: "generic",
       is_active: true,
       source_tags: [],
+      last_huitun_observed_at: null,
+      last_huitun_imported_at: null,
+      freshness_status: null,
+      freshness_age_days: null,
+      requires_refresh: false,
       bio: null,
       gender: null,
       region_raw: null,
@@ -149,6 +161,14 @@ const detailData = {
       },
       last_import_job_id: "metric-job",
       last_import_row_id: "metric-row",
+    },
+    {
+      platform_account_id: "00000000-0000-0000-0000-000000000202",
+      source: "generic",
+      source_updated_at: "2026-01-01T08:00:00Z",
+      metrics: { followers_count: null },
+      last_import_job_id: "metric-generic-job",
+      last_import_row_id: "metric-generic-row",
     },
   ],
 };
@@ -322,6 +342,46 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       within(platformMetrics as HTMLElement).getAllByText("0").length,
     ).toBeGreaterThan(0);
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("数据时效"),
+    ).toHaveLength(2);
+    expect(
+      within(platformMetrics as HTMLElement).getByText("陈旧"),
+    ).toBeInTheDocument();
+    expect(
+      within(platformMetrics as HTMLElement).getByText("不适用"),
+    ).toBeInTheDocument();
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("最近可靠采集时间"),
+    ).toHaveLength(2);
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("最近导入时间"),
+    ).toHaveLength(2);
+    expect(
+      within(platformMetrics as HTMLElement).getByText("2026-08-08 16:00"),
+    ).toBeInTheDocument();
+    expect(
+      within(platformMetrics as HTMLElement).getByText("2026-08-09 16:00"),
+    ).toBeInTheDocument();
+    expect(
+      within(platformMetrics as HTMLElement).getByText("3 天"),
+    ).toBeInTheDocument();
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("是否需要更新"),
+    ).toHaveLength(2);
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("指标更新时间"),
+    ).toHaveLength(2);
+    const genericAccount = within(platformMetrics as HTMLElement)
+      .getByText("小红书 · 账号乙")
+      .closest(".detail-platform-item");
+    expect(genericAccount).not.toBeNull();
+    expect(
+      within(genericAccount as HTMLElement).getAllByText("—").length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(
+      within(genericAccount as HTMLElement).getByText("01-01"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("AI Score")).not.toBeInTheDocument();
     expect(screen.queryByText(/¥|RMB|人民币/)).not.toBeInTheDocument();
     expect(screen.queryByText("notes_count")).not.toBeInTheDocument();
@@ -350,6 +410,10 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       screen.queryByRole("button", { name: /编辑|修改|删除/ }),
     ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /刷新此达人|刷新/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Refresh Queue|刷新队列/)).not.toBeInTheDocument();
   });
 
   it("renders an unassigned Owner and missing fields without inventing values", async () => {

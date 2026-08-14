@@ -15,6 +15,8 @@ export const INFLUENCER_QUERY_PARAMETERS = [
   "followers_max",
   "owner_operator_id",
   "crm_stage",
+  "freshness_status",
+  "requires_refresh",
   "page",
   "page_size",
 ] as const satisfies readonly (keyof InfluencerListQueryParams)[];

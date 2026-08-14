@@ -78,6 +78,21 @@ describe("development influencer visual preview", () => {
     expect(
       items.some((item) => item.current_metrics[0]?.source_updated_at === null),
     ).toBe(true);
+    expect(new Set(items.map((item) => item.freshness_status))).toEqual(
+      new Set(["fresh", "aging", "stale", "very_stale", "unknown"]),
+    );
+    expect(
+      items.some(
+        (item) =>
+          item.freshness_status === "unknown" && item.requires_refresh,
+      ),
+    ).toBe(true);
+    expect(
+      items.some(
+        (item) =>
+          item.freshness_status === "unknown" && !item.requires_refresh,
+      ),
+    ).toBe(true);
   });
 
   it("reuses the UI-2 table and formatters without requesting any API", () => {
