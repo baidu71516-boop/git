@@ -188,42 +188,42 @@ export function InfluencerFilterBar({
 
         <Row gutter={[12, 12]} className="follower-filter-row">
           <Col xs={24} lg={8}>
-            <div className="influencer-follower-filter-compact">
+            <div className="influencer-follower-filter-group">
               <span className="influencer-follower-filter-label">粉丝区间</span>
-              <Input
-                aria-label="粉丝下限"
-                className="influencer-follower-input"
-                inputMode="numeric"
-                placeholder="最低粉丝"
-                value={minimumDraft}
-                onChange={(event) => setMinimumDraft(event.target.value)}
-              />
-              <span
-                className="influencer-follower-filter-separator"
-                aria-hidden="true"
-              >
-                —
-              </span>
-              <Input
-                aria-label="粉丝上限"
-                className="influencer-follower-input"
-                inputMode="numeric"
-                placeholder="最高粉丝"
-                value={maximumDraft}
-                onChange={(event) => setMaximumDraft(event.target.value)}
-              />
+              <div className="influencer-follower-filter-compact">
+                <Input
+                  aria-label="粉丝下限"
+                  className="influencer-follower-input"
+                  inputMode="numeric"
+                  placeholder="最低粉丝"
+                  value={minimumDraft}
+                  onChange={(event) => setMinimumDraft(event.target.value)}
+                />
+                <span
+                  className="influencer-follower-filter-separator"
+                  aria-hidden="true"
+                >
+                  —
+                </span>
+                <Input
+                  aria-label="粉丝上限"
+                  className="influencer-follower-input"
+                  inputMode="numeric"
+                  placeholder="最高粉丝"
+                  value={maximumDraft}
+                  onChange={(event) => setMaximumDraft(event.target.value)}
+                />
+                <Button
+                  className="influencer-follower-apply-button"
+                  aria-label="应用粉丝范围"
+                  onClick={applyFollowers}
+                >
+                  应用
+                </Button>
+              </div>
             </div>
           </Col>
-          <Col xs={24} sm={8} lg={4}>
-            <Button
-              className="influencer-follower-apply-button"
-              aria-label="应用粉丝范围"
-              onClick={applyFollowers}
-            >
-              应用
-            </Button>
-          </Col>
-          <Col xs={24} sm={8} lg={6}>
+          <Col xs={24} sm={8} lg={8}>
             <Select
               aria-label="数据时效筛选"
               className="full-width"
@@ -236,21 +236,26 @@ export function InfluencerFilterBar({
               options={freshnessOptions}
             />
           </Col>
-          <Col xs={24} sm={8} lg={6}>
-            <Select
-              aria-label="更新需求筛选"
-              className="full-width"
-              allowClear
-              placeholder="选择更新需求"
-              value={query.requires_refresh ?? "all"}
-              onChange={(value: string | undefined) =>
-                onChange({
-                  requires_refresh:
-                    value === "all" || value === undefined ? undefined : value,
-                })
-              }
-              options={refreshNeedOptions}
-            />
+          <Col xs={24} sm={8} lg={8}>
+            <div className="influencer-filter-with-label">
+              <span className="influencer-filter-inline-label">更新需求</span>
+              <Select
+                aria-label="更新需求筛选"
+                className="full-width"
+                allowClear
+                placeholder="全部"
+                value={query.requires_refresh ?? "all"}
+                onChange={(value: string | undefined) =>
+                  onChange({
+                    requires_refresh:
+                      value === "all" || value === undefined
+                        ? undefined
+                        : value,
+                  })
+                }
+                options={refreshNeedOptions}
+              />
+            </div>
           </Col>
         </Row>
 

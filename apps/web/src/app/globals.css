@@ -1146,9 +1146,16 @@ body {
 
 .influencer-follower-filter-compact {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.influencer-follower-filter-group {
+  display: grid;
+  gap: 6px;
 }
 
 .influencer-follower-filter-label {
@@ -1159,16 +1166,32 @@ body {
 
 .influencer-follower-filter-separator {
   color: var(--app-text-secondary);
+  white-space: nowrap;
 }
 
 .influencer-follower-input {
-  width: 132px;
+  width: 100%;
+  min-width: 74px;
 }
 
 .influencer-follower-apply-button {
   width: auto;
   min-width: 70px;
   height: 38px;
+  white-space: nowrap;
+  letter-spacing: normal;
+  word-spacing: normal;
+}
+
+.influencer-filter-with-label {
+  display: grid;
+  gap: 6px;
+}
+
+.influencer-filter-inline-label {
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.2;
 }
 
 .influencer-list-card .ant-card-body {
@@ -1905,6 +1928,7 @@ body {
   }
 
   .influencer-follower-filter-compact {
+    flex-wrap: nowrap;
     gap: 8px;
   }
 
@@ -1912,13 +1936,17 @@ body {
     width: 100%;
   }
 
+  .influencer-follower-filter-group {
+    gap: 8px;
+  }
+
   .influencer-follower-input {
-    width: 100%;
+    flex: 1;
+    min-width: 64px;
   }
 
   .influencer-follower-apply-button {
     min-width: 64px;
-    margin-left: auto;
   }
 }
 
