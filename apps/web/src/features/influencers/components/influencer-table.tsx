@@ -3,6 +3,7 @@
 import { Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
+import type { MouseEvent } from "react";
 
 import { AppTooltip } from "@/components/ui/app-tooltip";
 
@@ -31,6 +32,7 @@ function normalizeDetailHref(prefix: string): string {
 
 function buildColumns(
   detailHrefPrefix: string,
+  onOpenDetail?: (id: string) => void,
 ): ColumnsType<InfluencerListItem> {
   const detailBaseHref = normalizeDetailHref(detailHrefPrefix);
 
@@ -41,11 +43,19 @@ function buildColumns(
       width: 210,
       render: (_, item) => {
         const account = item.platform_accounts[0];
+        const openDetail = (event: MouseEvent<HTMLElement>) => {
+          if (!onOpenDetail) {
+            return;
+          }
+          event.preventDefault();
+          onOpenDetail(item.id);
+        };
         return (
           <div className="influencer-primary-cell">
             <Link
               className="influencer-name-link"
               href={`${detailBaseHref}/${item.id}`}
+              onClick={openDetail}
             >
               {item.display_name}
             </Link>
@@ -204,14 +214,24 @@ function buildColumns(
       key: "actions",
       width: 70,
       fixed: "right",
-      render: (_, item) => (
-        <Link
-          className="influencer-view-link"
-          href={`${detailBaseHref}/${item.id}`}
-        >
-          查看
-        </Link>
-      ),
+      render: (_, item) => {
+        const openDetail = (event: MouseEvent<HTMLElement>) => {
+          if (!onOpenDetail) {
+            return;
+          }
+          event.preventDefault();
+          onOpenDetail(item.id);
+        };
+        return (
+          <Link
+            className="influencer-view-link"
+            href={`${detailBaseHref}/${item.id}`}
+            onClick={openDetail}
+          >
+            查看
+          </Link>
+        );
+      },
     },
   ];
 }
@@ -260,11 +280,13 @@ function contactSummary(item: InfluencerListItem): string {
 export function InfluencerTable({
   items,
   detailHrefPrefix = "/influencers",
+  onOpenDetail,
 }: {
   items: InfluencerListItem[];
   detailHrefPrefix?: string;
+  onOpenDetail?: (id: string) => void;
 }) {
-  const columns = buildColumns(detailHrefPrefix);
+  const columns = buildColumns(detailHrefPrefix, onOpenDetail);
 
   return (
     <Table

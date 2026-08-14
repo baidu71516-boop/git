@@ -2,7 +2,7 @@
 
 import { Card, Space } from "antd";
 import { useRouter } from "next/navigation";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { PageHeader } from "@/components/ui/page-header";
@@ -22,7 +22,7 @@ const noOperation = () => undefined;
 
 export function InfluencerPreviewWorkspace({
   openInfluencerId,
-  closeDrawerHref = "/dev-ui-preview/influencers/drawer",
+  closeDrawerHref = "/dev-ui-preview/influencers",
 }: {
   openInfluencerId?: string;
   closeDrawerHref?: string;
@@ -45,7 +45,22 @@ export function InfluencerPreviewWorkspace({
     () => new Map(details.map((detail) => [detail.id, detail])),
     [details],
   );
-  const openDetail = openInfluencerId ? detailById.get(openInfluencerId) : null;
+  const [openId, setOpenId] = useState<string | undefined>(openInfluencerId);
+  const isLauncher = openInfluencerId !== undefined;
+  const activeOpenId = openId ?? openInfluencerId;
+
+  const openDetail = activeOpenId ? detailById.get(activeOpenId) : null;
+
+  const openDrawerFromList = (id: string) => {
+    setOpenId(id);
+  };
+
+  const closeDrawer = () => {
+    setOpenId(undefined);
+    if (isLauncher) {
+      void router.push(closeDrawerHref);
+    }
+  };
 
   return (
     <AppShell
@@ -83,6 +98,7 @@ export function InfluencerPreviewWorkspace({
             <InfluencerTable
               items={items}
               detailHrefPrefix="/dev-ui-preview/influencers/drawer"
+              onOpenDetail={openDrawerFromList}
             />
             <InfluencerPagination
               page={1}
@@ -96,9 +112,7 @@ export function InfluencerPreviewWorkspace({
           <DevInfluencerDetailDrawer
             detail={openDetail}
             open
-            onClose={() => {
-              void router.push(closeDrawerHref);
-            }}
+            onClose={closeDrawer}
           />
         ) : null}
       </section>
