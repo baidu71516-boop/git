@@ -173,9 +173,7 @@ function previewItem(input: PreviewItemInput): InfluencerListItem {
         source_tags: input.tags,
         last_huitun_observed_at: input.observedAt ?? null,
         last_huitun_imported_at: input.importedAt ?? null,
-        freshness_status: hasEligibleHuitunAccount
-          ? (input.freshnessStatus ?? "unknown")
-          : null,
+        freshness_status: input.freshnessStatus ?? "unknown",
         freshness_age_days: input.freshnessAgeDays ?? null,
         requires_refresh: input.requiresRefresh ?? false,
       },
@@ -222,9 +220,7 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     source_tags: input.tags,
     last_huitun_observed_at: input.observedAt ?? null,
     last_huitun_imported_at: input.importedAt ?? null,
-    freshness_status: hasEligibleHuitunAccount
-      ? (input.freshnessStatus ?? "unknown")
-      : null,
+    freshness_status: input.freshnessStatus ?? "unknown",
     freshness_age_days: input.freshnessAgeDays ?? null,
     requires_refresh: input.requiresRefresh ?? false,
     bio: null,
@@ -263,7 +259,9 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     contacts:
       input.contacts?.map((type) => previewDetailContact(input.row, type)) ??
       [],
-    source_states: hasEligibleHuitunAccount ? previewSourceStates(input.row) : [],
+    source_states: hasEligibleHuitunAccount
+      ? previewSourceStates(input.row)
+      : [],
     source_identities: hasEligibleHuitunAccount
       ? previewSourceIdentities(input.row)
       : [],

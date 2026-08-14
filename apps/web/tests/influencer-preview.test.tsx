@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import DevInfluencerDetailDrawerPreviewPage from "../src/app/dev-ui-preview/influencers/drawer/[id]/page";
@@ -83,14 +83,12 @@ describe("development influencer visual preview", () => {
     );
     expect(
       items.some(
-        (item) =>
-          item.freshness_status === "unknown" && item.requires_refresh,
+        (item) => item.freshness_status === "unknown" && item.requires_refresh,
       ),
     ).toBe(true);
     expect(
       items.some(
-        (item) =>
-          item.freshness_status === "unknown" && !item.requires_refresh,
+        (item) => item.freshness_status === "unknown" && !item.requires_refresh,
       ),
     ).toBe(true);
   });
@@ -128,6 +126,29 @@ describe("development influencer visual preview", () => {
     expect(
       within(nullRow as HTMLTableRowElement).getAllByText("—").length,
     ).toBeGreaterThan(0);
+
+    const unknownNeedRefreshLink = screen.getByRole("link", {
+      name: "小岛日记",
+    });
+    const unknownNotNeededLink = screen.getByRole("link", { name: "橘子宇宙" });
+    expect(unknownNeedRefreshLink).toHaveAttribute(
+      "href",
+      "/dev-ui-preview/influencers/drawer/00000000-0000-0000-0000-000000000005",
+    );
+    expect(unknownNotNeededLink).toHaveAttribute(
+      "href",
+      "/dev-ui-preview/influencers/drawer/00000000-0000-0000-0000-000000000006",
+    );
+    expect(
+      within(
+        unknownNeedRefreshLink.closest("tr") as HTMLTableRowElement,
+      ).getByText("暂无可靠采集记录"),
+    ).toBeInTheDocument();
+    expect(
+      within(
+        unknownNotNeededLink.closest("tr") as HTMLTableRowElement,
+      ).getByText("暂无可更新数据"),
+    ).toBeInTheDocument();
 
     expect(screen.getByText("今天", { exact: false })).toBeInTheDocument();
     expect(screen.getByText("昨天", { exact: false })).toBeInTheDocument();
@@ -195,5 +216,59 @@ describe("development influencer visual preview", () => {
     expect(screen.getByText("24.12万")).toBeInTheDocument();
     expect(screen.getByText("月面电台账号1")).toBeInTheDocument();
     expect(screen.getAllByText("粉丝").length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("supports both unknown freshness semantics in development detail preview", () => {
+    const needRefreshFixture = getInfluencerPreviewDetailById(
+      "00000000-0000-0000-0000-000000000005",
+    );
+    const noRefreshFixture = getInfluencerPreviewDetailById(
+      "00000000-0000-0000-0000-000000000006",
+    );
+
+    expect(needRefreshFixture).toBeTruthy();
+    expect(noRefreshFixture).toBeTruthy();
+
+    if (needRefreshFixture) {
+      render(
+        <DevInfluencerDetailDrawerPreview
+          detail={needRefreshFixture}
+          backHref="/dev-ui-preview/influencers/drawer"
+        />,
+      );
+
+      const needRefreshMetrics = screen
+        .getAllByRole("heading", { name: "平台与指标", level: 5 })[0]
+        .closest("section");
+      expect(needRefreshMetrics).not.toBeNull();
+      expect(
+        within(needRefreshMetrics as HTMLElement).getByText("未知"),
+      ).toBeInTheDocument();
+      expect(
+        within(needRefreshMetrics as HTMLElement).getByText("暂无可靠采集记录"),
+      ).toBeInTheDocument();
+      cleanup();
+    }
+
+    if (noRefreshFixture) {
+      render(
+        <DevInfluencerDetailDrawerPreview
+          detail={noRefreshFixture}
+          backHref="/dev-ui-preview/influencers/drawer"
+        />,
+      );
+
+      const noRefreshMetrics = screen
+        .getAllByRole("heading", { name: "平台与指标", level: 5 })[0]
+        .closest("section");
+      expect(noRefreshMetrics).not.toBeNull();
+      expect(
+        within(noRefreshMetrics as HTMLElement).getByText("未知"),
+      ).toBeInTheDocument();
+      expect(
+        within(noRefreshMetrics as HTMLElement).getByText("暂无可更新数据"),
+      ).toBeInTheDocument();
+      cleanup();
+    }
   });
 });

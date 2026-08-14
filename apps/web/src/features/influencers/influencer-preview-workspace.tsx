@@ -64,7 +64,10 @@ export function InfluencerPreviewWorkspace() {
 
         <Card variant="borderless" className="influencer-list-card">
           <Space orientation="vertical" size="middle" className="full-width">
-            <InfluencerTable items={items} />
+            <InfluencerTable
+              items={items}
+              detailHrefPrefix="/dev-ui-preview/influencers/drawer"
+            />
             <InfluencerPagination
               page={1}
               pageSize={50}

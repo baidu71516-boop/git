@@ -25,6 +25,197 @@ function unique(values: string[]): string[] {
   return Array.from(new Set(values));
 }
 
+function normalizeDetailHref(prefix: string): string {
+  return prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+}
+
+function buildColumns(
+  detailHrefPrefix: string,
+): ColumnsType<InfluencerListItem> {
+  const detailBaseHref = normalizeDetailHref(detailHrefPrefix);
+
+  return [
+    {
+      title: "达人",
+      key: "influencer",
+      width: 210,
+      render: (_, item) => {
+        const account = item.platform_accounts[0];
+        return (
+          <div className="influencer-primary-cell">
+            <Link
+              className="influencer-name-link"
+              href={`${detailBaseHref}/${item.id}`}
+            >
+              {item.display_name}
+            </Link>
+            {account ? (
+              <AppTooltip title={accountTooltip(item)}>
+                <Text className="influencer-account-line" type="secondary">
+                  {accountSummary(item, account)}
+                </Text>
+              </AppTooltip>
+            ) : (
+              <Text type="secondary">—</Text>
+            )}
+          </div>
+        );
+      },
+    },
+    {
+      title: "平台 / 标签",
+      key: "platform_tags",
+      width: 196,
+      render: (_, item) => {
+        const platforms = unique(
+          item.platform_accounts.map((account) => account.platform),
+        );
+        const tags = unique(
+          item.platform_accounts.flatMap((account) => account.source_tags),
+        );
+        const visibleTags = tags.slice(0, 2);
+        const hiddenCount = tags.length - visibleTags.length;
+        return (
+          <div className="influencer-platform-tags">
+            <div className="influencer-tag-line">
+              {platforms.length ? (
+                platforms.map((platform) => (
+                  <Tag
+                    className={`platform-tag ${platformTagClass(platform)}`}
+                    key={platform}
+                  >
+                    {platformLabel(platform)}
+                  </Tag>
+                ))
+              ) : (
+                <Text type="secondary">—</Text>
+              )}
+            </div>
+            <div className="influencer-tag-line">
+              {visibleTags.length ? (
+                <>
+                  {visibleTags.map((tag) => (
+                    <AppTooltip title={tag} key={tag}>
+                      <Tag className="source-tag">{tag}</Tag>
+                    </AppTooltip>
+                  ))}
+                  {hiddenCount > 0 ? (
+                    <AppTooltip title={tags.join("、")}>
+                      <Tag className="source-tag-more">+{hiddenCount}</Tag>
+                    </AppTooltip>
+                  ) : null}
+                </>
+              ) : (
+                <Text type="secondary">—</Text>
+              )}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      title: "粉丝",
+      key: "followers",
+      width: 100,
+      align: "right",
+      render: (_, item) => {
+        const value = followerValue(item);
+        return value === null ? (
+          "—"
+        ) : (
+          <AppTooltip title={formatExactFollowers(value)}>
+            <Text className="influencer-follower-value" strong>
+              {formatFollowers(value)}
+            </Text>
+          </AppTooltip>
+        );
+      },
+    },
+    {
+      title: "CRM 阶段",
+      key: "crm_stage",
+      width: 120,
+      render: (_, item) => {
+        const stage = crmStageDisplay(item.crm_stage);
+        return <Tag color={stage.color}>{stage.label}</Tag>;
+      },
+    },
+    {
+      title: "数据时效",
+      key: "freshness",
+      width: 136,
+      render: (_, item) => {
+        const account = item.platform_accounts[0];
+        return (
+          <FreshnessStatusText
+            status={account?.freshness_status ?? item.freshness_status}
+            requiresRefresh={account?.requires_refresh ?? item.requires_refresh}
+            freshnessAgeDays={account?.freshness_age_days ?? null}
+          />
+        );
+      },
+    },
+    {
+      title: "联系方式",
+      key: "contacts",
+      width: 124,
+      render: (_, item) => (
+        <div className="influencer-contact-cell">
+          <Text>{contactSummary(item)}</Text>
+          {item.possible_duplicate_contact ? (
+            <Text type="warning">需核对</Text>
+          ) : null}
+        </div>
+      ),
+    },
+    {
+      title: "负责人",
+      key: "owner",
+      width: 120,
+      render: (_, item) =>
+        item.owner ? (
+          <div className="influencer-owner-cell">
+            <Text>{item.owner.name}</Text>
+            {item.owner.status === "disabled" ? <Tag>已停用</Tag> : null}
+          </div>
+        ) : (
+          "未分配"
+        ),
+    },
+    {
+      title: "指标更新时间",
+      key: "metrics_updated_at",
+      width: 140,
+      render: (_, item) => {
+        const timestamp = latestMetricsTimestamp(item.current_metrics);
+        return timestamp ? (
+          <AppTooltip title={formatMetricsTimestampTooltip(timestamp)}>
+            <Text className="influencer-metrics-time">
+              {formatMetricsTimestamp(timestamp)}
+            </Text>
+          </AppTooltip>
+        ) : (
+          "—"
+        );
+      },
+    },
+    {
+      title: "操作",
+      key: "actions",
+      width: 70,
+      fixed: "right",
+      render: (_, item) => (
+        <Link
+          className="influencer-view-link"
+          href={`${detailBaseHref}/${item.id}`}
+        >
+          查看
+        </Link>
+      ),
+    },
+  ];
+}
+
 function accountSummary(
   item: InfluencerListItem,
   account: PlatformAccountSummary,
@@ -66,185 +257,15 @@ function contactSummary(item: InfluencerListItem): string {
   return types.length ? types.join(" · ") : "—";
 }
 
-const columns: ColumnsType<InfluencerListItem> = [
-  {
-    title: "达人",
-    key: "influencer",
-    width: 210,
-    render: (_, item) => {
-      const account = item.platform_accounts[0];
-      return (
-        <div className="influencer-primary-cell">
-          <Link
-            className="influencer-name-link"
-            href={`/influencers/${item.id}`}
-          >
-            {item.display_name}
-          </Link>
-          {account ? (
-            <AppTooltip title={accountTooltip(item)}>
-              <Text className="influencer-account-line" type="secondary">
-                {accountSummary(item, account)}
-              </Text>
-            </AppTooltip>
-          ) : (
-            <Text type="secondary">—</Text>
-          )}
-        </div>
-      );
-    },
-  },
-  {
-    title: "平台 / 标签",
-    key: "platform_tags",
-    width: 196,
-    render: (_, item) => {
-      const platforms = unique(
-        item.platform_accounts.map((account) => account.platform),
-      );
-      const tags = unique(
-        item.platform_accounts.flatMap((account) => account.source_tags),
-      );
-      const visibleTags = tags.slice(0, 2);
-      const hiddenCount = tags.length - visibleTags.length;
-      return (
-        <div className="influencer-platform-tags">
-          <div className="influencer-tag-line">
-            {platforms.length ? (
-              platforms.map((platform) => (
-                <Tag
-                  className={`platform-tag ${platformTagClass(platform)}`}
-                  key={platform}
-                >
-                  {platformLabel(platform)}
-                </Tag>
-              ))
-            ) : (
-              <Text type="secondary">—</Text>
-            )}
-          </div>
-          <div className="influencer-tag-line">
-            {visibleTags.length ? (
-              <>
-                {visibleTags.map((tag) => (
-                  <AppTooltip title={tag} key={tag}>
-                    <Tag className="source-tag">{tag}</Tag>
-                  </AppTooltip>
-                ))}
-                {hiddenCount > 0 ? (
-                  <AppTooltip title={tags.join("、")}>
-                    <Tag className="source-tag-more">+{hiddenCount}</Tag>
-                  </AppTooltip>
-                ) : null}
-              </>
-            ) : (
-              <Text type="secondary">—</Text>
-            )}
-          </div>
-        </div>
-      );
-    },
-  },
-  {
-    title: "粉丝",
-    key: "followers",
-    width: 100,
-    align: "right",
-    render: (_, item) => {
-      const value = followerValue(item);
-      return value === null ? (
-        "—"
-      ) : (
-        <AppTooltip title={formatExactFollowers(value)}>
-          <Text className="influencer-follower-value" strong>
-            {formatFollowers(value)}
-          </Text>
-        </AppTooltip>
-      );
-    },
-  },
-  {
-    title: "CRM 阶段",
-    key: "crm_stage",
-    width: 120,
-    render: (_, item) => {
-      const stage = crmStageDisplay(item.crm_stage);
-      return <Tag color={stage.color}>{stage.label}</Tag>;
-    },
-  },
-  {
-    title: "数据时效",
-    key: "freshness",
-    width: 136,
-    render: (_, item) => {
-      const account = item.platform_accounts[0];
-      return (
-        <FreshnessStatusText
-          status={account?.freshness_status ?? null}
-          requiresRefresh={account?.requires_refresh ?? item.requires_refresh}
-          freshnessAgeDays={account?.freshness_age_days ?? null}
-        />
-      );
-    },
-  },
-  {
-    title: "联系方式",
-    key: "contacts",
-    width: 124,
-    render: (_, item) => (
-      <div className="influencer-contact-cell">
-        <Text>{contactSummary(item)}</Text>
-        {item.possible_duplicate_contact ? (
-          <Text type="warning">需核对</Text>
-        ) : null}
-      </div>
-    ),
-  },
-  {
-    title: "负责人",
-    key: "owner",
-    width: 120,
-    render: (_, item) =>
-      item.owner ? (
-        <div className="influencer-owner-cell">
-          <Text>{item.owner.name}</Text>
-          {item.owner.status === "disabled" ? <Tag>已停用</Tag> : null}
-        </div>
-      ) : (
-        "未分配"
-      ),
-  },
-  {
-    title: "指标更新时间",
-    key: "metrics_updated_at",
-    width: 140,
-    render: (_, item) => {
-      const timestamp = latestMetricsTimestamp(item.current_metrics);
-      return timestamp ? (
-        <AppTooltip title={formatMetricsTimestampTooltip(timestamp)}>
-          <Text className="influencer-metrics-time">
-            {formatMetricsTimestamp(timestamp)}
-          </Text>
-        </AppTooltip>
-      ) : (
-        "—"
-      );
-    },
-  },
-  {
-    title: "操作",
-    key: "actions",
-    width: 70,
-    fixed: "right",
-    render: (_, item) => (
-      <Link className="influencer-view-link" href={`/influencers/${item.id}`}>
-        查看
-      </Link>
-    ),
-  },
-];
+export function InfluencerTable({
+  items,
+  detailHrefPrefix = "/influencers",
+}: {
+  items: InfluencerListItem[];
+  detailHrefPrefix?: string;
+}) {
+  const columns = buildColumns(detailHrefPrefix);
 
-export function InfluencerTable({ items }: { items: InfluencerListItem[] }) {
   return (
     <Table
       rowKey="id"
