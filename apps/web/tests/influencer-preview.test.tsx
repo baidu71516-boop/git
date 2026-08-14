@@ -112,7 +112,7 @@ describe("development influencer visual preview", () => {
     expect(screen.getByText("128.6万")).toBeInTheDocument();
 
     const zeroRow = screen
-      .getByRole("link", { name: "小岛日记" })
+      .getByRole("button", { name: "小岛日记" })
       .closest("tr");
     expect(zeroRow).not.toBeNull();
     expect(
@@ -120,25 +120,21 @@ describe("development influencer visual preview", () => {
     ).toBeInTheDocument();
 
     const nullRow = screen
-      .getByRole("link", { name: "橘子宇宙" })
+      .getByRole("button", { name: "橘子宇宙" })
       .closest("tr");
     expect(nullRow).not.toBeNull();
     expect(
       within(nullRow as HTMLTableRowElement).getAllByText("—").length,
     ).toBeGreaterThan(0);
 
-    const unknownNeedRefreshLink = screen.getByRole("link", {
+    const unknownNeedRefreshLink = screen.getByRole("button", {
       name: "小岛日记",
     });
-    const unknownNotNeededLink = screen.getByRole("link", { name: "橘子宇宙" });
-    expect(unknownNeedRefreshLink).toHaveAttribute(
-      "href",
-      "/dev-ui-preview/influencers/drawer/00000000-0000-0000-0000-000000000005",
-    );
-    expect(unknownNotNeededLink).toHaveAttribute(
-      "href",
-      "/dev-ui-preview/influencers/drawer/00000000-0000-0000-0000-000000000006",
-    );
+    const unknownNotNeededLink = screen.getByRole("button", {
+      name: "橘子宇宙",
+    });
+    expect(unknownNeedRefreshLink).not.toHaveAttribute("href");
+    expect(unknownNotNeededLink).not.toHaveAttribute("href");
     expect(
       within(
         unknownNeedRefreshLink.closest("tr") as HTMLTableRowElement,

@@ -3,7 +3,7 @@
 import { Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
-import type { MouseEvent } from "react";
+import type { ReactNode } from "react";
 
 import { AppTooltip } from "@/components/ui/app-tooltip";
 
@@ -35,6 +35,35 @@ function buildColumns(
   onOpenDetail?: (id: string) => void,
 ): ColumnsType<InfluencerListItem> {
   const detailBaseHref = normalizeDetailHref(detailHrefPrefix);
+  const renderLinkOrButton = ({
+    id,
+    className,
+    children,
+  }: {
+    id: string;
+    className: string;
+    children: ReactNode;
+  }) => {
+    if (onOpenDetail) {
+      return (
+        <button
+          type="button"
+          className={`${className} influencer-detail-trigger`}
+          onClick={() => {
+            onOpenDetail(id);
+          }}
+        >
+          {children}
+        </button>
+      );
+    }
+
+    return (
+      <Link className={className} href={`${detailBaseHref}/${id}`}>
+        {children}
+      </Link>
+    );
+  };
 
   return [
     {
@@ -43,22 +72,13 @@ function buildColumns(
       width: 210,
       render: (_, item) => {
         const account = item.platform_accounts[0];
-        const openDetail = (event: MouseEvent<HTMLElement>) => {
-          if (!onOpenDetail) {
-            return;
-          }
-          event.preventDefault();
-          onOpenDetail(item.id);
-        };
         return (
           <div className="influencer-primary-cell">
-            <Link
-              className="influencer-name-link"
-              href={`${detailBaseHref}/${item.id}`}
-              onClick={openDetail}
-            >
-              {item.display_name}
-            </Link>
+            {renderLinkOrButton({
+              id: item.id,
+              className: "influencer-name-link",
+              children: item.display_name,
+            })}
             {account ? (
               <AppTooltip title={accountTooltip(item)}>
                 <Text className="influencer-account-line" type="secondary">
@@ -215,22 +235,11 @@ function buildColumns(
       width: 70,
       fixed: "right",
       render: (_, item) => {
-        const openDetail = (event: MouseEvent<HTMLElement>) => {
-          if (!onOpenDetail) {
-            return;
-          }
-          event.preventDefault();
-          onOpenDetail(item.id);
-        };
-        return (
-          <Link
-            className="influencer-view-link"
-            href={`${detailBaseHref}/${item.id}`}
-            onClick={openDetail}
-          >
-            查看
-          </Link>
-        );
+        return renderLinkOrButton({
+          id: item.id,
+          className: "influencer-view-link",
+          children: "查看",
+        });
       },
     },
   ];
