@@ -68,6 +68,41 @@ export function BulkPreviewSummary({
   refreshReturn?: boolean;
 }) {
   const returnSummary = refreshReturn ? summary.refresh_return : undefined;
+  const returnSummaryItems = returnSummary
+    ? [
+        {
+          label: "预计有变更",
+          value: returnSummary.expected_fulfilled_changed_count,
+          tone: "is-primary",
+        },
+        {
+          label: "预计无变更",
+          value: returnSummary.expected_fulfilled_no_change_count,
+          tone: "is-success",
+        },
+        {
+          label: "回流数据已过期",
+          value: returnSummary.expected_stale_return_count,
+          tone: "is-warning",
+        },
+        {
+          label: "需要进一步确认",
+          value: returnSummary.expected_unresolved_count,
+          tone: "is-warning",
+        },
+        {
+          label: "已匹配回流",
+          value: returnSummary.queue_items_with_return_count,
+          tone: "is-neutral",
+        },
+        {
+          label: "缺少回流",
+          value: returnSummary.queue_items_without_return_count,
+          tone: "is-secondary",
+        },
+      ]
+    : null;
+
   return (
     <section
       className="bulk-preview-summary"
@@ -116,54 +151,15 @@ export function BulkPreviewSummary({
             <Text type="secondary">以下为确认导入前的预计回流结果</Text>
           </div>
           <dl className="bulk-preview-refresh-return-metrics">
-            <div>
-              <dt>已匹配回流</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.queue_items_with_return_count,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>缺少回流</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.queue_items_without_return_count,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>预计有变更</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.expected_fulfilled_changed_count,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>预计无变更</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.expected_fulfilled_no_change_count,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>回流数据已过期</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.expected_stale_return_count,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>需要进一步确认</dt>
-              <dd>
-                {integerFormatter.format(
-                  returnSummary.expected_unresolved_count,
-                )}
-              </dd>
-            </div>
+            {returnSummaryItems?.map((item) => (
+              <div
+                className={`bulk-preview-refresh-return-metric ${item.tone}`}
+                key={item.label}
+              >
+                <dt>{item.label}</dt>
+                <dd>{integerFormatter.format(item.value)}</dd>
+              </div>
+            ))}
           </dl>
         </section>
       ) : null}

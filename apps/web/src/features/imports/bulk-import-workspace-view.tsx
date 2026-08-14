@@ -39,12 +39,22 @@ function RefreshReturnContextBand({
   const actions = (
     <Space wrap>
       {context.showViewLink ? (
-        <Button href={`/refresh-queues/${encodeURIComponent(context.queueId)}`}>
+        <Button
+          className="refresh-return-context-action"
+          type="default"
+          href={`/refresh-queues/${encodeURIComponent(context.queueId)}`}
+        >
           查看更新名单
         </Button>
       ) : null}
       {context.canExit ? (
-        <Button onClick={context.onExit}>退出回流模式</Button>
+        <Button
+          className="refresh-return-context-action"
+          type="text"
+          onClick={context.onExit}
+        >
+          退出回流模式
+        </Button>
       ) : null}
     </Space>
   );

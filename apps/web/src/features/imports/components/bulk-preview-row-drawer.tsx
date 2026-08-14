@@ -13,8 +13,24 @@ const { Text, Title } = Typography;
 function tagColor(tone: string): string | undefined {
   if (tone === "success") return "success";
   if (tone === "warning") return "warning";
-  if (tone === "danger") return "error";
-  if (tone === "processing") return "processing";
+  return undefined;
+}
+
+function refreshReturnTagClass(presentation: { badgeTone?: string }): string {
+  return presentation.badgeTone ? `is-${presentation.badgeTone}` : "is-neutral";
+}
+
+function refreshReturnTagColor(presentation: {
+  tone: string;
+  badgeTone?: string;
+}): string | undefined {
+  if (presentation.badgeTone === "expected-change") return "blue";
+  if (presentation.badgeTone === "expected-no-change") return "success";
+  if (
+    presentation.badgeTone === "stale" ||
+    presentation.badgeTone === "unresolved"
+  )
+    return "warning";
   return undefined;
 }
 
@@ -229,14 +245,26 @@ export function BulkPreviewRowDrawer({
               <div>
                 <dt>回流预览结果</dt>
                 <dd>
-                  <Tag color={tagColor(refreshPresentation.tone)}>
+                  <Tag
+                    className={`bulk-preview-refresh-return-tag ${refreshReturnTagClass(
+                      refreshPresentation,
+                    )}`}
+                    color={refreshReturnTagColor(refreshPresentation)}
+                  >
                     {refreshPresentation.label}
                   </Tag>
                 </dd>
               </div>
               <div>
                 <dt>回流判断原因</dt>
-                <dd>{refreshReturnReasonLabel(refreshEvidence.reason)}</dd>
+                <dd>
+                  <Text
+                    type="secondary"
+                    className="bulk-preview-refresh-return-reason"
+                  >
+                    {refreshReturnReasonLabel(refreshEvidence.reason)}
+                  </Text>
+                </dd>
               </div>
               {file?.source_acquired_at ? (
                 <div>
@@ -246,7 +274,11 @@ export function BulkPreviewRowDrawer({
               ) : null}
               <div>
                 <dt>是否为本次有效回流行</dt>
-                <dd>{refreshEvidence.is_last_return_claimant ? "是" : "否"}</dd>
+                <dd>
+                  <Text className="bulk-preview-refresh-return-reason">
+                    {refreshEvidence.is_last_return_claimant ? "是" : "否"}
+                  </Text>
+                </dd>
               </div>
             </dl>
             {refreshPresentation.explanation ? (

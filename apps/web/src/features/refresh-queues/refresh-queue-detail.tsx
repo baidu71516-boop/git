@@ -44,12 +44,15 @@ const { Text, Title } = Typography;
 export function RefreshQueueReturnButton({
   queueId,
   hasPriorReturn,
+  emphasize,
 }: {
   queueId: string;
   hasPriorReturn: boolean;
+  emphasize: boolean;
 }) {
   return (
     <Button
+      type={emphasize ? "primary" : "default"}
       href={`/?workspace=bulk&refresh_queue_id=${encodeURIComponent(queueId)}`}
       icon={<ImportOutlined aria-hidden="true" />}
     >
@@ -164,11 +167,12 @@ export function RefreshQueueDetail({
                 <RefreshQueueReturnButton
                   queueId={queueId}
                   hasPriorReturn={hasPriorReturn}
+                  emphasize={canProcessReturn}
                 />
               ) : null}
               {canExport ? (
                 <Button
-                  type="primary"
+                  type={canProcessReturn ? "default" : "primary"}
                   icon={<DownloadOutlined aria-hidden="true" />}
                   loading={exportMutation.isPending}
                   onClick={() => void handleExport()}

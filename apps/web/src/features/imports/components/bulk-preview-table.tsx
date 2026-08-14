@@ -54,12 +54,22 @@ function screeningTagColor(tone: string): string | undefined {
   return undefined;
 }
 
-function refreshReturnTagColor(tone: string): string | undefined {
-  if (tone === "success") return "success";
-  if (tone === "warning") return "warning";
-  if (tone === "danger") return "error";
-  if (tone === "processing") return "processing";
+function refreshReturnTagColor(presentation: {
+  tone: string;
+  badgeTone?: string;
+}): string | undefined {
+  if (presentation.badgeTone === "expected-change") return "blue";
+  if (presentation.badgeTone === "expected-no-change") return "success";
+  if (
+    presentation.badgeTone === "stale" ||
+    presentation.badgeTone === "unresolved"
+  )
+    return "warning";
   return undefined;
+}
+
+function refreshReturnTagClass(presentation: { badgeTone?: string }): string {
+  return presentation.badgeTone ? `is-${presentation.badgeTone}` : "is-neutral";
 }
 
 function categoryCount(
@@ -229,7 +239,12 @@ export function BulkPreviewTable({
           row.merge_plan?.refresh_return,
         );
         return presentation ? (
-          <Tag color={refreshReturnTagColor(presentation.tone)}>
+          <Tag
+            className={`bulk-preview-refresh-return-badge ${refreshReturnTagClass(
+              presentation,
+            )}`}
+            color={refreshReturnTagColor(presentation)}
+          >
             {presentation.label}
           </Tag>
         ) : (

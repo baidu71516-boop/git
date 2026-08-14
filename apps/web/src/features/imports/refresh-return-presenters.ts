@@ -8,6 +8,14 @@ export type RefreshReturnPresentation = {
   label: string;
   tone: "default" | "success" | "warning" | "danger" | "processing";
   explanation: string | null;
+  badgeTone?:
+    | "expected-change"
+    | "expected-no-change"
+    | "stale"
+    | "unresolved"
+    | "pending"
+    | "neutral"
+    | "outside-queue";
 };
 
 const reasonLabels: Record<RefreshReturnReason, string> = {
@@ -36,28 +44,33 @@ const expectedStatusPresentations: Record<
   fulfilled_changed: {
     label: "预计有变更",
     tone: "success",
+    badgeTone: "expected-change",
     explanation: null,
   },
   fulfilled_no_change: {
     label: "预计无变更",
     tone: "success",
+    badgeTone: "expected-no-change",
     explanation: null,
   },
   stale_return: {
     label: "回流数据已过期",
-    tone: "danger",
+    tone: "warning",
+    badgeTone: "stale",
     explanation:
       "本次数据可以继续参与正常导入，但不能完成对应更新名单条目。需要以后重新取得更新的数据再回流。",
   },
   unresolved: {
     label: "需要进一步确认",
     tone: "warning",
+    badgeTone: "unresolved",
     explanation:
       "本次导入可以继续，但该名单条目不会完成。需要后续提交更可靠的新回流数据。",
   },
   cancelled: {
     label: "已有最终回流结果",
     tone: "default",
+    badgeTone: "neutral",
     explanation: null,
   },
 };
@@ -74,6 +87,7 @@ export function presentRefreshReturnEvidence(
     return {
       label: "尚未形成回流结果",
       tone: "default",
+      badgeTone: "pending",
       explanation: null,
     };
   }
@@ -81,6 +95,7 @@ export function presentRefreshReturnEvidence(
     return {
       label: "不属于当前更新名单",
       tone: "default",
+      badgeTone: "outside-queue",
       explanation: null,
     };
   }
@@ -88,6 +103,7 @@ export function presentRefreshReturnEvidence(
     return {
       label: "已有最终回流结果",
       tone: "default",
+      badgeTone: "neutral",
       explanation: null,
     };
   }

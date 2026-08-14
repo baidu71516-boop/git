@@ -267,12 +267,18 @@ export function BulkPreviewWorkspaceView({
       <Space wrap>
         {job.refresh_queue_id ? (
           <Button
+            type="primary"
             href={`/refresh-queues/${encodeURIComponent(job.refresh_queue_id)}`}
           >
             查看更新名单
           </Button>
         ) : null}
-        <Button href="/influencers">查看达人库</Button>
+        <Button
+          type={job.refresh_queue_id ? "default" : "primary"}
+          href="/influencers"
+        >
+          查看达人库
+        </Button>
       </Space>
     ) : null;
 

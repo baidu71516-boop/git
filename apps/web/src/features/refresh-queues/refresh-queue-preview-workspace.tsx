@@ -234,10 +234,11 @@ export function RefreshQueueDetailPreviewWorkspace({
                   <RefreshQueueReturnButton
                     queueId={detail.queue.id}
                     hasPriorReturn={hasPriorReturn}
+                    emphasize={canProcessReturn}
                   />
                 ) : null}
                 <Button
-                  type="primary"
+                  type={canProcessReturn ? "default" : "primary"}
                   icon={<DownloadOutlined aria-hidden="true" />}
                   onClick={previewExport}
                 >
