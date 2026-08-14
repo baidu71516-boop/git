@@ -1,6 +1,7 @@
 "use client";
 
 import { Card, Space } from "antd";
+import { useRouter } from "next/navigation";
 import { useMemo } from "react";
 
 import { AppShell } from "@/components/app-shell";
@@ -11,14 +12,24 @@ import { InfluencerPagination } from "./components/influencer-pagination";
 import { InfluencerTable } from "./components/influencer-table";
 import {
   createInfluencerPreviewItems,
+  createInfluencerPreviewDetailItems,
   influencerPreviewCrmStages,
   influencerPreviewOwners,
 } from "./preview-fixtures";
+import { DevInfluencerDetailDrawer } from "./influencer-detail-drawer-preview";
 
 const noOperation = () => undefined;
 
-export function InfluencerPreviewWorkspace() {
+export function InfluencerPreviewWorkspace({
+  openInfluencerId,
+  closeDrawerHref = "/dev-ui-preview/influencers/drawer",
+}: {
+  openInfluencerId?: string;
+  closeDrawerHref?: string;
+}) {
+  const router = useRouter();
   const items = useMemo(() => createInfluencerPreviewItems(), []);
+  const details = useMemo(() => createInfluencerPreviewDetailItems(), []);
   const tags = useMemo(
     () =>
       Array.from(
@@ -30,6 +41,11 @@ export function InfluencerPreviewWorkspace() {
       ),
     [items],
   );
+  const detailById = useMemo(
+    () => new Map(details.map((detail) => [detail.id, detail])),
+    [details],
+  );
+  const openDetail = openInfluencerId ? detailById.get(openInfluencerId) : null;
 
   return (
     <AppShell
@@ -76,6 +92,15 @@ export function InfluencerPreviewWorkspace() {
             />
           </Space>
         </Card>
+        {openDetail ? (
+          <DevInfluencerDetailDrawer
+            detail={openDetail}
+            open
+            onClose={() => {
+              void router.push(closeDrawerHref);
+            }}
+          />
+        ) : null}
       </section>
     </AppShell>
   );

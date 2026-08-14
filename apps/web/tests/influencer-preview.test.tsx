@@ -175,13 +175,11 @@ describe("development influencer visual preview", () => {
     });
 
     render(previewPage);
+    expect(screen.getAllByText("达人库").length).toBeGreaterThan(0);
     expect(
-      screen.getByRole("heading", {
-        level: 2,
-        name: /^达人详情预览 · /,
-      }),
+      screen.getByRole("heading", { name: "平台与指标", level: 5 }),
     ).toBeInTheDocument();
-    expect(screen.getAllByText("仅开发环境可见").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("白桃汽水").length).toBeGreaterThan(1);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
