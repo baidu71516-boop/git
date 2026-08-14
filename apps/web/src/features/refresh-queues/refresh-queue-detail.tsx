@@ -1,6 +1,10 @@
 "use client";
 
-import { DownloadOutlined, StopOutlined } from "@ant-design/icons";
+import {
+  DownloadOutlined,
+  ImportOutlined,
+  StopOutlined,
+} from "@ant-design/icons";
 import {
   Alert,
   Button,
@@ -37,6 +41,23 @@ import type { RefreshQueueRole } from "./types";
 
 const { Text, Title } = Typography;
 
+export function RefreshQueueReturnButton({
+  queueId,
+  hasPriorReturn,
+}: {
+  queueId: string;
+  hasPriorReturn: boolean;
+}) {
+  return (
+    <Button
+      href={`/?workspace=bulk&refresh_queue_id=${encodeURIComponent(queueId)}`}
+      icon={<ImportOutlined aria-hidden="true" />}
+    >
+      {hasPriorReturn ? "继续处理回流数据" : "处理回流数据"}
+    </Button>
+  );
+}
+
 export function RefreshQueueDetail({
   queueId,
   role,
@@ -62,6 +83,19 @@ export function RefreshQueueDetail({
   const canExport =
     canMutate && (queue?.status === "open" || queue?.status === "exported");
   const canCancel = canExport;
+  const statusBreakdown = detailQuery.data?.summary.status_breakdown;
+  const unfinishedCount =
+    (statusBreakdown?.pending ?? 0) +
+    (statusBreakdown?.stale_return ?? 0) +
+    (statusBreakdown?.unresolved ?? 0);
+  const hasPriorReturn =
+    (statusBreakdown?.fulfilled_changed ?? 0) +
+      (statusBreakdown?.fulfilled_no_change ?? 0) +
+      (statusBreakdown?.stale_return ?? 0) +
+      (statusBreakdown?.unresolved ?? 0) >
+    0;
+  const canProcessReturn =
+    canMutate && queue?.status === "exported" && unfinishedCount > 0;
 
   async function handleExport() {
     setActionError(null);
@@ -124,8 +158,14 @@ export function RefreshQueueDetail({
           { title: "名单详情" },
         ]}
         extra={
-          canExport || canCancel ? (
+          canExport || canCancel || canProcessReturn ? (
             <Space wrap>
+              {canProcessReturn ? (
+                <RefreshQueueReturnButton
+                  queueId={queueId}
+                  hasPriorReturn={hasPriorReturn}
+                />
+              ) : null}
               {canExport ? (
                 <Button
                   type="primary"

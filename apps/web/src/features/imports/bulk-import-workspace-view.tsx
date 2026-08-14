@@ -16,8 +16,77 @@ import type {
   ImportJobFilePublic,
   ImportJobPublic,
 } from "./types";
+import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 
 const { Text, Title } = Typography;
+
+export type RefreshReturnContext = {
+  queueId: string;
+  detail: RefreshQueueDetail | null;
+  loading: boolean;
+  error: string | null;
+  canExit: boolean;
+  showViewLink: boolean;
+  onExit: () => void;
+  onReload: () => void;
+};
+
+function RefreshReturnContextBand({
+  context,
+}: {
+  context: RefreshReturnContext;
+}) {
+  const actions = (
+    <Space wrap>
+      {context.showViewLink ? (
+        <Button href={`/refresh-queues/${encodeURIComponent(context.queueId)}`}>
+          查看更新名单
+        </Button>
+      ) : null}
+      {context.canExit ? (
+        <Button onClick={context.onExit}>退出回流模式</Button>
+      ) : null}
+    </Space>
+  );
+
+  if (context.error) {
+    return (
+      <Alert
+        className="refresh-return-context-band"
+        type="error"
+        showIcon
+        title="更新名单回流上下文加载失败"
+        description={context.error}
+        action={
+          <Space wrap>
+            <Button size="small" onClick={context.onReload}>
+              重新加载
+            </Button>
+            {context.canExit ? (
+              <Button size="small" onClick={context.onExit}>
+                退出回流模式
+              </Button>
+            ) : null}
+          </Space>
+        }
+      />
+    );
+  }
+
+  return (
+    <section className="refresh-return-context-band" aria-label="更新名单回流">
+      <div>
+        <Text strong>更新名单回流</Text>
+        <Text type="secondary">
+          {context.loading
+            ? "正在加载已关联的更新名单。"
+            : "当前批次将用于处理已关联的数据更新名单。"}
+        </Text>
+      </div>
+      {context.showViewLink || context.canExit ? actions : null}
+    </section>
+  );
+}
 
 function JobStateAlert({
   job,
@@ -114,6 +183,7 @@ export type BulkImportWorkspaceViewProps = {
   previewBusy: boolean;
   error: string | null;
   notice: string | null;
+  refreshContext?: RefreshReturnContext | null;
   onNewCollection: () => void;
   onSelectFiles: (files: File[]) => void;
   onRetryUpload: (item: BulkUploadItem) => void;
@@ -126,7 +196,13 @@ export type BulkImportWorkspaceViewProps = {
   onRetryJob: () => void;
   preview?: Omit<
     BulkPreviewWorkspaceViewProps,
-    "job" | "files" | "readOnly" | "onRebuildPreview" | "onRetryJob"
+    | "job"
+    | "files"
+    | "readOnly"
+    | "refreshQueueDetail"
+    | "refreshQueueLoading"
+    | "onRebuildPreview"
+    | "onRetryJob"
   > | null;
 };
 
@@ -140,6 +216,7 @@ export function BulkImportWorkspaceView({
   previewBusy,
   error,
   notice,
+  refreshContext = null,
   onNewCollection,
   onSelectFiles,
   onRetryUpload,
@@ -155,6 +232,9 @@ export function BulkImportWorkspaceView({
   if (!job) {
     return (
       <Card variant="borderless" className="bulk-workspace-card">
+        {refreshContext ? (
+          <RefreshReturnContextBand context={refreshContext} />
+        ) : null}
         {error ? <Alert type="error" showIcon title={error} /> : null}
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -201,6 +281,9 @@ export function BulkImportWorkspaceView({
   return (
     <Card variant="borderless" className="bulk-workspace-card">
       <Space orientation="vertical" size="middle" className="full-width">
+        {refreshContext ? (
+          <RefreshReturnContextBand context={refreshContext} />
+        ) : null}
         <BulkJobSummary
           collection={collection}
           readOnly={readOnly}
@@ -238,6 +321,8 @@ export function BulkImportWorkspaceView({
               job={job}
               files={files}
               readOnly={readOnly}
+              refreshQueueDetail={refreshContext?.detail ?? null}
+              refreshQueueLoading={refreshContext?.loading ?? false}
               onRebuildPreview={onRebuildPreview}
               onRetryJob={onRetryJob}
             />

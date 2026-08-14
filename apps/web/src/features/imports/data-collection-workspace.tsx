@@ -31,6 +31,7 @@ export function DataCollectionWorkspace({
     [searchString],
   );
   const bulkJobId = searchParams.get("bulk_job_id");
+  const refreshQueueId = searchParams.get("refresh_queue_id");
 
   function navigate(next: URLSearchParams) {
     const query = next.toString();
@@ -58,6 +59,12 @@ export function DataCollectionWorkspace({
     navigate(next);
   }
 
+  function exitRefreshReturn() {
+    const next = new URLSearchParams(searchString);
+    next.delete("refresh_queue_id");
+    navigate(next);
+  }
+
   return (
     <section className="data-collection-workspace" aria-label="数据采集工作区">
       <Tabs
@@ -75,11 +82,13 @@ export function DataCollectionWorkspace({
             label: "批量文件处理",
             children: (
               <BulkImportWorkspace
-                key={bulkJobId ?? "new"}
+                key={bulkJobId ?? refreshQueueId ?? "new"}
                 role={role}
                 jobId={bulkJobId}
+                refreshQueueId={refreshQueueId}
                 onSelectJob={selectBulkJob}
                 onClearJob={clearBulkJob}
+                onExitRefreshReturn={exitRefreshReturn}
               />
             ),
           },

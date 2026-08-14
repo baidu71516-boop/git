@@ -163,9 +163,13 @@ describe("development data collection visual preview", () => {
     expect(screen.getByText("正在导入")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("导入完成"));
-    const resultSection = document.querySelector(".bulk-preview-completed-result");
+    const resultSection = document.querySelector(
+      ".bulk-preview-completed-result",
+    );
     expect(resultSection).not.toBeNull();
-    expect(within(resultSection as HTMLElement).getByText("46")).toBeInTheDocument();
+    expect(
+      within(resultSection as HTMLElement).getByText("46"),
+    ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   }, 20_000);
 });

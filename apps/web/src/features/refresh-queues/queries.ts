@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type QueryClient,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { ApiClientError } from "@/lib/api/client";
 
@@ -22,9 +27,28 @@ export const refreshQueueQueryKeys = {
   list: (offset: number, limit: number) =>
     ["refresh-queues", "list", offset, limit] as const,
   detail: (queueId: string) => ["refresh-queues", "detail", queueId] as const,
+  itemsForQueue: (queueId: string) =>
+    ["refresh-queues", "items", queueId] as const,
   items: (queueId: string, offset: number, limit: number) =>
     ["refresh-queues", "items", queueId, offset, limit] as const,
 };
+
+export async function invalidateRefreshQueueCaches(
+  queryClient: QueryClient,
+  queueId: string,
+): Promise<void> {
+  await Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: refreshQueueQueryKeys.detail(queueId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: refreshQueueQueryKeys.itemsForQueue(queueId),
+    }),
+    queryClient.invalidateQueries({
+      queryKey: refreshQueueQueryKeys.lists(),
+    }),
+  ]);
+}
 
 export function useRefreshQueueList(offset: number, limit: number) {
   return useQuery({

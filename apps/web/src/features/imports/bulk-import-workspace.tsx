@@ -13,9 +13,14 @@ import {
   Space,
   Typography,
 } from "antd";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { AppLoading } from "@/components/ui/app-loading";
+import {
+  invalidateRefreshQueueCaches,
+  useRefreshQueueDetail,
+} from "@/features/refresh-queues/queries";
 
 import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
 import type { BulkUploadItem } from "./components/bulk-file-uploader";
@@ -130,14 +135,19 @@ function collectionPayload(
 export function BulkImportWorkspace({
   role,
   jobId,
+  refreshQueueId = null,
   onSelectJob,
   onClearJob,
+  onExitRefreshReturn = () => undefined,
 }: {
   role: "super_admin" | "manager" | "operator" | "viewer";
   jobId: string | null;
+  refreshQueueId?: string | null;
   onSelectJob: (jobId: string) => void;
   onClearJob: () => void;
+  onExitRefreshReturn?: () => void;
 }) {
+  const queryClient = useQueryClient();
   const readOnly = role === "viewer";
   const [collectionForm] = Form.useForm<CollectionFormValues>();
   const [collectionModalOpen, setCollectionModalOpen] = useState(false);
@@ -170,6 +180,8 @@ export function BulkImportWorkspace({
   const [acceptedConfirmRevision, setAcceptedConfirmRevision] = useState<
     number | null
   >(null);
+  const [reconciliationRefreshing, setReconciliationRefreshing] =
+    useState(false);
   const creationInFlightRef = useRef(false);
   const confirmInFlightRef = useRef(false);
   const lastImportJobErrorRef = useRef<unknown>(null);
@@ -177,6 +189,7 @@ export function BulkImportWorkspace({
   const uploadQueueRef = useRef<BulkUploadItem[]>([]);
   const activeUploadCountRef = useRef(0);
   const scheduledUploadIdsRef = useRef(new Set<string>());
+  const refreshedCompletionRef = useRef<string | null>(null);
   currentJobIdRef.current = jobId;
 
   const pendingConfirmRevision =
@@ -193,6 +206,12 @@ export function BulkImportWorkspace({
   const visibleImportJobError =
     importJobQuery.error ?? lastImportJobErrorRef.current;
   const recoveredJob = importJobQuery.data ?? null;
+  const linkedRefreshQueueId = recoveredJob
+    ? recoveredJob.refresh_queue_id
+    : jobId
+      ? null
+      : refreshQueueId;
+  const refreshQueueQuery = useRefreshQueueDetail(linkedRefreshQueueId ?? "");
   const confirmOutcomeUnknown =
     ambiguousConfirmRevision !== null &&
     recoveredJob?.status === "preview_ready" &&
@@ -229,6 +248,23 @@ export function BulkImportWorkspace({
   const confirmMutation = useConfirmBulkImportMutation();
   const retryJobMutation = useRetryBulkImportJobMutation();
 
+  useEffect(() => {
+    if (
+      !recoveredJob ||
+      recoveredJob.status !== "completed" ||
+      !recoveredJob.refresh_queue_id ||
+      refreshedCompletionRef.current === recoveredJob.id
+    ) {
+      return;
+    }
+    refreshedCompletionRef.current = recoveredJob.id;
+    const queueId = recoveredJob.refresh_queue_id;
+    setReconciliationRefreshing(true);
+    void invalidateRefreshQueueCaches(queryClient, queueId).finally(() =>
+      setReconciliationRefreshing(false),
+    );
+  }, [queryClient, recoveredJob]);
+
   const files = useMemo(() => filesQuery.data ?? [], [filesQuery.data]);
   const currentUploadItems = useMemo(
     () => uploadItems.filter((item) => item.importJobId === jobId),
@@ -239,6 +275,13 @@ export function BulkImportWorkspace({
   );
 
   function openNewCollection() {
+    if (
+      linkedRefreshQueueId &&
+      (refreshQueueQuery.isPending || refreshQueueQuery.isError)
+    ) {
+      setError("请先确认已关联的数据更新名单可正常加载。");
+      return;
+    }
     if (
       uploadBusy ||
       busyFileId !== null ||
@@ -274,6 +317,9 @@ export function BulkImportWorkspace({
       }
       const job = await createBulkJobMutation.mutateAsync({
         collection_job_id: collection.id,
+        ...(linkedRefreshQueueId
+          ? { refresh_queue_id: linkedRefreshQueueId }
+          : {}),
       });
       setPendingCollection(null);
       setCreationError(null);
@@ -703,6 +749,23 @@ export function BulkImportWorkspace({
         previewBusy={previewMutation.isPending || retryJobMutation.isPending}
         error={error}
         notice={notice}
+        refreshContext={
+          linkedRefreshQueueId
+            ? {
+                queueId: linkedRefreshQueueId,
+                detail: refreshQueueQuery.data ?? null,
+                loading:
+                  refreshQueueQuery.isPending || reconciliationRefreshing,
+                error: refreshQueueQuery.isError
+                  ? "名单不存在、无权访问或网络连接异常。"
+                  : null,
+                canExit: !recoveredJob,
+                showViewLink: recoveredJob?.status !== "completed",
+                onExit: onExitRefreshReturn,
+                onReload: () => void refreshQueueQuery.refetch(),
+              }
+            : null
+        }
         onNewCollection={openNewCollection}
         onSelectFiles={selectFiles}
         onRetryUpload={retryUpload}

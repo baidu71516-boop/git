@@ -53,6 +53,10 @@ import {
   useUploadBulkImportFileMutation,
 } from "@/features/imports/queries";
 import type { ImportJobFilePublic } from "@/features/imports/types";
+import {
+  invalidateRefreshQueueCaches,
+  refreshQueueQueryKeys,
+} from "@/features/refresh-queues/queries";
 
 const { apiRequestMock } = vi.hoisted(() => ({
   apiRequestMock: vi.fn(),
@@ -182,6 +186,28 @@ describe("Bulk import API contract", () => {
       ["/import-jobs/job-1"],
       ["/import-jobs/job-1/files"],
     ]);
+  });
+
+  it("submits refresh_queue_id only when the Bulk Job is created for a Queue return", async () => {
+    apiRequestMock.mockResolvedValue(
+      success({
+        id: "job-refresh",
+        refresh_queue_id: "queue-1",
+      }),
+    );
+
+    await createBulkImportJob({
+      collection_job_id: "collection-1",
+      refresh_queue_id: "queue-1",
+    });
+
+    expect(apiRequestMock).toHaveBeenCalledWith("/import-jobs/bulk", {
+      method: "POST",
+      body: JSON.stringify({
+        collection_job_id: "collection-1",
+        refresh_queue_id: "queue-1",
+      }),
+    });
   });
 
   it("uploads one multipart file with exact fields and omits an unset time", async () => {
@@ -375,6 +401,25 @@ describe("Bulk import API contract", () => {
       code: "INVALID_RESPONSE",
       status: 200,
     });
+  });
+});
+
+describe("Refresh return cache reconciliation", () => {
+  it("invalidates Queue detail, all Queue Item pages, and Queue lists", async () => {
+    const queryClient = new QueryClient();
+    const invalidate = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockResolvedValue(undefined);
+
+    await invalidateRefreshQueueCaches(queryClient, "queue-1");
+
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(
+      [
+        refreshQueueQueryKeys.detail("queue-1"),
+        refreshQueueQueryKeys.itemsForQueue("queue-1"),
+        refreshQueueQueryKeys.lists(),
+      ],
+    );
   });
 });
 

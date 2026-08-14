@@ -62,9 +62,12 @@ function screeningTone(tone: string): string {
 
 export function BulkPreviewSummary({
   summary,
+  refreshReturn = false,
 }: {
   summary: UnifiedPreviewSummary;
+  refreshReturn?: boolean;
 }) {
+  const returnSummary = refreshReturn ? summary.refresh_return : undefined;
   return (
     <section
       className="bulk-preview-summary"
@@ -100,6 +103,70 @@ export function BulkPreviewSummary({
           })}
         </div>
       </div>
+
+      {returnSummary ? (
+        <section
+          className="bulk-preview-refresh-return-summary"
+          aria-labelledby="bulk-preview-refresh-return-summary-title"
+        >
+          <div className="bulk-preview-screening-summary-meta">
+            <Text strong id="bulk-preview-refresh-return-summary-title">
+              更新回流预览
+            </Text>
+            <Text type="secondary">以下为确认导入前的预计回流结果</Text>
+          </div>
+          <dl className="bulk-preview-refresh-return-metrics">
+            <div>
+              <dt>已匹配回流</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.queue_items_with_return_count,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>缺少回流</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.queue_items_without_return_count,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>预计有变更</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.expected_fulfilled_changed_count,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>预计无变更</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.expected_fulfilled_no_change_count,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>回流数据已过期</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.expected_stale_return_count,
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>需要进一步确认</dt>
+              <dd>
+                {integerFormatter.format(
+                  returnSummary.expected_unresolved_count,
+                )}
+              </dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
 
       <details className="bulk-preview-more-stats">
         <summary>更多统计</summary>

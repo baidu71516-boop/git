@@ -503,6 +503,7 @@ function createJob(
   return {
     id: "40000000-0000-0000-0000-000000000001",
     collection_job_id: collection.id,
+    refresh_queue_id: null,
     department_id: collection.department_id,
     operator_id: collection.owner_operator_id,
     stored_file_id: null,

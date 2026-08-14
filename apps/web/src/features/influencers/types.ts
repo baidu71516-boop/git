@@ -5,11 +5,7 @@ export type OwnerSummary = {
 };
 
 export type FreshnessStatus =
-  | "fresh"
-  | "aging"
-  | "stale"
-  | "very_stale"
-  | "unknown";
+  "fresh" | "aging" | "stale" | "very_stale" | "unknown";
 
 export type PlatformAccountSummary = {
   id: string;

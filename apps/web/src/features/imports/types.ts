@@ -44,6 +44,75 @@ export type ImportRowCategory =
   | "no_change"
   | "duplicate";
 
+export type RefreshReturnReason =
+  | "ROW_NOT_OWNER_EFFECTIVE"
+  | "ROW_NOT_UNIQUELY_MATCHED"
+  | "ROW_ACTION_STAYS_PENDING"
+  | "QUEUE_ITEM_NOT_FOUND"
+  | "QUEUE_ITEM_TERMINAL"
+  | "MISSING_RETURN"
+  | "MULTIPLE_OWNER_ROWS"
+  | "ACTION_CHANGE_SUMMARY_MISMATCH"
+  | "ACTION_NOT_FULFILLABLE"
+  | "ACQUISITION_CONFIRMATION_REQUIRED"
+  | "ACQUISITION_MISSING"
+  | "ACQUISITION_NOT_NEWER_THAN_BASELINE"
+  | "NO_CHANGE_BASELINE_MISSING"
+  | "EFFECTIVE_CHANGES"
+  | "RELIABLE_NO_CHANGE";
+
+export type RefreshReturnRowOutcome =
+  "pending" | "outside_queue" | "expected_fulfillment" | "terminal_item";
+
+export type RefreshReturnExpectedStatus =
+  | "pending"
+  | "fulfilled_changed"
+  | "fulfilled_no_change"
+  | "stale_return"
+  | "unresolved"
+  | "cancelled";
+
+export type RefreshReturnRowEvidence = {
+  locator: {
+    import_row_id: string;
+    import_job_file_id: string;
+    file_position: number;
+    row_number: number;
+  };
+  outcome: RefreshReturnRowOutcome;
+  queue_item_id: string | null;
+  expected_status: RefreshReturnExpectedStatus | null;
+  reason: RefreshReturnReason;
+  is_last_return_claimant: boolean;
+};
+
+export type RefreshReturnPreviewSummary = {
+  schema_version: 1;
+  row_count: number;
+  queue_item_count: number;
+  matched_row_count: number;
+  outside_queue_row_count: number;
+  pending_row_count: number;
+  queue_items_with_return_count: number;
+  queue_items_without_return_count: number;
+  expected_fulfilled_changed_count: number;
+  expected_fulfilled_no_change_count: number;
+  expected_stale_return_count: number;
+  expected_unresolved_count: number;
+  unchanged_terminal_item_count: number;
+  conflict_item_count: number;
+};
+
+export type RefreshReturnPreviewSummaryDocument =
+  RefreshReturnPreviewSummary & {
+    missing_queue_item_ids: string[];
+  };
+
+export type RefreshReturnConfirmResult = RefreshReturnPreviewSummary & {
+  claimed_item_count: number;
+  queue_completed: boolean;
+};
+
 export type ImportMatchType =
   | "platform_account_id"
   | "external_source_id"
@@ -168,6 +237,7 @@ export type UnifiedPreviewSummary = {
   screening_match_rows: number;
   screening_not_match_rows: number;
   screening_unknown_rows: number;
+  refresh_return?: RefreshReturnPreviewSummaryDocument;
 };
 
 export type ImportConfirmResult = {
@@ -179,6 +249,7 @@ export type ImportConfirmResult = {
   skipped_rows: number;
   error_rows: number;
   manual_review_rows: number;
+  refresh_return?: RefreshReturnConfirmResult;
 };
 
 export type PreviewSummary = UnifiedPreviewSummary;
@@ -222,6 +293,7 @@ export type CollectionJobPublic = {
 export type ImportJobPublic = {
   id: string;
   collection_job_id: string;
+  refresh_queue_id: string | null;
   department_id: string;
   operator_id: string;
   stored_file_id: string | null;
@@ -298,6 +370,7 @@ export type ImportRowMergePlan = {
   screening?: ScreeningEvaluation;
   change_summary?: ChangeSummary;
   preview_context_hash?: string;
+  refresh_return?: RefreshReturnRowEvidence;
   [key: string]: unknown;
 };
 
@@ -338,6 +411,7 @@ export type ImportDispatchResult = {
 
 export type CreateBulkImportJobInput = {
   collection_job_id: string;
+  refresh_queue_id?: string | null;
 };
 
 export type UploadBulkImportFileInput = {

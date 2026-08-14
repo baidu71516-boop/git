@@ -447,6 +447,16 @@ describe("Refresh Queue detail", () => {
       expect(Boolean(screen.queryByRole("button", { name: /取消名单/ }))).toBe(
         shouldShow,
       );
+      const returnLink = screen.queryByRole("link", {
+        name: /处理回流数据/,
+      });
+      expect(Boolean(returnLink)).toBe(status === "exported");
+      if (status === "exported") {
+        expect(returnLink).toHaveAttribute(
+          "href",
+          "/?workspace=bulk&refresh_queue_id=queue-exported",
+        );
+      }
     },
   );
 
@@ -461,6 +471,9 @@ describe("Refresh Queue detail", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /取消名单/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /处理回流数据/ }),
     ).not.toBeInTheDocument();
   });
 });

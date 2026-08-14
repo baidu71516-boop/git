@@ -1,4 +1,4 @@
-import { Alert, Button, Modal, Spin, Typography } from "antd";
+import { Alert, Button, Modal, Space, Spin, Typography } from "antd";
 
 import {
   AMBIGUOUS_BULK_CONFIRM_MESSAGE,
@@ -11,6 +11,7 @@ import type {
   ImportRowPublic,
   ImportRowsPage,
 } from "../types";
+import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 import { BulkPreviewRowDrawer } from "./bulk-preview-row-drawer";
 import { BulkPreviewSummary } from "./bulk-preview-summary";
 import { BulkPreviewTable } from "./bulk-preview-table";
@@ -123,6 +124,52 @@ function CompletedResult({ job }: { job: ImportJobPublic }) {
   );
 }
 
+function CompletedRefreshReturnResult({
+  detail,
+  loading,
+}: {
+  detail: RefreshQueueDetail | null;
+  loading: boolean;
+}) {
+  if (loading) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        title="正在刷新更新名单回流结果"
+        description="最终结果以更新名单的最新状态为准。"
+      />
+    );
+  }
+  if (!detail) return null;
+  const breakdown = detail.summary.status_breakdown;
+  const metrics = [
+    { label: "已回流 · 有变更", value: breakdown.fulfilled_changed ?? 0 },
+    { label: "已回流 · 无变更", value: breakdown.fulfilled_no_change ?? 0 },
+    { label: "回流数据已过期", value: breakdown.stale_return ?? 0 },
+    { label: "无法确认", value: breakdown.unresolved ?? 0 },
+    { label: "待回流", value: breakdown.pending ?? 0 },
+  ];
+  return (
+    <section
+      className="bulk-preview-completed-result bulk-preview-refresh-return-result"
+      aria-labelledby="bulk-preview-refresh-return-result-title"
+    >
+      <Title level={5} id="bulk-preview-refresh-return-result-title">
+        更新名单回流结果
+      </Title>
+      <dl className="bulk-preview-result-band">
+        {metrics.map((metric) => (
+          <div key={metric.label}>
+            <dt>{metric.label}</dt>
+            <dd>{integerFormatter.format(metric.value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+  );
+}
+
 export type BulkPreviewWorkspaceViewProps = {
   job: ImportJobPublic;
   files: readonly ImportJobFilePublic[];
@@ -137,6 +184,8 @@ export type BulkPreviewWorkspaceViewProps = {
   confirmAmbiguous: boolean;
   confirmError: string | null;
   confirmOpen: boolean;
+  refreshQueueDetail?: RefreshQueueDetail | null;
+  refreshQueueLoading?: boolean;
   onCategoryChange: (category: ImportRowCategory) => void;
   onOffsetChange: (offset: number) => void;
   onSelectRow: (row: ImportRowPublic) => void;
@@ -163,6 +212,8 @@ export function BulkPreviewWorkspaceView({
   confirmAmbiguous,
   confirmError,
   confirmOpen,
+  refreshQueueDetail = null,
+  refreshQueueLoading = false,
   onCategoryChange,
   onOffsetChange,
   onSelectRow,
@@ -175,6 +226,7 @@ export function BulkPreviewWorkspaceView({
   onRetryJob,
 }: BulkPreviewWorkspaceViewProps) {
   const summary = job.preview_summary;
+  const refreshReturn = job.refresh_queue_id !== null;
   const confirmAvailable =
     job.status === "preview_ready" &&
     job.preview_revision > 0 &&
@@ -212,7 +264,16 @@ export function BulkPreviewWorkspaceView({
         </Button>
       )
     ) : job.status === "completed" ? (
-      <Button href="/influencers">查看达人库</Button>
+      <Space wrap>
+        {job.refresh_queue_id ? (
+          <Button
+            href={`/refresh-queues/${encodeURIComponent(job.refresh_queue_id)}`}
+          >
+            查看更新名单
+          </Button>
+        ) : null}
+        <Button href="/influencers">查看达人库</Button>
+      </Space>
     ) : null;
 
   const previewContent = showPreview ? (
@@ -226,7 +287,7 @@ export function BulkPreviewWorkspaceView({
           <Text type="secondary">此预览不能用于确认导入。</Text>
         </div>
       ) : null}
-      <BulkPreviewSummary summary={summary} />
+      <BulkPreviewSummary summary={summary} refreshReturn={refreshReturn} />
       <BulkPreviewTable
         rows={rowsPage?.items ?? []}
         files={files}
@@ -237,6 +298,7 @@ export function BulkPreviewWorkspaceView({
         category={category}
         loading={loadingRows}
         error={rowsError}
+        refreshReturn={refreshReturn}
         onCategoryChange={onCategoryChange}
         onOffsetChange={onOffsetChange}
         onSelectRow={onSelectRow}
@@ -284,6 +346,12 @@ export function BulkPreviewWorkspaceView({
       ) : null}
 
       {job.status === "completed" ? <CompletedResult job={job} /> : null}
+      {job.status === "completed" && refreshReturn ? (
+        <CompletedRefreshReturnResult
+          detail={refreshQueueDetail}
+          loading={refreshQueueLoading}
+        />
+      ) : null}
       {job.status === "completed" && previewContent ? (
         <details className="bulk-preview-completed-preview">
           <summary>查看文件处理详情</summary>
@@ -297,6 +365,7 @@ export function BulkPreviewWorkspaceView({
         open={selectedRow !== null}
         row={selectedRow}
         files={files}
+        refreshReturn={refreshReturn}
         onClose={onCloseRow}
       />
 
@@ -341,6 +410,56 @@ export function BulkPreviewWorkspaceView({
               <dd>{integerFormatter.format(summary.error_rows)}</dd>
             </div>
           </dl>
+        ) : null}
+        {summary?.refresh_return && refreshReturn ? (
+          <section className="bulk-preview-confirm-refresh-return">
+            <Text strong>更新回流预览</Text>
+            <dl className="bulk-preview-confirm-summary">
+              <div>
+                <dt>预计有变更</dt>
+                <dd>
+                  {integerFormatter.format(
+                    summary.refresh_return.expected_fulfilled_changed_count,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>预计无变更</dt>
+                <dd>
+                  {integerFormatter.format(
+                    summary.refresh_return.expected_fulfilled_no_change_count,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>回流数据已过期</dt>
+                <dd>
+                  {integerFormatter.format(
+                    summary.refresh_return.expected_stale_return_count,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>需要进一步确认</dt>
+                <dd>
+                  {integerFormatter.format(
+                    summary.refresh_return.expected_unresolved_count,
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt>缺少回流</dt>
+                <dd>
+                  {integerFormatter.format(
+                    summary.refresh_return.queue_items_without_return_count,
+                  )}
+                </dd>
+              </div>
+            </dl>
+            <Text type="secondary" className="bulk-preview-confirm-note">
+              回流结果将在确认导入成功后由系统统一核销。数据已过期或需要进一步确认的条目不会因此完成，但不会阻止其他有效数据导入。
+            </Text>
+          </section>
         ) : null}
         <Text>确认后，系统会按当前数据预览结果写入达人库。</Text>
         <Text type="secondary" className="bulk-preview-confirm-note">

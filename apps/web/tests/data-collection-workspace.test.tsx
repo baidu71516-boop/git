@@ -101,6 +101,7 @@ function makeJob(overrides: Partial<ImportJobPublic> = {}): ImportJobPublic {
   return {
     id: "job-1",
     collection_job_id: collection.id,
+    refresh_queue_id: null,
     department_id: "department-1",
     operator_id: "operator-1",
     stored_file_id: null,
@@ -352,6 +353,126 @@ describe("DataCollectionWorkspace", () => {
           init?.method === "POST",
       ),
     ).toHaveLength(1);
+  });
+
+  it("carries Queue context in the URL and binds it exactly once when creating the Bulk Job", async () => {
+    navigation.search = "workspace=bulk&refresh_queue_id=queue-1";
+    const createdJob = makeJob({
+      id: "job-refresh",
+      refresh_queue_id: "queue-1",
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/refresh-queues/queue-1") && !init?.method) {
+          return envelope({
+            queue: {
+              id: "queue-1",
+              department_id: "department-1",
+              created_by_operator_id: "operator-1",
+              status: "exported",
+              as_of: "2026-08-14T00:00:00Z",
+              requested_limit: 10,
+              today_total_limit: 10,
+              refresh_limit: 10,
+              policy_version: 1,
+              criteria_snapshot: {},
+              created_at: "2026-08-14T00:00:00Z",
+              updated_at: "2026-08-14T00:00:00Z",
+              exported_at: "2026-08-14T01:00:00Z",
+              completed_at: null,
+              cancelled_at: null,
+            },
+            summary: {
+              requested: 10,
+              selected: 10,
+              unique_influencers: 10,
+              freshness_breakdown: { stale: 10 },
+              priority_breakdown: { "3": 10 },
+              status_breakdown: { pending: 10 },
+            },
+          });
+        }
+        if (url.endsWith("/collection-jobs") && init?.method === "POST") {
+          return envelope(collection, 201);
+        }
+        if (url.endsWith("/import-jobs/bulk") && init?.method === "POST") {
+          return envelope(createdJob, 201);
+        }
+        if (url.endsWith("/import-jobs/job-refresh")) {
+          return envelope(createdJob);
+        }
+        if (url.endsWith("/import-jobs/job-refresh/files")) return envelope([]);
+        if (url.endsWith(`/collection-jobs/${collection.id}`)) {
+          return envelope(collection);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderWorkspace();
+    expect(await screen.findByText("更新名单回流")).toBeInTheDocument();
+    expect(
+      await screen.findByText("当前批次将用于处理已关联的数据更新名单。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "退出回流模式" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "新建采集任务" }));
+    fireEvent.change(screen.getByLabelText("任务名称"), {
+      target: { value: collection.name },
+    });
+    fireEvent.change(screen.getByLabelText("行业"), {
+      target: { value: collection.industry },
+    });
+    fireEvent.change(screen.getByLabelText("采集目的"), {
+      target: { value: collection.purpose },
+    });
+    fireEvent.change(screen.getByLabelText("目标动作"), {
+      target: { value: collection.target_action },
+    });
+    fireEvent.submit(
+      screen
+        .getByRole("button", { name: "创建并开始批量处理" })
+        .closest("form") as HTMLFormElement,
+    );
+
+    await waitFor(() => {
+      const createCall = fetchSpy.mock.calls.find(
+        ([input, init]) =>
+          String(input).endsWith("/import-jobs/bulk") &&
+          init?.method === "POST",
+      );
+      expect(JSON.parse(String(createCall?.[1]?.body))).toEqual({
+        collection_job_id: "collection-1",
+        refresh_queue_id: "queue-1",
+      });
+    });
+    await waitFor(() =>
+      expect(navigation.pushCalls).toContain(
+        "/?workspace=bulk&refresh_queue_id=queue-1&bulk_job_id=job-refresh",
+      ),
+    );
+    expect(
+      screen.queryByRole("button", { name: "退出回流模式" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("allows exiting Queue return mode before a Bulk Job exists", async () => {
+    navigation.search = "workspace=bulk&refresh_queue_id=queue-1";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      envelope({
+        queue: { id: "queue-1", status: "exported" },
+        summary: { status_breakdown: { pending: 1 } },
+      }),
+    );
+
+    renderWorkspace();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "退出回流模式" }),
+    );
+
+    await waitFor(() => expect(navigation.search).toBe("workspace=bulk"));
   });
 
   it("recovers only the URL Job, retains its ID across Tab changes, and never calls a list endpoint", async () => {
