@@ -4,6 +4,7 @@ import {
   DatabaseOutlined,
   LogoutOutlined,
   MenuOutlined,
+  SyncOutlined,
   UsergroupAddOutlined,
 } from "@ant-design/icons";
 import { Button, Drawer, Typography } from "antd";
@@ -41,6 +42,11 @@ const navGroups = [
         label: "数据采集",
         href: "/",
         icon: <DatabaseOutlined aria-hidden="true" />,
+      },
+      {
+        label: "数据更新",
+        href: "/refresh-queues",
+        icon: <SyncOutlined aria-hidden="true" />,
       },
     ],
   },

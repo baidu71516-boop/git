@@ -1996,3 +1996,200 @@ body {
 .modal-error {
   margin-bottom: 16px;
 }
+
+.refresh-queue-workspace {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  width: 100%;
+}
+
+.refresh-queue-workspace > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.refresh-queue-workspace > .app-page-header {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.refresh-queue-workspace > .app-page-header h2 {
+  font-size: 24px;
+  margin-bottom: 3px;
+}
+
+.refresh-queue-list-card,
+.refresh-queue-detail-card,
+.refresh-queue-items-card {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  box-shadow: none;
+}
+
+.refresh-queue-table,
+.refresh-queue-table .ant-spin-nested-loading,
+.refresh-queue-table .ant-spin-container,
+.refresh-queue-table .ant-table,
+.refresh-queue-table .ant-table-container {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.refresh-queue-list-card > .ant-card-body,
+.refresh-queue-items-card > .ant-card-body {
+  padding: 0;
+}
+
+.refresh-queue-state,
+.refresh-queue-list-card > .ant-card-body > .ant-alert,
+.refresh-queue-list-card > .ant-card-body > .ant-empty,
+.refresh-queue-items-card > .ant-card-body > .ant-alert,
+.refresh-queue-items-card > .ant-card-body > .ant-empty {
+  margin: 32px 20px;
+}
+
+.refresh-queue-table .ant-table-thead > tr > th {
+  height: 42px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  color: #475467;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.refresh-queue-table .ant-table-tbody > tr > td {
+  padding: 12px;
+  border-bottom-color: #edf1f6;
+  font-size: 13px;
+  vertical-align: middle;
+}
+
+.refresh-queue-table .ant-btn-link {
+  height: auto;
+  padding-inline: 0;
+}
+
+.refresh-queue-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: 14px 18px;
+  border-top: 1px solid #edf1f6;
+}
+
+.refresh-queue-detail-card > .ant-card-body {
+  padding: 20px;
+}
+
+.refresh-queue-summary {
+  margin: 18px -20px -20px;
+  border-top: 1px solid #edf1f6;
+}
+
+.refresh-queue-summary-band {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  background: #fbfcfe;
+}
+
+.refresh-queue-summary-band > div {
+  display: grid;
+  gap: 4px;
+  padding: 16px 20px;
+  border-right: 1px solid #edf1f6;
+}
+
+.refresh-queue-summary-band > div:last-child {
+  border-right: 0;
+}
+
+.refresh-queue-summary-band strong {
+  color: var(--app-text);
+  font-size: 22px;
+  font-weight: 650;
+}
+
+.refresh-queue-distributions {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px 20px;
+  border-top: 1px solid #edf1f6;
+}
+
+.refresh-queue-distribution {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.refresh-queue-distribution .ant-tag {
+  margin-bottom: 4px;
+}
+
+.refresh-queue-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px 14px;
+}
+
+.refresh-queue-section-heading h4 {
+  margin: 0 0 3px;
+}
+
+.refresh-account-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.refresh-account-cell > .ant-typography {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refresh-queue-modal-alert {
+  margin-bottom: 16px;
+}
+
+@media (max-width: 720px) {
+  .refresh-queue-workspace > .app-page-header,
+  .refresh-queue-section-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .refresh-queue-workspace > .app-page-header-extra,
+  .refresh-queue-workspace > .app-page-header-extra .ant-space,
+  .refresh-queue-workspace > .app-page-header-extra .ant-btn {
+    width: 100%;
+  }
+
+  .refresh-queue-summary-band {
+    grid-template-columns: 1fr;
+  }
+
+  .refresh-queue-summary-band > div {
+    border-right: 0;
+    border-bottom: 1px solid #edf1f6;
+  }
+
+  .refresh-queue-summary-band > div:last-child {
+    border-bottom: 0;
+  }
+
+  .refresh-queue-distribution {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .refresh-queue-pagination {
+    justify-content: flex-start;
+    overflow-x: auto;
+  }
+}

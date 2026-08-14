@@ -33,7 +33,7 @@ function response(data: unknown) {
 }
 
 function renderAuthenticatedShell(
-  workspace: "imports" | "influencers",
+  workspace: "imports" | "influencers" | "refresh-queues",
   influencerId?: string,
 ) {
   const queryClient = new QueryClient({
@@ -173,6 +173,94 @@ describe("AuthShell", () => {
         String(input).endsWith("/operators"),
       ),
     ).toBe(true);
+  });
+
+  it("keeps Operator selection mandatory for Refresh Queue mutations", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "数据部",
+              status: "active",
+            },
+            operator: null,
+            role: "operator",
+            expires_at: "2026-08-12T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/operators")) {
+          return response([
+            {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "更新操作人",
+              role: "operator",
+              status: "active",
+            },
+          ]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("refresh-queues");
+
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
+    expect(screen.queryByText("创建更新名单")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/operators"),
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/refresh-queues?"),
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a Viewer without an Operator read Refresh Queues without write entry points", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "只读部",
+              status: "active",
+            },
+            operator: null,
+            role: "viewer",
+            expires_at: "2026-08-12T00:00:00Z",
+          });
+        }
+        if (url.includes("/refresh-queues?")) {
+          return response({ items: [], total: 0, offset: 0, limit: 50 });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("refresh-queues");
+
+    expect(await screen.findByText("暂无数据更新名单。")).toBeInTheDocument();
+    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /创建更新名单/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /数据更新/ })).toHaveAttribute(
+      "href",
+      "/refresh-queues",
+    );
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/operators"),
+      ),
+    ).toBe(false);
   });
 
   it("keeps an existing Viewer Operator on the influencer workspace", async () => {
