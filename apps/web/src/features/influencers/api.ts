@@ -15,6 +15,10 @@ export const INFLUENCER_QUERY_PARAMETERS = [
   "followers_max",
   "owner_operator_id",
   "crm_stage",
+  "freshness_status",
+  "requires_refresh",
+  "last_huitun_observed_before",
+  "last_huitun_observed_after",
   "page",
   "page_size",
 ] as const satisfies readonly (keyof InfluencerListQueryParams)[];
@@ -27,7 +31,7 @@ export function normalizeInfluencerListQuery(
     const rawValue = query[name];
     if (rawValue === undefined || rawValue === "") continue;
     const value = name === "q" || name === "tag" ? rawValue.trim() : rawValue;
-    if (value !== "") normalized[name] = value;
+    if (value !== "") Object.assign(normalized, { [name]: value });
   }
   return normalized;
 }

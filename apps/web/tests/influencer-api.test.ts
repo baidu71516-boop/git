@@ -7,6 +7,7 @@ import {
   fetchMetricSnapshots,
   influencerListQueryKey,
 } from "../src/features/influencers/api";
+import type { InfluencerListQueryParams } from "../src/features/influencers/types";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -14,13 +15,17 @@ afterEach(() => {
 
 describe("influencer list API", () => {
   it("encodes only frozen, non-empty query parameters", () => {
-    const query = {
+    const query: InfluencerListQueryParams = {
       q: "美妆 达人",
       tag: "国风/动画",
       followers_min: "0",
       followers_max: "10000",
       owner_operator_id: "00000000-0000-0000-0000-000000000001",
       crm_stage: "高意向",
+      freshness_status: "stale",
+      requires_refresh: "true",
+      last_huitun_observed_before: "2026-08-14T00:00:00+08:00",
+      last_huitun_observed_after: "2026-08-01T00:00:00+08:00",
       page: "2",
       page_size: "50",
     };

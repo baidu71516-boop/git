@@ -101,6 +101,7 @@ function makeJob(overrides: Partial<ImportJobPublic> = {}): ImportJobPublic {
   return {
     id: "job-1",
     collection_job_id: collection.id,
+    refresh_queue_id: null,
     department_id: "department-1",
     operator_id: "operator-1",
     stored_file_id: null,

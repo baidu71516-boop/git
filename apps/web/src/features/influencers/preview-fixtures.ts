@@ -156,6 +156,11 @@ function previewItem(input: PreviewItemInput): InfluencerListItem {
         source: "huitun",
         is_active: true,
         source_tags: input.tags,
+        last_huitun_observed_at: null,
+        last_huitun_imported_at: null,
+        freshness_status: "unknown",
+        freshness_age_days: null,
+        requires_refresh: true,
       },
     ],
     current_metrics: [
@@ -170,6 +175,8 @@ function previewItem(input: PreviewItemInput): InfluencerListItem {
       previewContact(input.row, type),
     ),
     possible_duplicate_contact: false,
+    freshness_status: "unknown",
+    requires_refresh: true,
     created_at: "2026-08-01T00:00:00.000Z",
     updated_at: "2026-08-01T00:00:00.000Z",
   };
@@ -193,6 +200,11 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     source: "huitun",
     is_active: idx === 0,
     source_tags: input.tags,
+    last_huitun_observed_at: null,
+    last_huitun_imported_at: null,
+    freshness_status: idx === 0 ? ("unknown" as const) : null,
+    freshness_age_days: null,
+    requires_refresh: idx === 0,
     bio: null,
     gender: null,
     region_raw: null,
@@ -229,6 +241,8 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     source_states: previewSourceStates(input.row),
     source_identities: previewSourceIdentities(input.row),
     current_metrics: metrics,
+    freshness_status: "unknown",
+    requires_refresh: true,
   };
 }
 

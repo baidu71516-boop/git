@@ -30,6 +30,76 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
   JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
+export type RefreshQueueItemStatus =
+  | "pending"
+  | "fulfilled_changed"
+  | "fulfilled_no_change"
+  | "stale_return"
+  | "unresolved"
+  | "cancelled";
+
+export type RefreshReturnReason =
+  | "ROW_NOT_OWNER_EFFECTIVE"
+  | "ROW_NOT_UNIQUELY_MATCHED"
+  | "ROW_ACTION_STAYS_PENDING"
+  | "QUEUE_ITEM_NOT_FOUND"
+  | "QUEUE_ITEM_TERMINAL"
+  | "MISSING_RETURN"
+  | "MULTIPLE_OWNER_ROWS"
+  | "ACTION_CHANGE_SUMMARY_MISMATCH"
+  | "ACTION_NOT_FULFILLABLE"
+  | "ACQUISITION_CONFIRMATION_REQUIRED"
+  | "ACQUISITION_MISSING"
+  | "ACQUISITION_NOT_NEWER_THAN_BASELINE"
+  | "NO_CHANGE_BASELINE_MISSING"
+  | "EFFECTIVE_CHANGES"
+  | "RELIABLE_NO_CHANGE";
+
+export type RefreshReturnRowOutcome =
+  "pending" | "outside_queue" | "expected_fulfillment" | "terminal_item";
+
+export type PreviewRowLocator = {
+  import_job_file_id: string;
+  file_position: number;
+  row_number: number;
+  import_row_id: string;
+};
+
+export type RefreshReturnRowEvidence = {
+  locator: PreviewRowLocator;
+  outcome: RefreshReturnRowOutcome;
+  queue_item_id: string | null;
+  expected_status: RefreshQueueItemStatus | null;
+  reason: RefreshReturnReason;
+  is_last_return_claimant: boolean;
+};
+
+export type RefreshReturnPreviewSummary = {
+  schema_version: 1;
+  row_count: number;
+  queue_item_count: number;
+  matched_row_count: number;
+  outside_queue_row_count: number;
+  pending_row_count: number;
+  queue_items_with_return_count: number;
+  queue_items_without_return_count: number;
+  expected_fulfilled_changed_count: number;
+  expected_fulfilled_no_change_count: number;
+  expected_stale_return_count: number;
+  expected_unresolved_count: number;
+  unchanged_terminal_item_count: number;
+  conflict_item_count: number;
+};
+
+export type RefreshReturnPreviewResult = RefreshReturnPreviewSummary & {
+  missing_queue_item_ids: string[];
+};
+
+export type RefreshReturnConfirmResult = RefreshReturnPreviewSummary & {
+  claimed_item_count: number;
+  queue_completed: boolean;
+};
+
 export type ImportRowAction =
   "create" | "update" | "no_change" | "skip" | "error" | "manual_review";
 
@@ -168,6 +238,7 @@ export type UnifiedPreviewSummary = {
   screening_match_rows: number;
   screening_not_match_rows: number;
   screening_unknown_rows: number;
+  refresh_return?: RefreshReturnPreviewResult;
 };
 
 export type ImportConfirmResult = {
@@ -179,6 +250,7 @@ export type ImportConfirmResult = {
   skipped_rows: number;
   error_rows: number;
   manual_review_rows: number;
+  refresh_return?: RefreshReturnConfirmResult;
 };
 
 export type PreviewSummary = UnifiedPreviewSummary;
@@ -222,6 +294,7 @@ export type CollectionJobPublic = {
 export type ImportJobPublic = {
   id: string;
   collection_job_id: string;
+  refresh_queue_id: string | null;
   department_id: string;
   operator_id: string;
   stored_file_id: string | null;
@@ -297,6 +370,7 @@ export type ImportRowIssue = Record<string, JsonValue>;
 export type ImportRowMergePlan = {
   screening?: ScreeningEvaluation;
   change_summary?: ChangeSummary;
+  refresh_return?: RefreshReturnRowEvidence;
   preview_context_hash?: string;
   [key: string]: unknown;
 };
@@ -338,6 +412,7 @@ export type ImportDispatchResult = {
 
 export type CreateBulkImportJobInput = {
   collection_job_id: string;
+  refresh_queue_id?: string | null;
 };
 
 export type UploadBulkImportFileInput = {

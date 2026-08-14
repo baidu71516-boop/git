@@ -4,6 +4,9 @@ export type OwnerSummary = {
   status: "active" | "disabled";
 };
 
+export type FreshnessStatus =
+  "unknown" | "fresh" | "aging" | "stale" | "very_stale";
+
 export type PlatformAccountSummary = {
   id: string;
   platform: string;
@@ -14,6 +17,11 @@ export type PlatformAccountSummary = {
   source: string;
   is_active: boolean;
   source_tags: string[];
+  last_huitun_observed_at: string | null;
+  last_huitun_imported_at: string | null;
+  freshness_status: FreshnessStatus | null;
+  freshness_age_days: number | null;
+  requires_refresh: boolean;
 };
 
 export type CurrentMetricsSummary = {
@@ -43,6 +51,8 @@ export type InfluencerListItem = {
   current_metrics: CurrentMetricsSummary[];
   current_contacts: CurrentContactSummary[];
   possible_duplicate_contact: boolean;
+  freshness_status: FreshnessStatus;
+  requires_refresh: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -67,6 +77,10 @@ export type InfluencerListQueryParams = {
   followers_max?: string;
   owner_operator_id?: string;
   crm_stage?: string;
+  freshness_status?: FreshnessStatus;
+  requires_refresh?: "true" | "false";
+  last_huitun_observed_before?: string;
+  last_huitun_observed_after?: string;
   page?: string;
   page_size?: string;
 };
@@ -149,6 +163,8 @@ export type InfluencerDetail = {
   source_states: SourceStateDetail[];
   source_identities: SourceIdentityDetail[];
   current_metrics: CurrentMetricsDetail[];
+  freshness_status: FreshnessStatus;
+  requires_refresh: boolean;
 };
 
 export type MetricSnapshotItem = {

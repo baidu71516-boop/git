@@ -24,7 +24,7 @@ function readQuery(search: URLSearchParams): InfluencerListQueryParams {
   const query: InfluencerListQueryParams = {};
   for (const name of INFLUENCER_QUERY_PARAMETERS) {
     const value = search.get(name);
-    if (value !== null) query[name] = value;
+    if (value !== null) Object.assign(query, { [name]: value });
   }
   query.page ??= "1";
   query.page_size ??= "50";
@@ -101,7 +101,11 @@ export function InfluencerWorkspace() {
     query.followers_min ||
     query.followers_max ||
     query.owner_operator_id ||
-    query.crm_stage,
+    query.crm_stage ||
+    query.freshness_status ||
+    query.requires_refresh ||
+    query.last_huitun_observed_before ||
+    query.last_huitun_observed_after,
   );
 
   return (

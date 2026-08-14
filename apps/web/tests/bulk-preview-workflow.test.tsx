@@ -151,6 +151,7 @@ function makeJob(overrides: Partial<ImportJobPublic> = {}): ImportJobPublic {
   return {
     id: "job-1",
     collection_job_id: collection.id,
+    refresh_queue_id: null,
     department_id: "department-1",
     operator_id: "operator-1",
     stored_file_id: null,
@@ -842,7 +843,9 @@ describe("Bulk Preview and Confirm terminal states", () => {
 
     renderBulk();
     await screen.findByText("✓ 导入完成");
-    const resultSection = document.querySelector(".bulk-preview-completed-result");
+    const resultSection = document.querySelector(
+      ".bulk-preview-completed-result",
+    );
     expect(resultSection).not.toBeNull();
     const actual = within(resultSection as HTMLElement);
     for (const [label, value] of [

@@ -184,6 +184,23 @@ describe("Bulk import API contract", () => {
     ]);
   });
 
+  it("serializes the optional Refresh Queue link without changing ordinary Bulk create", async () => {
+    apiRequestMock.mockResolvedValue(success({ id: "job-return" }));
+
+    await createBulkImportJob({
+      collection_job_id: "collection-1",
+      refresh_queue_id: "queue-1",
+    });
+
+    expect(apiRequestMock).toHaveBeenCalledWith("/import-jobs/bulk", {
+      method: "POST",
+      body: JSON.stringify({
+        collection_job_id: "collection-1",
+        refresh_queue_id: "queue-1",
+      }),
+    });
+  });
+
   it("uploads one multipart file with exact fields and omits an unset time", async () => {
     const file = new File(["达人名称\n小美"], "creators.csv", {
       type: "text/csv",
