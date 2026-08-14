@@ -11,6 +11,7 @@ import type {
   ScreeningResult,
   UnifiedPreviewSummary,
 } from "./types";
+import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 
 export type BulkPreviewScenarioKey =
   | "no_job"
@@ -21,7 +22,9 @@ export type BulkPreviewScenarioKey =
   | "preview_ready"
   | "confirm_queued"
   | "importing"
-  | "completed";
+  | "completed"
+  | "refresh_preview_ready"
+  | "refresh_completed";
 
 export type BulkPreviewScenario = {
   key: BulkPreviewScenarioKey;
@@ -30,6 +33,7 @@ export type BulkPreviewScenario = {
   collection: CollectionJobPublic | null;
   files: ImportJobFilePublic[];
   rows: ImportRowPublic[];
+  refreshQueueDetail?: RefreshQueueDetail | null;
 };
 
 const collection: CollectionJobPublic = {
@@ -495,6 +499,138 @@ const previewRows: ImportRowPublic[] = [
   ...Array.from({ length: 45 }, (_, index) => createRow(index + 8, {})),
 ];
 
+const refreshQueueId = "a0000000-0000-0000-0000-000000000001";
+const refreshPreviewSummary: UnifiedPreviewSummary = {
+  ...previewSummary,
+  refresh_return: {
+    schema_version: 1,
+    row_count: 51,
+    queue_item_count: 50,
+    matched_row_count: 44,
+    outside_queue_row_count: 3,
+    pending_row_count: 4,
+    queue_items_with_return_count: 45,
+    queue_items_without_return_count: 5,
+    expected_fulfilled_changed_count: 20,
+    expected_fulfilled_no_change_count: 18,
+    expected_stale_return_count: 3,
+    expected_unresolved_count: 3,
+    unchanged_terminal_item_count: 1,
+    conflict_item_count: 1,
+    missing_queue_item_ids: [
+      "a1000000-0000-0000-0000-000000000001",
+      "a1000000-0000-0000-0000-000000000002",
+      "a1000000-0000-0000-0000-000000000003",
+      "a1000000-0000-0000-0000-000000000004",
+      "a1000000-0000-0000-0000-000000000005",
+    ],
+  },
+};
+
+function withRefreshEvidence(
+  row: ImportRowPublic,
+  evidence: NonNullable<
+    NonNullable<ImportRowPublic["merge_plan"]>["refresh_return"]
+  >,
+): ImportRowPublic {
+  return {
+    ...row,
+    merge_plan: {
+      ...row.merge_plan,
+      refresh_return: evidence,
+    },
+  };
+}
+
+const refreshPreviewRows = previewRows.map((row, index) => {
+  const locator = {
+    import_job_file_id: row.import_job_file_id,
+    file_position: 1,
+    row_number: row.row_number,
+    import_row_id: row.id,
+  };
+  if (index === 0) {
+    return withRefreshEvidence(row, {
+      locator,
+      outcome: "expected_fulfillment",
+      queue_item_id: "a1000000-0000-0000-0000-000000000010",
+      expected_status: "stale_return",
+      reason: "ACQUISITION_NOT_NEWER_THAN_BASELINE",
+      is_last_return_claimant: true,
+    });
+  }
+  if (index === 1) {
+    return withRefreshEvidence(row, {
+      locator,
+      outcome: "expected_fulfillment",
+      queue_item_id: "a1000000-0000-0000-0000-000000000011",
+      expected_status: "unresolved",
+      reason: "MULTIPLE_OWNER_ROWS",
+      is_last_return_claimant: true,
+    });
+  }
+  return withRefreshEvidence(row, {
+    locator,
+    outcome: "expected_fulfillment",
+    queue_item_id: `a1000000-0000-0000-${String(index).padStart(12, "0")}`,
+    expected_status:
+      row.action === "no_change" ? "fulfilled_no_change" : "fulfilled_changed",
+    reason:
+      row.action === "no_change" ? "RELIABLE_NO_CHANGE" : "EFFECTIVE_CHANGES",
+    is_last_return_claimant: true,
+  });
+});
+
+const refreshQueueDetail: RefreshQueueDetail = {
+  queue: {
+    id: refreshQueueId,
+    department_id: collection.department_id,
+    created_by_operator_id: collection.owner_operator_id,
+    status: "exported",
+    as_of: "2026-08-01T01:00:00Z",
+    requested_limit: 50,
+    today_total_limit: 100,
+    refresh_limit: 50,
+    policy_version: 1,
+    criteria_snapshot: {},
+    created_at: "2026-08-13T00:30:00Z",
+    updated_at: "2026-08-13T04:30:00Z",
+    exported_at: "2026-08-13T01:00:00Z",
+    completed_at: null,
+    cancelled_at: null,
+  },
+  summary: {
+    requested: 50,
+    selected: 50,
+    unique_influencers: 50,
+    freshness_breakdown: { stale: 50 },
+    priority_breakdown: { "3": 50 },
+    status_breakdown: {
+      fulfilled_changed: 20,
+      fulfilled_no_change: 18,
+      stale_return: 3,
+      unresolved: 3,
+      pending: 6,
+    },
+  },
+};
+
+const completedRefreshQueueDetail: RefreshQueueDetail = {
+  ...refreshQueueDetail,
+  queue: {
+    ...refreshQueueDetail.queue,
+    status: "completed",
+    completed_at: "2026-08-13T04:30:00Z",
+  },
+  summary: {
+    ...refreshQueueDetail.summary,
+    status_breakdown: {
+      fulfilled_changed: 26,
+      fulfilled_no_change: 24,
+    },
+  },
+};
+
 function createJob(
   status: ImportJobStatus = "draft",
   overrides: Partial<ImportJobPublic> = {},
@@ -540,7 +676,10 @@ function createJob(
   };
 }
 
-function createUnifiedPreviewJob(status: ImportJobStatus): ImportJobPublic {
+function createUnifiedPreviewJob(
+  status: ImportJobStatus,
+  overrides: Partial<ImportJobPublic> = {},
+): ImportJobPublic {
   const confirmed =
     status === "confirm_queued" ||
     status === "importing" ||
@@ -572,6 +711,7 @@ function createUnifiedPreviewJob(status: ImportJobStatus): ImportJobPublic {
           manual_review_rows: previewSummary.manual_review_rows,
         }
       : null,
+    ...overrides,
   });
 }
 
@@ -634,6 +774,30 @@ export function createBulkPreviewScenarios(): BulkPreviewScenario[] {
       files: previewFiles,
       rows: previewRows,
     })),
+    {
+      key: "refresh_preview_ready",
+      label: "更新回流预览",
+      job: createUnifiedPreviewJob("preview_ready", {
+        refresh_queue_id: refreshQueueId,
+        preview_summary: refreshPreviewSummary,
+      }),
+      collection,
+      files: previewFiles,
+      rows: refreshPreviewRows,
+      refreshQueueDetail,
+    },
+    {
+      key: "refresh_completed",
+      label: "更新回流完成",
+      job: createUnifiedPreviewJob("completed", {
+        refresh_queue_id: refreshQueueId,
+        preview_summary: refreshPreviewSummary,
+      }),
+      collection,
+      files: previewFiles,
+      rows: refreshPreviewRows,
+      refreshQueueDetail: completedRefreshQueueDetail,
+    },
   ];
 }
 

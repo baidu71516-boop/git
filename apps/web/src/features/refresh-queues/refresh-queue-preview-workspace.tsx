@@ -33,6 +33,7 @@ import {
   refreshQueuePreviewQueues,
 } from "./preview-fixtures";
 import { RefreshQueueListTable } from "./refresh-queue-list";
+import { RefreshQueueReturnButton } from "./refresh-queue-detail";
 import type { RefreshQueue, RefreshQueueStatus } from "./types";
 
 const { Text, Title } = Typography;
@@ -161,6 +162,18 @@ export function RefreshQueueDetailPreviewWorkspace({
   const items = useMemo(() => createRefreshQueuePreviewItems(status), [status]);
   const visibleItems = items.slice((page - 1) * pageSize, page * pageSize);
   const canAct = status === "open" || status === "exported";
+  const statusBreakdown = detail.summary.status_breakdown;
+  const unfinishedCount =
+    (statusBreakdown.pending ?? 0) +
+    (statusBreakdown.stale_return ?? 0) +
+    (statusBreakdown.unresolved ?? 0);
+  const hasPriorReturn =
+    (statusBreakdown.fulfilled_changed ?? 0) +
+      (statusBreakdown.fulfilled_no_change ?? 0) +
+      (statusBreakdown.stale_return ?? 0) +
+      (statusBreakdown.unresolved ?? 0) >
+    0;
+  const canProcessReturn = status === "exported" && unfinishedCount > 0;
 
   function previewExport() {
     downloadBlob(
@@ -217,6 +230,12 @@ export function RefreshQueueDetailPreviewWorkspace({
           extra={
             canAct ? (
               <Space wrap>
+                {canProcessReturn ? (
+                  <RefreshQueueReturnButton
+                    queueId={detail.queue.id}
+                    hasPriorReturn={hasPriorReturn}
+                  />
+                ) : null}
                 <Button
                   type="primary"
                   icon={<DownloadOutlined aria-hidden="true" />}

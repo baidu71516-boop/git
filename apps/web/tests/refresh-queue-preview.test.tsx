@@ -142,6 +142,18 @@ describe("development Refresh Queue visual preview", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   }, 20_000);
 
+  it("shows the shared return workflow entry for an unfinished exported Queue", () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    renderPreview(
+      <RefreshQueueDetailPreviewWorkspace initialStatus="exported" />,
+    );
+
+    expect(
+      screen.getByRole("link", { name: "继续处理回流数据" }),
+    ).toHaveAttribute("href", "/?workspace=bulk&refresh_queue_id=exported");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("supports each valid detail preview route and rejects unknown states", async () => {
     vi.stubEnv("NODE_ENV", "development");
 

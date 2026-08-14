@@ -92,6 +92,20 @@ export function BulkImportPreviewWorkspace() {
             previewBusy={false}
             error={null}
             notice={null}
+            refreshContext={
+              scenario.job?.refresh_queue_id
+                ? {
+                    queueId: scenario.job.refresh_queue_id,
+                    detail: scenario.refreshQueueDetail ?? null,
+                    loading: false,
+                    error: null,
+                    canExit: false,
+                    showViewLink: scenario.job.status !== "completed",
+                    onExit: noOperation,
+                    onReload: noOperation,
+                  }
+                : null
+            }
             onNewCollection={noOperation}
             onSelectFiles={noOperation}
             onRetryUpload={noOperation}
