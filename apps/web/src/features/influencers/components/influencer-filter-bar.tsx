@@ -31,6 +31,12 @@ const freshnessOptions: Array<{ value: FreshnessStatus; label: string }> = [
   { value: "unknown", label: "未知" },
 ];
 
+const refreshNeedOptions: Array<{ value: string; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "true", label: "需要更新" },
+  { value: "false", label: "暂不需要" },
+];
+
 type InfluencerFilterBarProps = {
   query: InfluencerListQueryParams;
   options: InfluencerFilterOptions | undefined;
@@ -181,7 +187,7 @@ export function InfluencerFilterBar({
         </Row>
 
         <Row gutter={[12, 12]} className="follower-filter-row">
-          <Col xs={24} lg={12}>
+          <Col xs={24} lg={8}>
             <div className="influencer-follower-filter-compact">
               <span className="influencer-follower-filter-label">粉丝区间</span>
               <Input
@@ -206,16 +212,18 @@ export function InfluencerFilterBar({
                 value={maximumDraft}
                 onChange={(event) => setMaximumDraft(event.target.value)}
               />
-              <Button
-                className="influencer-follower-apply-button"
-                aria-label="应用粉丝范围"
-                onClick={applyFollowers}
-              >
-                应用
-              </Button>
             </div>
           </Col>
-          <Col xs={24} sm={12} lg={6}>
+          <Col xs={24} sm={8} lg={4}>
+            <Button
+              className="influencer-follower-apply-button"
+              aria-label="应用粉丝范围"
+              onClick={applyFollowers}
+            >
+              应用
+            </Button>
+          </Col>
+          <Col xs={24} sm={8} lg={6}>
             <Select
               aria-label="数据时效筛选"
               className="full-width"
@@ -228,20 +236,20 @@ export function InfluencerFilterBar({
               options={freshnessOptions}
             />
           </Col>
-          <Col xs={24} sm={12} lg={6}>
+          <Col xs={24} sm={8} lg={6}>
             <Select
               aria-label="更新需求筛选"
               className="full-width"
               allowClear
               placeholder="选择更新需求"
-              value={query.requires_refresh}
+              value={query.requires_refresh ?? "all"}
               onChange={(value: string | undefined) =>
-                onChange({ requires_refresh: value })
+                onChange({
+                  requires_refresh:
+                    value === "all" || value === undefined ? undefined : value,
+                })
               }
-              options={[
-                { value: "true", label: "需要更新" },
-                { value: "false", label: "无需更新" },
-              ]}
+              options={refreshNeedOptions}
             />
           </Col>
         </Row>

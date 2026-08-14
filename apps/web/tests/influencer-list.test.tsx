@@ -237,7 +237,7 @@ describe("InfluencerWorkspace", () => {
     expect(within(row).getByText("20.66万")).toBeInTheDocument();
     expect(within(row).getByText("高意向")).toBeInTheDocument();
     expect(within(row).getByText("陈旧")).toBeInTheDocument();
-    expect(within(row).getByText("需要更新")).toBeInTheDocument();
+    expect(within(row).getByText("距上次采集 41 天")).toBeInTheDocument();
     expect(within(row).getByText("邮箱 · 手机")).toBeInTheDocument();
     expect(within(row).getByText("需核对")).toBeInTheDocument();
     expect(within(row).queryByText("***")).not.toBeInTheDocument();
@@ -270,7 +270,7 @@ describe("InfluencerWorkspace", () => {
     expect(search).toHaveAttribute("placeholder", "搜索达人昵称或账号名");
     expect(search).toHaveAttribute("maxlength", "160");
     expect(screen.getByText("严重陈旧")).toBeInTheDocument();
-    expect(screen.getByText("无需更新")).toBeInTheDocument();
+    expect(screen.getByText("暂不需要")).toBeInTheDocument();
     fireEvent.change(search, { target: { value: "  新搜索  " } });
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
     expect(navigation.replace).toHaveBeenLastCalledWith(
@@ -410,7 +410,9 @@ describe("InfluencerWorkspace", () => {
     await screen.findByRole("link", { name: "零粉多账号达人" });
 
     expect(screen.getAllByText("陈旧").length).toBeGreaterThanOrEqual(2);
-    expect(screen.getAllByText("需要更新").length).toBeGreaterThanOrEqual(2);
+    expect(
+      screen.getAllByText("距上次采集 41 天").length,
+    ).toBeGreaterThanOrEqual(1);
     const search = screen.getByRole("textbox", { name: "昵称搜索" });
     fireEvent.change(search, { target: { value: "国风" } });
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));

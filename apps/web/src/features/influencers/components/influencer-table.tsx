@@ -175,14 +175,17 @@ const columns: ColumnsType<InfluencerListItem> = [
   {
     title: "数据时效",
     key: "freshness",
-    width: 112,
-    render: (_, item) => (
-      <FreshnessStatusText
-        status={item.freshness_status}
-        requiresRefresh={item.requires_refresh}
-        showRefreshNeed
-      />
-    ),
+    width: 136,
+    render: (_, item) => {
+      const account = item.platform_accounts[0];
+      return (
+        <FreshnessStatusText
+          status={account?.freshness_status ?? null}
+          requiresRefresh={account?.requires_refresh ?? item.requires_refresh}
+          freshnessAgeDays={account?.freshness_age_days ?? null}
+        />
+      );
+    },
   },
   {
     title: "联系方式",

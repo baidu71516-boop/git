@@ -195,7 +195,7 @@ function PlatformMetricGrid({
         )}
         {account.freshness_age_days !== null
           ? rowItem(
-              "距可靠采集",
+              "距上次采集",
               `${account.freshness_age_days} 天`,
               `${account.id}-freshness-age`,
             )

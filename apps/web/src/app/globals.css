@@ -1308,14 +1308,21 @@ body {
   color: #9b4f4f;
 }
 
-.freshness-status-unknown,
-.freshness-status-unavailable {
+.freshness-status-unknown {
   color: var(--app-text-secondary);
+}
+
+.freshness-status-note,
+.freshness-refresh-needed {
+  font-size: 11px;
 }
 
 .freshness-refresh-needed {
   color: #8d5f3a;
-  font-size: 11px;
+}
+
+.freshness-status-note {
+  color: var(--app-text-secondary);
 }
 
 .influencer-view-link {

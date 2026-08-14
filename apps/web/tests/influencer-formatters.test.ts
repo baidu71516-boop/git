@@ -5,6 +5,7 @@ import {
   crmStageDisplay,
   formatExactFollowers,
   formatFollowers,
+  freshnessSupportText,
   freshnessDisplay,
   freshnessExplanation,
   formatMetricsTimestamp,
@@ -50,11 +51,13 @@ describe("influencer list formatters", () => {
   });
 
   it("keeps both backend-defined unknown semantics as explanations", () => {
+    expect(freshnessSupportText("unknown", true)).toBe("暂无可靠采集记录");
+    expect(freshnessSupportText("unknown", false)).toBe("暂无可更新数据");
     expect(freshnessExplanation("unknown", true)).toBe(
-      "暂无可靠采集记录，需要更新",
+      "暂无可靠采集记录，建议加入数据更新名单。",
     );
     expect(freshnessExplanation("unknown", false)).toBe(
-      "暂无可参与灰豚更新的数据",
+      "暂无可参与当前灰豚更新流程的数据。",
     );
     expect(freshnessExplanation("stale", true)).toBeNull();
   });

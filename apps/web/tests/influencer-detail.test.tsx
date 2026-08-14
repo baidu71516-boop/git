@@ -349,8 +349,8 @@ describe("InfluencerDetailWorkspace", () => {
       within(platformMetrics as HTMLElement).getByText("陈旧"),
     ).toBeInTheDocument();
     expect(
-      within(platformMetrics as HTMLElement).getByText("不适用"),
-    ).toBeInTheDocument();
+      within(platformMetrics as HTMLElement).getAllByText("未知").length,
+    ).toBeGreaterThanOrEqual(1);
     expect(
       within(platformMetrics as HTMLElement).getAllByText("最近可靠采集时间"),
     ).toHaveLength(2);
@@ -413,7 +413,9 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       screen.queryByRole("button", { name: /刷新此达人|刷新/ }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByText(/Refresh Queue|刷新队列/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Refresh Queue|刷新队列/),
+    ).not.toBeInTheDocument();
   });
 
   it("renders an unassigned Owner and missing fields without inventing values", async () => {

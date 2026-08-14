@@ -142,9 +142,9 @@ export function crmStageDisplay(value: string | null | undefined): {
 
 export function freshnessDisplay(value: FreshnessStatus | null): {
   label: string;
-  tone: FreshnessStatus | "unavailable";
+  tone: FreshnessStatus;
 } {
-  if (value === null) return { label: "不适用", tone: "unavailable" };
+  if (value === null) return { label: "未知", tone: "unknown" };
   return freshnessPresentation[value];
 }
 
@@ -154,8 +154,16 @@ export function freshnessExplanation(
 ): string | null {
   if (value !== "unknown") return null;
   return requiresRefresh
-    ? "暂无可靠采集记录，需要更新"
-    : "暂无可参与灰豚更新的数据";
+    ? "暂无可靠采集记录，建议加入数据更新名单。"
+    : "暂无可参与当前灰豚更新流程的数据。";
+}
+
+export function freshnessSupportText(
+  value: FreshnessStatus | null,
+  requiresRefresh: boolean,
+): string | null {
+  if (value !== "unknown") return null;
+  return requiresRefresh ? "暂无可靠采集记录" : "暂无可更新数据";
 }
 
 export function latestMetricsTimestamp(
