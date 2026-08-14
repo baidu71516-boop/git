@@ -1,6 +1,77 @@
 import type { ReactNode } from "react";
 
-import type { JsonValue } from "./types";
+import type { CurrentMetricsSummary, JsonValue } from "./types";
+
+const integerFormatter = new Intl.NumberFormat("zh-CN", {
+  maximumFractionDigits: 0,
+});
+
+const compactFollowerFormatter = new Intl.NumberFormat("zh-CN", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 2,
+});
+
+const largeCompactFollowerFormatter = new Intl.NumberFormat("zh-CN", {
+  minimumFractionDigits: 0,
+  maximumFractionDigits: 1,
+});
+
+const shanghaiDay = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const shanghaiMonthDay = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+const shanghaiTime = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const shanghaiTooltipDateTime = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
+const platformLabels: Record<string, string> = {
+  xiaohongshu: "小红书",
+};
+
+const contactTypeLabels: Record<string, string> = {
+  email: "邮箱",
+  phone: "手机",
+  wechat: "微信",
+  other: "其他",
+};
+
+const crmStagePresentation: Record<string, { label: string; color?: string }> =
+  {
+    待开发: { label: "待开发" },
+    已发送邮件: { label: "已发送邮件", color: "blue" },
+    第一次跟进: { label: "第一次跟进", color: "blue" },
+    第二次跟进: { label: "第二次跟进", color: "blue" },
+    已回复: { label: "已回复", color: "cyan" },
+    已加微信: { label: "已加微信", color: "cyan" },
+    沟通中: { label: "沟通中", color: "purple" },
+    潜在合作: { label: "潜在合作", color: "gold" },
+    高意向: { label: "高意向", color: "orange" },
+    暂不考虑: { label: "暂不考虑" },
+    长期维护: { label: "长期维护", color: "green" },
+    已结束: { label: "已结束" },
+  };
 
 const shanghaiDateTime = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai",
@@ -23,6 +94,76 @@ export function formatShanghaiDate(value: string | null): string {
   if (!value) return "—";
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "—" : shanghaiDateTime.format(date);
+}
+
+export function formatFollowers(value: number | null): string {
+  if (value === null) return "—";
+  if (value < 10_000) return integerFormatter.format(value);
+  const scaled = value / 10_000;
+  const formatter =
+    scaled >= 100 ? largeCompactFollowerFormatter : compactFollowerFormatter;
+  return `${formatter.format(scaled)}万`;
+}
+
+export function formatExactFollowers(value: number): string {
+  return integerFormatter.format(value);
+}
+
+export function platformLabel(value: string): string {
+  return platformLabels[value] ?? value;
+}
+
+export function contactTypeLabel(value: string): string {
+  return contactTypeLabels[value] ?? "其他";
+}
+
+export function crmStageDisplay(value: string | null | undefined): {
+  label: string;
+  color?: string;
+} {
+  if (!value) return { label: "未设置" };
+  return crmStagePresentation[value] ?? { label: value };
+}
+
+export function latestMetricsTimestamp(
+  metrics: CurrentMetricsSummary[],
+): string | null {
+  let latest: { raw: string; time: number } | null = null;
+  for (const metric of metrics) {
+    if (!metric.source_updated_at) continue;
+    const time = new Date(metric.source_updated_at).getTime();
+    if (Number.isNaN(time)) continue;
+    if (latest === null || time > latest.time) {
+      latest = { raw: metric.source_updated_at, time };
+    }
+  }
+  return latest?.raw ?? null;
+}
+
+function calendarDayNumber(date: Date): number {
+  const [year, month, day] = shanghaiDay.format(date).split("-").map(Number);
+  return Date.UTC(year, month - 1, day) / 86_400_000;
+}
+
+export function formatMetricsTimestamp(
+  value: string | null,
+  now: Date = new Date(),
+): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  const daysAgo = calendarDayNumber(now) - calendarDayNumber(date);
+  if (daysAgo === 0) return `今天 ${shanghaiTime.format(date)}`;
+  if (daysAgo === 1) return `昨天 ${shanghaiTime.format(date)}`;
+  if (daysAgo > 1 && daysAgo < 7) return `${daysAgo}天前`;
+  return shanghaiMonthDay.format(date);
+}
+
+export function formatMetricsTimestampTooltip(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "—"
+    : shanghaiTooltipDateTime.format(date).replaceAll("/", "-");
 }
 
 export function renderJsonValue(value: JsonValue, path = "metric"): ReactNode {

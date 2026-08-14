@@ -31,6 +31,11 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import {
+  IMPORT_CANONICAL_FIELDS,
+  ImportFieldMappingEditor,
+} from "@/features/imports/components/import-field-mapping-editor";
+import { getBulkErrorMessage } from "@/features/imports/formatters";
 import { apiRequest } from "@/lib/api/client";
 
 const { Paragraph, Text, Title } = Typography;
@@ -137,48 +142,6 @@ const statusLabels: Record<ImportStatus, string> = {
   cancelled: "已取消",
 };
 
-const canonicalFields = [
-  "nickname",
-  "profile_url",
-  "platform_account_id",
-  "external_source_id",
-  "account_handle",
-  "email",
-  "source_updated_at",
-  "bio",
-  "gender",
-  "region_raw",
-  "verification_info",
-  "mcn_name",
-  "creator_tags",
-  "creator_level",
-  "is_brand_partner",
-  "followers_count",
-  "huitun_score",
-  "notes_count",
-  "likes_collects_total",
-  "commercial_notes_count",
-  "notes_60d",
-  "viral_rate_60d",
-  "avg_likes_60d",
-  "avg_collects_60d",
-  "avg_comments_60d",
-  "avg_shares_60d",
-  "active_fans_raw",
-  "suspicious_fans_raw",
-  "fan_gender_raw",
-  "fan_region_raw",
-  "fan_age_raw",
-  "fan_active_time_raw",
-  "fan_interests_raw",
-  "image_note_price",
-  "image_cpe",
-  "image_cpm",
-  "video_note_price",
-  "video_cpe",
-  "video_cpm",
-];
-
 function summaryNumber(
   summary: Record<string, unknown> | null,
   key: string,
@@ -222,6 +185,27 @@ function issueText(issue: Record<string, unknown>): string {
   return `${code}${field}：${message}`;
 }
 
+function legacyFailureText(errorCode: string | null): string {
+  switch (errorCode) {
+    case "INVALID_FILE_EXTENSION":
+      return "仅支持 CSV / XLSX 文件，请重新选择文件。";
+    case "MIME_MISMATCH":
+      return "文件内容与格式不匹配，请检查后重新上传。";
+    case "INVALID_CSV_ENCODING":
+      return "CSV 编码无法识别，请转换编码后重新上传。";
+    case "INVALID_CSV":
+      return "CSV 文件格式不正确或包含不安全内容，请检查后重新上传。";
+    case "EMPTY_FILE":
+      return "文件内容为空，请选择包含达人数据的文件。";
+    case "FILE_TOO_LARGE":
+      return "文件过大，请缩小后重新上传。";
+    case "FILE_INTEGRITY_FAILED":
+      return "文件完整性校验失败，请重新上传。";
+    default:
+      return "文件处理失败，请重新上传文件或新建采集任务。";
+  }
+}
+
 function rowDetails(row: ImportRow) {
   return (
     <div className="row-preview-details">
@@ -237,7 +221,7 @@ function rowDetails(row: ImportRow) {
         <Alert
           type="warning"
           showIcon
-          message="行级 Warning"
+          message="行级警告"
           description={
             <ul className="row-issue-list">
               {row.warnings.map((issue, index) => (
@@ -251,7 +235,7 @@ function rowDetails(row: ImportRow) {
         <Alert
           type="error"
           showIcon
-          message="行级 Error"
+          message="行级错误"
           description={
             <ul className="row-issue-list">
               {row.errors.map((issue, index) => (
@@ -328,7 +312,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
       try {
         await loadCollections();
       } catch (caught) {
-        setError(caught instanceof Error ? caught.message : "采集任务加载失败");
+        setError(getBulkErrorMessage(caught, "采集任务加载失败，请稍后重试。"));
       }
     }
     void initialize();
@@ -338,7 +322,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
     if (!job || !POLLING_STATUSES.has(job.status)) return;
     const timer = window.setTimeout(() => {
       void loadJob(job.id).catch((caught: unknown) => {
-        setError(caught instanceof Error ? caught.message : "导入状态刷新失败");
+        setError(getBulkErrorMessage(caught, "导入状态刷新失败，请稍后重试。"));
       });
     }, 1200);
     return () => window.clearTimeout(timer);
@@ -371,7 +355,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
       setCollectionModalOpen(false);
       setNotice("采集任务已创建");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "采集任务创建失败");
+      setError(getBulkErrorMessage(caught, "采集任务创建失败，请检查后重试。"));
     } finally {
       setBusy(false);
     }
@@ -396,7 +380,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
       setRowOffset(0);
       setNotice("文件已安全保存，后台正在解析");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "文件上传失败");
+      setError(getBulkErrorMessage(caught, "文件上传失败，请检查后重试。"));
     } finally {
       setBusy(false);
     }
@@ -414,7 +398,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
       await loadJob(job.id);
       setNotice("字段映射已保存，正在重新生成预览");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "字段映射保存失败");
+      setError(getBulkErrorMessage(caught, "字段映射保存失败，请检查后重试。"));
     } finally {
       setBusy(false);
     }
@@ -430,9 +414,9 @@ export function ImportWorkspace({ role }: { role: Role }) {
         body: JSON.stringify({ preview_revision: job.preview_revision }),
       });
       await loadJob(job.id);
-      setNotice("确认请求已排队；同一 Revision 不会重复导入");
+      setNotice("确认请求已排队，重复确认不会重复导入");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "确认导入失败");
+      setError(getBulkErrorMessage(caught, "确认导入失败，请稍后重试。"));
     } finally {
       setBusy(false);
     }
@@ -445,9 +429,9 @@ export function ImportWorkspace({ role }: { role: Role }) {
     try {
       await apiRequest(`/import-jobs/${job.id}/preview`, { method: "POST" });
       await loadJob(job.id);
-      setNotice("正在按当前数据状态重新生成 Preview");
+      setNotice("正在按当前数据状态重新生成预览");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Preview 重建失败");
+      setError(getBulkErrorMessage(caught, "数据预览重建失败，请稍后重试。"));
     } finally {
       setBusy(false);
     }
@@ -465,9 +449,9 @@ export function ImportWorkspace({ role }: { role: Role }) {
         },
       );
       if (response.data) setJob(response.data);
-      setNotice("Import Job 已取消，未写入达人业务表");
+      setNotice("本次导入已取消，未写入达人库");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "取消失败");
+      setError(getBulkErrorMessage(caught, "取消失败，请稍后重试。"));
     } finally {
       setBusy(false);
     }
@@ -508,8 +492,8 @@ export function ImportWorkspace({ role }: { role: Role }) {
             <div>
               <Title level={3}>达人采集</Title>
               <Paragraph type="secondary">
-                灰豚 CSV/XLSX 会先生成持久化 Preview，只有确认当前 Revision
-                后才写入达人数据。
+                上传灰豚导出的 CSV / XLSX
+                文件，系统会先生成数据预览，确认无误后再写入达人库。
               </Paragraph>
             </div>
             <Button
@@ -524,7 +508,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
             <Alert
               type="info"
               showIcon
-              message="Viewer 为只读角色，不能上传或确认导入。"
+              message="只读角色不能上传或确认导入。"
             />
           ) : null}
           {error ? (
@@ -588,7 +572,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
                   <Tag color={statusColor(job.status)}>
                     {statusLabels[job.status]}
                   </Tag>
-                  <Tag>Revision {job.preview_revision}</Tag>
+                  <Tag>版本 {job.preview_revision}</Tag>
                 </Space>
                 <Space direction="vertical" size={2}>
                   <Text type="secondary">
@@ -609,7 +593,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
                 </Button>
                 {CANCELLABLE_STATUSES.has(job.status) ? (
                   <Popconfirm
-                    title="确认取消本次 Import？"
+                    title="确认取消本次导入？"
                     onConfirm={() => void cancelImport()}
                   >
                     <Button danger icon={<StopOutlined />} disabled={readOnly}>
@@ -619,12 +603,12 @@ export function ImportWorkspace({ role }: { role: Role }) {
                 ) : null}
               </Space>
             </div>
-            {job.error_message ? (
+            {job.status === "failed" ? (
               <Alert
                 type="error"
                 showIcon
-                message={job.error_code ?? "IMPORT_ERROR"}
-                description={job.error_message}
+                message={legacyFailureText(job.error_code)}
+                description="当前流程不支持重试此任务；请使用上方真实入口重新上传文件，或新建采集任务后继续。"
               />
             ) : null}
             {job.status === "preview_stale" ? (
@@ -655,50 +639,30 @@ export function ImportWorkspace({ role }: { role: Role }) {
       ) : null}
 
       {job?.status === "mapping_required" ? (
-        <Card title="字段 Mapping" bordered={false}>
+        <Card title="字段映射" bordered={false}>
           <Paragraph type="secondary">
-            每个 Source Field 只能映射一个 Canonical Field；必须包含 nickname
-            与至少一个身份字段。
+            每个源字段只能映射一个目标字段；必须包含达人昵称与至少一个身份字段。
           </Paragraph>
-          <div className="mapping-grid">
-            {(job.detected_fields ?? []).map((sourceField) => (
-              <div className="mapping-row" key={sourceField}>
-                <Text>{sourceField}</Text>
-                <Select
-                  allowClear
-                  showSearch
-                  value={mapping[sourceField]}
-                  disabled={readOnly}
-                  placeholder="不导入"
-                  onChange={(value?: string) =>
-                    setMapping((current) => {
-                      const next = { ...current };
-                      if (value) next[sourceField] = value;
-                      else delete next[sourceField];
-                      return next;
-                    })
-                  }
-                  options={canonicalFields.map((field) => ({
-                    value: field,
-                    label: field,
-                  }))}
-                />
-              </div>
-            ))}
-          </div>
+          <ImportFieldMappingEditor
+            sourceFields={job.detected_fields ?? []}
+            canonicalFields={IMPORT_CANONICAL_FIELDS}
+            value={mapping}
+            onChange={setMapping}
+            disabled={readOnly}
+          />
           <Button
             type="primary"
             onClick={() => void submitMapping()}
             disabled={readOnly}
             loading={busy}
           >
-            保存 Mapping 并生成 Preview
+            保存字段映射并生成预览
           </Button>
         </Card>
       ) : null}
 
       {job?.preview_summary ? (
-        <Card title="Preview 摘要" bordered={false}>
+        <Card title="数据预览摘要" bordered={false}>
           <Row gutter={[16, 16]}>
             {[
               ["总行数", "total_rows"],
@@ -711,8 +675,8 @@ export function ImportWorkspace({ role }: { role: Role }) {
               ["无效邮箱", "invalid_email_rows"],
               ["缺少邮箱", "missing_email_rows"],
               ["疑似联系方式", "possible_duplicate_contact_rows"],
-              ["Warning", "warning_rows"],
-              ["Error", "error_rows"],
+              ["警告", "warning_rows"],
+              ["错误", "error_rows"],
             ].map(([label, key]) => (
               <Col xs={12} md={8} xl={4} key={key}>
                 <Statistic
@@ -725,12 +689,12 @@ export function ImportWorkspace({ role }: { role: Role }) {
           {job.status === "preview_ready" ? (
             <div className="preview-actions">
               <Popconfirm
-                title={`确认导入 Revision ${job.preview_revision}？`}
-                description="确认后才会写入达人、平台账号、Contact 与指标快照。"
+                title={`确认导入第 ${job.preview_revision} 版数据？`}
+                description="确认后才会写入达人、平台账号、联系方式与指标快照。"
                 onConfirm={() => void confirmImport()}
               >
                 <Button type="primary" disabled={readOnly} loading={busy}>
-                  确认当前 Preview
+                  确认当前数据预览
                 </Button>
               </Popconfirm>
             </div>
@@ -756,7 +720,7 @@ export function ImportWorkspace({ role }: { role: Role }) {
         <Card
           title={
             <Space>
-              <FileSearchOutlined /> 行级 Preview
+              <FileSearchOutlined /> 逐行数据预览
             </Space>
           }
           extra={

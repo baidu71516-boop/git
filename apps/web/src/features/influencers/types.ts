@@ -35,6 +35,7 @@ export type CurrentContactSummary = {
 export type InfluencerListItem = {
   id: string;
   display_name: string;
+  avatar_url?: string | null;
   status: "active";
   crm_stage: string;
   owner: OwnerSummary | null;
@@ -137,6 +138,7 @@ export type CurrentMetricsDetail = {
 export type InfluencerDetail = {
   id: string;
   display_name: string;
+  avatar_url?: string | null;
   status: "active";
   crm_stage: string;
   owner: OwnerSummary | null;

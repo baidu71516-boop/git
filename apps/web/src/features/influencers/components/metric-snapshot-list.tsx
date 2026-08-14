@@ -76,7 +76,7 @@ export function MetricSnapshotList({
                   ))}
                 </dl>
                 <p>
-                  Import Job / Row：{snapshot.import_job_id} /{" "}
+                  导入任务 / 数据行：{snapshot.import_job_id} /{" "}
                   {snapshot.import_row_id}
                 </p>
               </Card>

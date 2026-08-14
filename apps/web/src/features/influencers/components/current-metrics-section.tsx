@@ -1,6 +1,7 @@
 import { Card, Descriptions, Empty, Typography } from "antd";
 
 import {
+  formatFollowers,
   formatShanghaiDate,
   metricLabel,
   renderJsonValue,
@@ -41,13 +42,15 @@ export function CurrentMetricsSection({
                 </Descriptions.Item>
                 {Object.entries(metric.metrics).map(([key, value]) => (
                   <Descriptions.Item key={key} label={metricLabel(key)}>
-                    {renderJsonValue(value, key)}
+                    {key === "followers_count" && typeof value === "number"
+                      ? formatFollowers(value)
+                      : renderJsonValue(value, key)}
                   </Descriptions.Item>
                 ))}
-                <Descriptions.Item label="最近记录的 Import Job">
+                <Descriptions.Item label="最近导入任务">
                   {metric.last_import_job_id}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近记录的 Import Row">
+                <Descriptions.Item label="最近导入数据行">
                   {metric.last_import_row_id}
                 </Descriptions.Item>
               </Descriptions>

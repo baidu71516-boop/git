@@ -1,30 +1,28 @@
 "use client";
 
-import { LockOutlined, TeamOutlined, UserOutlined } from "@ant-design/icons";
+import { LockOutlined, TeamOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
   Card,
   Checkbox,
-  Descriptions,
   Form,
   Input,
   Modal,
   Select,
   Space,
   Spin,
-  Tag,
   Typography,
 } from "antd";
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
+import { DataCollectionWorkspace } from "@/features/imports/data-collection-workspace";
+import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
-import { ImportWorkspace } from "@/components/import-workspace";
 
-const { Paragraph, Text, Title } = Typography;
+const { Paragraph, Title } = Typography;
 
 type Role = "super_admin" | "manager" | "operator" | "viewer";
 
@@ -56,10 +54,10 @@ type LoginValues = {
 };
 
 const roleLabels: Record<Role, string> = {
-  super_admin: "Super Admin",
-  manager: "Manager",
-  operator: "Operator",
-  viewer: "Viewer",
+  super_admin: "超级管理员",
+  manager: "管理员",
+  operator: "操作员",
+  viewer: "只读成员",
 };
 
 type AuthWorkspace = "imports" | "influencers";
@@ -173,7 +171,6 @@ export function AuthShell({
         <Card className="login-card" bordered={false}>
           <Space direction="vertical" size="large" className="full-width">
             <div>
-              <Tag color="blue">INTERNAL</Tag>
               <Title level={2}>达人智能触达系统</Title>
               <Paragraph type="secondary">请使用部门密码登录。</Paragraph>
             </div>
@@ -225,54 +222,24 @@ export function AuthShell({
     );
   }
 
+  const title =
+    workspace === "imports" ? "数据采集" : influencerId ? "达人详情" : "达人库";
+
   return (
-    <main className="auth-shell app-authenticated">
-      <Card className="identity-card" bordered={false}>
-        <Space direction="vertical" size="large" className="full-width">
-          <div className="workspace-heading">
-            <div>
-              <Tag color="success">登录成功</Tag>
-              <Title level={3}>当前身份</Title>
-            </div>
-            <Button onClick={() => void handleLogout()} loading={submitting}>
-              退出登录
-            </Button>
-          </div>
-          {error ? <Alert type="error" showIcon message={error} /> : null}
-          <Descriptions bordered column={1}>
-            <Descriptions.Item label="当前部门">
-              {auth.department.name}
-            </Descriptions.Item>
-            <Descriptions.Item label="当前操作人">
-              {auth.operator?.name ?? "待选择"}
-            </Descriptions.Item>
-            <Descriptions.Item label="当前角色">
-              <Tag color="blue">{roleLabels[auth.role]}</Tag>
-            </Descriptions.Item>
-          </Descriptions>
-          <Text type="secondary">
-            <UserOutlined /> 选择操作人仅改变操作归属，不会改变 Session 权限。
-          </Text>
-        </Space>
-      </Card>
-
-      <nav className="workspace-nav" aria-label="工作区导航">
-        <Space>
-          <Link
-            href="/"
-            aria-current={workspace === "imports" ? "page" : undefined}
-          >
-            导入工作区
-          </Link>
-          <Link
-            href="/influencers"
-            aria-current={workspace === "influencers" ? "page" : undefined}
-          >
-            达人库
-          </Link>
-        </Space>
-      </nav>
-
+    <AppShell
+      title={title}
+      description={
+        workspace === "imports"
+          ? "上传达人数据，完成文件检查后生成数据预览。"
+          : undefined
+      }
+      department={auth.department.name}
+      operator={auth.operator?.name ?? null}
+      role={roleLabels[auth.role]}
+      onLogout={() => void handleLogout()}
+      logoutLoading={submitting}
+    >
+      {error ? <Alert type="error" showIcon message={error} /> : null}
       {workspace === "influencers" ? (
         influencerId ? (
           <InfluencerDetailWorkspace influencerId={influencerId} />
@@ -280,7 +247,7 @@ export function AuthShell({
           <InfluencerWorkspace />
         )
       ) : auth.operator ? (
-        <ImportWorkspace role={auth.role} />
+        <DataCollectionWorkspace role={auth.role} />
       ) : null}
 
       <Modal
@@ -312,6 +279,6 @@ export function AuthShell({
           }))}
         />
       </Modal>
-    </main>
+    </AppShell>
   );
 }

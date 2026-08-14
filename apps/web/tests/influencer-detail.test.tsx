@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InfluencerDetailWorkspace } from "../src/features/influencers/influencer-detail-workspace";
+import { InfluencerDetailDrawer } from "../src/features/influencers/influencer-detail-drawer";
 import {
   displayValue,
   renderJsonValue,
@@ -214,6 +215,17 @@ function renderDetail() {
   );
 }
 
+function renderDrawer() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={client}>
+      <InfluencerDetailDrawer influencerId={influencerId} />
+    </QueryClientProvider>,
+  );
+}
+
 beforeEach(() => {
   navigation.back.mockReset();
 });
@@ -246,46 +258,70 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       await screen.findByRole("heading", { name: "多账号达人" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("已停用负责人")).toBeInTheDocument();
-    expect(screen.getByText("已停用")).toBeInTheDocument();
-    expect(screen.getAllByText("账号甲").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("账号乙").length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: /打开平台主页/ })).toHaveAttribute(
-      "rel",
-      "noreferrer",
-    );
+    const basicSection = screen
+      .getByRole("heading", { name: "基本资料", level: 5 })
+      .closest("section");
+    expect(basicSection).not.toBeNull();
+    expect(
+      within(basicSection as HTMLElement).getByText("已停用负责人"),
+    ).toBeInTheDocument();
+    const ownerSection = screen
+      .getByRole("heading", { name: "管理信息", level: 5 })
+      .closest("section");
+    expect(ownerSection).not.toBeNull();
+    expect(
+      within(ownerSection as HTMLElement).getByText("资料更新时间"),
+    ).toBeInTheDocument();
+    expect(
+      within(ownerSection as HTMLElement).getByText("创建时间"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText(/账号甲/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/账号乙/).length).toBeGreaterThan(0);
     expect(screen.getByText("美妆")).toBeInTheDocument();
     expect(screen.getByText("动画")).toBeInTheDocument();
     expect(
-      screen.getByText("真实简介 <b>不能作为 HTML</b>"),
+      within(ownerSection as HTMLElement).getByText("2026-08-11 09:30"),
     ).toBeInTheDocument();
-    expect(document.querySelector("b")).toBeNull();
-    expect(screen.getByText("2026/08/11 00:00:00")).toBeInTheDocument();
 
-    expect(screen.getByText(/email · \*\*\*/)).toBeInTheDocument();
-    expect(screen.getByText(/phone · 13800138000/)).toBeInTheDocument();
-    expect(screen.getByText("疑似重复联系方式")).toBeInTheDocument();
+    const contactSection = screen
+      .getByRole("heading", { name: "联系方式", level: 5 })
+      .closest("section");
+    expect(contactSection).not.toBeNull();
+    expect(
+      within(contactSection as HTMLElement).getByText("邮箱"),
+    ).toBeInTheDocument();
+    expect(
+      within(contactSection as HTMLElement).getByText("***"),
+    ).toBeInTheDocument();
+    expect(
+      within(contactSection as HTMLElement).getByText("手机"),
+    ).toBeInTheDocument();
+    expect(
+      within(contactSection as HTMLElement).getByText("13800138000"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("normalized_value")).not.toBeInTheDocument();
     expect(screen.queryByText("重复达人")).not.toBeInTheDocument();
     expect(screen.queryByText("已自动合并")).not.toBeInTheDocument();
 
-    expect(screen.getByText("来源赛道")).toBeInTheDocument();
-    expect(screen.getByText("external-1")).toBeInTheDocument();
-    expect(screen.getAllByText("最近记录的 Import Job").length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      within(ownerSection as HTMLElement).getByText("数据来源"),
+    ).toBeInTheDocument();
+    expect(
+      within(ownerSection as HTMLElement).getByText(/灰豚/),
+    ).toBeInTheDocument();
     expect(screen.queryByText("最后观察")).not.toBeInTheDocument();
     expect(screen.queryByText("source_data")).not.toBeInTheDocument();
 
-    const currentMetrics = screen.getByRole("region", { name: "当前指标" });
-    expect(within(currentMetrics).getByText("0")).toBeInTheDocument();
+    const platformMetrics = screen
+      .getByRole("heading", { name: "平台与指标", level: 5 })
+      .closest("section");
+    expect(platformMetrics).not.toBeNull();
     expect(
-      within(currentMetrics).getByText("98.123456789"),
-    ).toBeInTheDocument();
-    expect(within(currentMetrics).getByText("—")).toBeInTheDocument();
-    expect(within(currentMetrics).getByText("上海")).toBeInTheDocument();
-    expect(within(currentMetrics).getByText("0.3500")).toBeInTheDocument();
-    expect(within(currentMetrics).getByText("灰豚指数")).toBeInTheDocument();
+      within(platformMetrics as HTMLElement).getAllByText("粉丝").length,
+    ).toBeGreaterThan(0);
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("0").length,
+    ).toBeGreaterThan(0);
     expect(screen.queryByText("AI Score")).not.toBeInTheDocument();
     expect(screen.queryByText(/¥|RMB|人民币/)).not.toBeInTheDocument();
     expect(screen.queryByText("notes_count")).not.toBeInTheDocument();
@@ -331,8 +367,16 @@ describe("InfluencerDetailWorkspace", () => {
     );
     renderDetail();
 
-    expect(await screen.findByText("缺失值达人")).toBeInTheDocument();
-    expect(screen.getByText("未分配")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "缺失值达人", level: 2 }),
+    ).toBeInTheDocument();
+    const missingBasicSection = screen
+      .getByRole("heading", { name: "基本资料", level: 5 })
+      .closest("section");
+    expect(missingBasicSection).not.toBeNull();
+    expect(
+      within(missingBasicSection as HTMLElement).getByText("未分配"),
+    ).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(2);
     expect(await screen.findByText("暂无指标历史")).toBeInTheDocument();
   });
@@ -341,10 +385,10 @@ describe("InfluencerDetailWorkspace", () => {
     const fetchMock = mockDetailApi(envelope(null, 500));
     const first = renderDetail();
     expect(
-      await screen.findByText("达人详情加载失败", {}, { timeout: 3000 }),
+      await screen.findByText("达人资料加载失败", {}, { timeout: 3000 }),
     ).toBeInTheDocument();
     const callsBeforeRetry = fetchMock.mock.calls.length;
-    fireEvent.click(screen.getByRole("button", { name: "重试达人详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
     await waitFor(() =>
       expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBeforeRetry),
     );
@@ -353,7 +397,7 @@ describe("InfluencerDetailWorkspace", () => {
     mockDetailApi(envelope(null, 404, "INFLUENCER_NOT_FOUND"));
     renderDetail();
     expect(await screen.findByText("达人不存在或不可见")).toBeInTheDocument();
-    expect(screen.queryByText("达人详情加载失败")).not.toBeInTheDocument();
+    expect(screen.queryByText("达人资料加载失败")).not.toBeInTheDocument();
   });
 
   it("keeps snapshot loading and errors independent from readable detail", async () => {
@@ -373,7 +417,9 @@ describe("InfluencerDetailWorkspace", () => {
         return envelope(detailData);
       });
     const first = renderDetail();
-    expect(await screen.findByText("多账号达人")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "多账号达人", level: 2 }),
+    ).toBeInTheDocument();
     expect(screen.getByText("正在加载指标历史")).toBeInTheDocument();
     resolveSnapshots?.(envelope(null, 500));
     expect(
@@ -429,5 +475,49 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       screen.getByRole("button", { name: "上一页历史快照" }),
     ).toBeEnabled();
+  });
+
+  it("reuses the protected detail view inside a canonical URL drawer", async () => {
+    mockDetailApi();
+    renderDrawer();
+
+    expect(screen.getByText("正在加载达人详情")).toBeInTheDocument();
+    expect(
+      await screen.findByText("多账号达人", { exact: false }),
+    ).toBeInTheDocument();
+    const drawerHeader = document.querySelector(
+      ".influencer-detail-drawer-title",
+    );
+    expect(drawerHeader).not.toBeNull();
+    expect(
+      within(drawerHeader as HTMLElement).getByText("小红书 · 账号甲"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("高意向").length).toBeGreaterThan(0);
+    const drawerContactSection = within(screen.getByRole("dialog"))
+      .getByRole("heading", { name: "联系方式", level: 5 })
+      .closest("section");
+    expect(drawerContactSection).not.toBeNull();
+    expect(
+      within(drawerContactSection as HTMLElement).getByText("邮箱"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawerContactSection as HTMLElement).getByText("***"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "完整资料" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭达人详情" }));
+    expect(navigation.back).toHaveBeenCalledOnce();
+  });
+
+  it("keeps drawer errors in Chinese and closes with browser history", async () => {
+    mockDetailApi(envelope(null, 500));
+    renderDrawer();
+
+    expect(
+      await screen.findByText("达人资料加载失败", {}, { timeout: 3000 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新加载" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /^关\s*闭$/ }));
+    expect(navigation.back).toHaveBeenCalledOnce();
   });
 });

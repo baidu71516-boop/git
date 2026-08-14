@@ -46,7 +46,7 @@ export function SourceProvenanceSection({
                 <Descriptions.Item label="状态版本">
                   {state.state_version}
                 </Descriptions.Item>
-                <Descriptions.Item label="来源 creator_tags">
+                <Descriptions.Item label="来源标签">
                   {state.creator_tags.length ? (
                     <Space wrap size={[4, 4]}>
                       {state.creator_tags.map((tag) => (
@@ -57,10 +57,10 @@ export function SourceProvenanceSection({
                     "—"
                   )}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近记录的 Import Job">
+                <Descriptions.Item label="最近导入任务">
                   {state.last_import_job_id}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近记录的 Import Row">
+                <Descriptions.Item label="最近导入数据行">
                   {state.last_import_row_id}
                 </Descriptions.Item>
               </Descriptions>
@@ -82,14 +82,14 @@ export function SourceProvenanceSection({
                 <Descriptions.Item label="外部账号 ID">
                   {identity.external_account_id}
                 </Descriptions.Item>
-                <Descriptions.Item label="首次 Import Job / Row">
+                <Descriptions.Item label="首次导入任务 / 数据行">
                   {identity.first_import_job_id} /{" "}
                   {identity.first_import_row_id}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近记录的 Import Job">
+                <Descriptions.Item label="最近导入任务">
                   {identity.last_import_job_id}
                 </Descriptions.Item>
-                <Descriptions.Item label="最近记录的 Import Row">
+                <Descriptions.Item label="最近导入数据行">
                   {identity.last_import_row_id}
                 </Descriptions.Item>
               </Descriptions>
