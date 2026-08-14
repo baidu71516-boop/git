@@ -2157,6 +2157,20 @@ body {
   margin-bottom: 16px;
 }
 
+.refresh-queue-preview-state-links {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--app-border);
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.refresh-queue-preview-state-links .ant-btn .ant-badge-status-text {
+  color: inherit;
+}
+
 @media (max-width: 720px) {
   .refresh-queue-workspace > .app-page-header,
   .refresh-queue-section-heading {
@@ -2191,5 +2205,10 @@ body {
   .refresh-queue-pagination {
     justify-content: flex-start;
     overflow-x: auto;
+  }
+
+  .refresh-queue-preview-state-links {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

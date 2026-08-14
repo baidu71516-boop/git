@@ -16,57 +16,78 @@ import { formatRefreshDateTime } from "./formatters";
 import { useRefreshQueueList } from "./queries";
 import type { DepartmentOption, RefreshQueue, RefreshQueueRole } from "./types";
 
-const columns: ColumnsType<RefreshQueue> = [
-  {
-    title: "创建时间",
-    dataIndex: "created_at",
-    width: 170,
-    render: (value: string) => formatRefreshDateTime(value),
-  },
-  {
-    title: "状态",
-    dataIndex: "status",
-    width: 130,
-    render: (status: RefreshQueue["status"]) => (
-      <RefreshQueueStatusBadge status={status} />
-    ),
-  },
-  {
-    title: "目标数量",
-    dataIndex: "requested_limit",
-    width: 120,
-  },
-  {
-    title: "本次更新上限",
-    dataIndex: "refresh_limit",
-    width: 140,
-  },
-  {
-    title: "今日计划上限",
-    dataIndex: "today_total_limit",
-    width: 140,
-  },
-  {
-    title: "名单基准时间",
-    dataIndex: "as_of",
-    width: 170,
-    render: (value: string) => formatRefreshDateTime(value),
-  },
-  {
-    title: "操作",
-    key: "action",
-    width: 110,
-    fixed: "right",
-    render: (_, queue) => (
-      <Button
-        type="link"
-        href={`/refresh-queues/${encodeURIComponent(queue.id)}`}
-      >
-        查看详情
-      </Button>
-    ),
-  },
-];
+function listColumns(
+  detailHref: (queue: RefreshQueue) => string,
+): ColumnsType<RefreshQueue> {
+  return [
+    {
+      title: "创建时间",
+      dataIndex: "created_at",
+      width: 170,
+      render: (value: string) => formatRefreshDateTime(value),
+    },
+    {
+      title: "状态",
+      dataIndex: "status",
+      width: 130,
+      render: (status: RefreshQueue["status"]) => (
+        <RefreshQueueStatusBadge status={status} />
+      ),
+    },
+    {
+      title: "目标数量",
+      dataIndex: "requested_limit",
+      width: 120,
+    },
+    {
+      title: "本次更新上限",
+      dataIndex: "refresh_limit",
+      width: 140,
+    },
+    {
+      title: "今日计划上限",
+      dataIndex: "today_total_limit",
+      width: 140,
+    },
+    {
+      title: "名单基准时间",
+      dataIndex: "as_of",
+      width: 170,
+      render: (value: string) => formatRefreshDateTime(value),
+    },
+    {
+      title: "操作",
+      key: "action",
+      width: 110,
+      fixed: "right",
+      render: (_, queue) => (
+        <Button type="link" href={detailHref(queue)}>
+          查看详情
+        </Button>
+      ),
+    },
+  ];
+}
+
+export function RefreshQueueListTable({
+  items,
+  detailHref = (queue) => `/refresh-queues/${encodeURIComponent(queue.id)}`,
+}: {
+  items: RefreshQueue[];
+  detailHref?: (queue: RefreshQueue) => string;
+}) {
+  return (
+    <Table<RefreshQueue>
+      className="refresh-queue-table"
+      rowKey="id"
+      columns={listColumns(detailHref)}
+      dataSource={items}
+      pagination={false}
+      scroll={{ x: 1050 }}
+      size="middle"
+    />
+  );
+}
 
 export function RefreshQueueList({
   role,
@@ -121,15 +142,7 @@ export function RefreshQueueList({
           <AppEmpty description="暂无数据更新名单。" />
         ) : listQuery.data ? (
           <Space orientation="vertical" size="middle" className="full-width">
-            <Table<RefreshQueue>
-              className="refresh-queue-table"
-              rowKey="id"
-              columns={columns}
-              dataSource={listQuery.data.items}
-              pagination={false}
-              scroll={{ x: 1050 }}
-              size="middle"
-            />
+            <RefreshQueueListTable items={listQuery.data.items} />
             <div className="refresh-queue-pagination">
               <Pagination
                 current={page}

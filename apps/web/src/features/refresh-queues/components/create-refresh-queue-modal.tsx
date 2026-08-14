@@ -22,6 +22,7 @@ export function CreateRefreshQueueModal({
   currentDepartmentId,
   onClose,
   onCreated,
+  create,
 }: {
   open: boolean;
   role: RefreshQueueRole;
@@ -29,6 +30,7 @@ export function CreateRefreshQueueModal({
   currentDepartmentId: string;
   onClose: () => void;
   onCreated: (detail: RefreshQueueDetail) => void;
+  create?: (input: RefreshQueueCreateInput) => Promise<RefreshQueueDetail>;
 }) {
   const [form] = Form.useForm<RefreshQueueCreateInput>();
   const mutation = useCreateRefreshQueueMutation();
@@ -46,7 +48,9 @@ export function CreateRefreshQueueModal({
       payload.department_id = values.department_id;
     }
     try {
-      const detail = await mutation.mutateAsync(payload);
+      const detail = create
+        ? await create(payload)
+        : await mutation.mutateAsync(payload);
       form.resetFields();
       onCreated(detail);
     } catch (caught) {
