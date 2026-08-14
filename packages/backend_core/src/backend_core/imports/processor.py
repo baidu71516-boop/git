@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.config.settings import Settings
 from backend_core.imports.adapters import (
     GenericCsvAdapter,
     HuitunCsvAdapter,
@@ -27,6 +28,7 @@ from backend_core.imports.enums import (
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.hashing import hash_document
 from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
+from backend_core.imports.merge_applier import ImportMergeApplier, PreviewStaleError
 from backend_core.imports.models import ImportJob, ImportRow
 from backend_core.imports.parsers import ParsedTable, ParserLimits, parse_table
 from backend_core.imports.planner import (
@@ -38,35 +40,7 @@ from backend_core.imports.planner import (
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.state_machine import transition_import_job
 from backend_core.imports.storage import StorageAdapter
-from backend_core.influencers.enums import (
-    ContactType,
-    ContactValidationStatus,
-    CRMStage,
-    DataSource,
-)
-from backend_core.influencers.models import (
-    Influencer,
-    InfluencerContact,
-    InfluencerCurrentMetrics,
-    InfluencerMetricSnapshot,
-    InfluencerPlatformAccount,
-    InfluencerSourceState,
-    PlatformAccountSourceIdentity,
-)
-
-
-class PreviewStaleError(Exception):
-    pass
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+from backend_core.imports.task_service import ImportTaskService
 
 
 class ImportProcessor:
@@ -78,14 +52,26 @@ class ImportProcessor:
         storage: StorageAdapter,
         *,
         parser_limits: ParserLimits,
+        task_settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.storage = storage
         self.repository = ImportRepository(session)
+        self.merge_applier = ImportMergeApplier(session, repository=self.repository)
         self.audit = AuditRepository(session)
         self.parser_limits = parser_limits
+        self.task_service = (
+            ImportTaskService(session, task_settings) if task_settings is not None else None
+        )
 
-    async def parse_and_preview(self, import_job_id: UUID) -> dict[str, Any]:
+    async def parse_and_preview(
+        self,
+        import_job_id: UUID,
+        *,
+        task_token: UUID | None = None,
+        task_generation: int | None = None,
+    ) -> dict[str, Any]:
+        task_context = self._task_context(task_token, task_generation)
         try:
             job = await self.repository.get_import_job(import_job_id, for_update=True)
             if job is None:
@@ -149,7 +135,13 @@ class ImportProcessor:
                     }
 
             if adapter is None:
-                await self._mark_mapping_required(job.id, occurrence.id, table, mapping)
+                await self._mark_mapping_required(
+                    job.id,
+                    occurrence.id,
+                    table,
+                    mapping,
+                    task_context=task_context,
+                )
                 return {
                     "import_job_id": str(job.id),
                     "status": ImportJobStatus.MAPPING_REQUIRED.value,
@@ -162,11 +154,14 @@ class ImportProcessor:
                 table,
                 mapping,
                 adapted_rows,
+                task_context=task_context,
             )
         except BaseException as exc:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             await self.session.rollback()
+            if task_context is not None:
+                raise
             await self._mark_failed(import_job_id, exc, mark_file_failed=True)
             if isinstance(exc, ImportDomainError):
                 raise
@@ -202,6 +197,8 @@ class ImportProcessor:
         import_job_file_id: UUID,
         table: ParsedTable,
         mapping: dict[str, str],
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> None:
         job = await self.repository.get_import_job(job_id, for_update=True)
         occurrence = await self.repository.get_import_job_file(import_job_file_id, for_update=True)
@@ -236,6 +233,7 @@ class ImportProcessor:
             "header_count": len(table.headers),
         }
         transition_import_job(job, ImportJobStatus.MAPPING_REQUIRED)
+        await self._complete_task(task_context)
         await self.session.commit()
 
     async def _persist_preview(
@@ -245,6 +243,8 @@ class ImportProcessor:
         table: ParsedTable,
         mapping: dict[str, str],
         adapted_rows: list[AdaptedRow],
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> dict[str, Any]:
         job = await self.repository.get_import_job(job_id, for_update=True)
         occurrence = await self.repository.get_import_job_file(import_job_file_id, for_update=True)
@@ -379,6 +379,7 @@ class ImportProcessor:
                 "error_rows": summary["error_rows"],
             },
         )
+        await self._complete_task(task_context)
         await self.session.commit()
         return {
             "import_job_id": str(job.id),
@@ -438,15 +439,32 @@ class ImportProcessor:
         ):
             setattr(job, field, int(summary[field]))
 
-    async def confirm(self, import_job_id: UUID, preview_revision: int) -> dict[str, Any]:
+    async def confirm(
+        self,
+        import_job_id: UUID,
+        preview_revision: int,
+        *,
+        task_token: UUID | None = None,
+        task_generation: int | None = None,
+    ) -> dict[str, Any]:
+        task_context = self._task_context(task_token, task_generation)
         try:
             early_result = await self._begin_importing(import_job_id, preview_revision)
             if early_result is not None:
                 return early_result
-            return await self._validate_and_commit(import_job_id, preview_revision)
+            return await self._validate_and_commit(
+                import_job_id,
+                preview_revision,
+                task_context=task_context,
+            )
         except PreviewStaleError as exc:
             await self.session.rollback()
-            await self._mark_stale(import_job_id, preview_revision, str(exc))
+            await self._mark_stale(
+                import_job_id,
+                preview_revision,
+                str(exc),
+                task_context=task_context,
+            )
             return {
                 "import_job_id": str(import_job_id),
                 "status": ImportJobStatus.PREVIEW_STALE.value,
@@ -454,7 +472,12 @@ class ImportProcessor:
             }
         except IntegrityError:
             await self.session.rollback()
-            await self._mark_stale(import_job_id, preview_revision, "database_identity_changed")
+            await self._mark_stale(
+                import_job_id,
+                preview_revision,
+                "database_identity_changed",
+                task_context=task_context,
+            )
             return {
                 "import_job_id": str(import_job_id),
                 "status": ImportJobStatus.PREVIEW_STALE.value,
@@ -464,6 +487,8 @@ class ImportProcessor:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             await self.session.rollback()
+            if task_context is not None:
+                raise
             await self._mark_failed(import_job_id, exc, mark_file_failed=False)
             if isinstance(exc, ImportDomainError):
                 raise
@@ -472,7 +497,9 @@ class ImportProcessor:
             ) from None
 
     async def _begin_importing(
-        self, import_job_id: UUID, preview_revision: int
+        self,
+        import_job_id: UUID,
+        preview_revision: int,
     ) -> dict[str, Any] | None:
         job = await self.repository.get_import_job(import_job_id, for_update=True)
         if job is None:
@@ -509,7 +536,11 @@ class ImportProcessor:
         )
 
     async def _validate_and_commit(
-        self, import_job_id: UUID, preview_revision: int
+        self,
+        import_job_id: UUID,
+        preview_revision: int,
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> dict[str, Any]:
         job = await self.repository.get_import_job(import_job_id, for_update=True)
         if job is None:
@@ -612,6 +643,7 @@ class ImportProcessor:
             entity_id=job.id,
             after=result,
         )
+        await self._complete_task(task_context)
         await self.session.commit()
         return result
 
@@ -623,200 +655,17 @@ class ImportProcessor:
         plan: PlannedImportRow,
         now: datetime,
     ) -> None:
-        if plan.action in {
-            ImportRowAction.ERROR,
-            ImportRowAction.SKIP,
-            ImportRowAction.MANUAL_REVIEW,
-        }:
-            row.committed_action = plan.action
-            row.committed_at = now
-            return
-        merge = plan.merge_plan
-        account: InfluencerPlatformAccount
-        if plan.action == ImportRowAction.CREATE:
-            create = merge["account_create"]
-            influencer = Influencer(
-                display_name=create["display_name"],
-                owner_operator_id=job.operator_id,
-                crm_stage=CRMStage.TO_DEVELOP,
-            )
-            self.session.add(influencer)
-            await self.session.flush()
-            public_profile = create["public_profile"]
-            account = InfluencerPlatformAccount(
-                influencer_id=influencer.id,
-                platform=record.platform_identity.platform,
-                platform_account_id=create["platform_account_id"],
-                account_name=create["account_name"],
-                account_handle=create["account_handle"],
-                profile_url=create["profile_url"],
-                normalized_profile_url=create["normalized_profile_url"],
-                source=record.source,
-                is_active=True,
-                bio=public_profile.get("bio"),
-                gender=public_profile.get("gender"),
-                region_raw=public_profile.get("region_raw"),
-                verification_info=public_profile.get("verification_info"),
-                mcn_name=public_profile.get("mcn_name"),
-                source_tags=public_profile.get("creator_tags"),
-                creator_level=public_profile.get("creator_level"),
-                is_brand_partner=public_profile.get("is_brand_partner"),
-            )
-            self.session.add(account)
-            await self.session.flush()
-        else:
-            if plan.matched_platform_account_id is None:
-                raise PreviewStaleError("matched_account_missing")
-            matched_account = await self.session.get(
-                InfluencerPlatformAccount, plan.matched_platform_account_id
-            )
-            if matched_account is None:
-                raise PreviewStaleError("matched_account_deleted")
-            account = matched_account
-            for field, value in merge["account_updates"].items():
-                setattr(account, field, value)
+        await self.merge_applier.apply(job, row, record, plan, now)
+        await self.merge_applier.finalize()
 
-        row.matched_influencer_id = account.influencer_id
-        row.matched_platform_account_id = account.id
-        source_identity_plan = merge.get("source_identity")
-        if source_identity_plan:
-            self.session.add(
-                PlatformAccountSourceIdentity(
-                    platform_account_id=account.id,
-                    platform=account.platform,
-                    source=record.source,
-                    external_account_id=source_identity_plan["external_account_id"],
-                    first_import_job_id=job.id,
-                    first_import_row_id=row.id,
-                    last_import_job_id=job.id,
-                    last_import_row_id=row.id,
-                )
-            )
-
-        source_state_plan = merge.get("source_state")
-        if source_state_plan:
-            source_state = await self.repository.get_source_state(account.id, record.source)
-            if source_state is None:
-                source_state = InfluencerSourceState(
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    source=record.source,
-                    source_updated_at=_parse_datetime(source_state_plan["source_updated_at"]),
-                    source_data=source_state_plan["source_data"],
-                    source_data_hash=source_state_plan["source_data_hash"],
-                    state_version=source_state_plan["state_version"],
-                    last_import_job_id=job.id,
-                    last_import_row_id=row.id,
-                )
-                self.session.add(source_state)
-            else:
-                source_state.source_updated_at = _parse_datetime(
-                    source_state_plan["source_updated_at"]
-                )
-                source_state.source_data = source_state_plan["source_data"]
-                source_state.source_data_hash = source_state_plan["source_data_hash"]
-                source_state.state_version = source_state_plan["state_version"]
-                source_state.last_import_job_id = job.id
-                source_state.last_import_row_id = row.id
-
-        await self._apply_contacts(job, row, record, account, merge["contacts"], now)
-        await self._apply_metrics(job, row, record, account, merge["metrics"], now)
-        row.committed_action = plan.action
-        row.committed_at = now
-
-    async def _apply_contacts(
+    async def _mark_stale(
         self,
-        job: ImportJob,
-        row: ImportRow,
-        record: CanonicalInfluencerRecord,
-        account: InfluencerPlatformAccount,
-        contacts_plan: dict[str, Any],
-        now: datetime,
+        import_job_id: UUID,
+        preview_revision: int,
+        reason: str,
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> None:
-        for contact_id in contacts_plan["deactivate_ids"]:
-            contact = await self.session.get(InfluencerContact, UUID(contact_id))
-            if contact is not None and contact.source != DataSource.MANUAL:
-                contact.is_current = False
-        for contact_id in contacts_plan["mark_duplicate_ids"]:
-            contact = await self.session.get(InfluencerContact, UUID(contact_id))
-            if contact is not None and contact.source != DataSource.MANUAL:
-                contact.possible_duplicate_contact = True
-        for contact_id in contacts_plan["observe_ids"]:
-            contact = await self.session.get(InfluencerContact, UUID(contact_id))
-            if contact is not None and contact.source != DataSource.MANUAL:
-                contact.last_seen_at = now
-                contact.last_import_job_id = job.id
-                contact.last_import_row_id = row.id
-        for item in contacts_plan["create"]:
-            self.session.add(
-                InfluencerContact(
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    type=ContactType(item["type"]),
-                    value=item["value"],
-                    normalized_value=item["normalized_value"],
-                    source=record.source,
-                    validation_status=ContactValidationStatus(item["validation_status"]),
-                    is_current=item["is_current"],
-                    possible_duplicate_contact=item["possible_duplicate_contact"],
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    source_updated_at=_parse_datetime(item["source_updated_at"]),
-                    first_import_job_id=job.id,
-                    first_import_row_id=row.id,
-                    last_import_job_id=job.id,
-                    last_import_row_id=row.id,
-                )
-            )
-
-    async def _apply_metrics(
-        self,
-        job: ImportJob,
-        row: ImportRow,
-        record: CanonicalInfluencerRecord,
-        account: InfluencerPlatformAccount,
-        metrics_plan: dict[str, Any],
-        now: datetime,
-    ) -> None:
-        current_plan = metrics_plan.get("current")
-        if current_plan:
-            current = await self.repository.get_current_metrics(account.id, record.source)
-            if current is None:
-                current = InfluencerCurrentMetrics(
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    source=record.source,
-                    source_updated_at=_parse_datetime(current_plan["source_updated_at"]),
-                    metrics=current_plan["metrics"],
-                    metrics_hash=current_plan["metrics_hash"],
-                    last_import_job_id=job.id,
-                    last_import_row_id=row.id,
-                )
-                self.session.add(current)
-            else:
-                current.source_updated_at = _parse_datetime(current_plan["source_updated_at"])
-                current.metrics = current_plan["metrics"]
-                current.metrics_hash = current_plan["metrics_hash"]
-                current.last_import_job_id = job.id
-                current.last_import_row_id = row.id
-        snapshot_plan = metrics_plan.get("snapshot")
-        if snapshot_plan:
-            self.session.add(
-                InfluencerMetricSnapshot(
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    source=record.source,
-                    source_updated_at=_parse_datetime(snapshot_plan["source_updated_at"]),
-                    import_job_id=job.id,
-                    import_row_id=row.id,
-                    captured_at=now,
-                    metrics=snapshot_plan["metrics"],
-                    metrics_hash=snapshot_plan["metrics_hash"],
-                    snapshot_key=snapshot_plan["snapshot_key"],
-                )
-            )
-
-    async def _mark_stale(self, import_job_id: UUID, preview_revision: int, reason: str) -> None:
         job = await self.repository.get_import_job(import_job_id, for_update=True)
         if job is None:
             await self.session.rollback()
@@ -836,6 +685,14 @@ class ImportProcessor:
                 entity_id=job.id,
                 after={"preview_revision": preview_revision, "reason": reason[:120]},
             )
+            if task_context is not None:
+                assert self.task_service is not None
+                token, generation = task_context
+                if not await self.task_service.terminal_fail(token, generation=generation):
+                    raise ImportDomainError(
+                        "IMPORT_TASK_LEASE_LOST",
+                        "Confirm lost its authoritative task lease before stale commit",
+                    )
             await self.session.commit()
         else:
             await self.session.rollback()
@@ -884,3 +741,25 @@ class ImportProcessor:
             after={"error_code": code[:80]},
         )
         await self.session.commit()
+
+    @staticmethod
+    def _task_context(
+        task_token: UUID | None,
+        task_generation: int | None,
+    ) -> tuple[UUID, int] | None:
+        if task_token is None and task_generation is None:
+            return None
+        if task_token is None or task_generation is None or task_generation < 1:
+            raise ValueError("task_token and a positive task_generation must be provided together")
+        return task_token, task_generation
+
+    async def _complete_task(self, task_context: tuple[UUID, int] | None) -> None:
+        if task_context is None:
+            return
+        assert self.task_service is not None
+        task_token, generation = task_context
+        if not await self.task_service.complete(task_token, generation):
+            raise ImportDomainError(
+                "IMPORT_TASK_LEASE_LOST",
+                "Import task lease was lost before the atomic business commit",
+            )

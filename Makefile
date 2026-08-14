@@ -1,7 +1,7 @@
 SHELL := /usr/bin/env bash
 COMPOSE := $(shell if docker compose version >/dev/null 2>&1; then printf 'docker compose'; else printf 'docker-compose'; fi)
 
-.PHONY: install dev down lint test health migrate compose-validate build clean
+.PHONY: install dev down lint test test-freshness-postgres test-refresh-queue-postgres test-refresh-return-postgres health migrate compose-validate build clean
 
 install:
 	uv sync --all-packages
@@ -30,6 +30,15 @@ test:
 	PYTHONPATH=apps/api uv run pytest apps/api/tests
 	PYTHONPATH=apps/worker uv run pytest apps/worker/tests
 	pnpm test
+
+test-freshness-postgres:
+	uv run pytest -s tests/integration/test_influencer_freshness_postgres.py
+
+test-refresh-queue-postgres:
+	uv run pytest -s tests/integration/test_phase2_refresh_queue_migration_postgres.py tests/integration/test_refresh_queue_postgres.py
+
+test-refresh-return-postgres:
+	RUN_REFRESH_RETURN_PERFORMANCE_TESTS=1 uv run pytest -s tests/integration/test_refresh_return_reconciliation_postgres.py tests/integration/test_refresh_return_performance_postgres.py
 
 health:
 	./infrastructure/scripts/health.sh

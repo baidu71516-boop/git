@@ -45,9 +45,12 @@ expected = {{
     "import_job_files",
     "import_jobs",
     "import_rows",
+    "import_task_requests",
     "influencer_contacts",
     "influencers",
     "operators",
+    "refresh_queue_items",
+    "refresh_queues",
     "stored_import_files",
 }}
 missing = expected.difference(Base.metadata.tables)

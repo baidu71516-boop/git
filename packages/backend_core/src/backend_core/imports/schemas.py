@@ -129,6 +129,7 @@ class BulkImportJobCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     collection_job_id: UUID
+    refresh_queue_id: UUID | None = None
 
 
 class SourceAcquiredAtUpdate(BaseModel):
@@ -149,6 +150,7 @@ class ImportJobPublic(BaseModel):
 
     id: UUID
     collection_job_id: UUID
+    refresh_queue_id: UUID | None
     department_id: UUID
     operator_id: UUID
     stored_file_id: UUID | None

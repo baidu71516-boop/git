@@ -17,6 +17,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +33,8 @@ from backend_core.imports.enums import (
     ImportMatchType,
     ImportRowAction,
     ImportSourceType,
+    ImportTaskKind,
+    ImportTaskState,
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
@@ -142,6 +146,12 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_import_job_collection_department",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["refresh_queue_id", "department_id"],
+            ["refresh_queues.id", "refresh_queues.department_id"],
+            name="fk_import_job_refresh_queue_department",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint("file_size IS NULL OR file_size > 0", name="ck_import_job_file_size"),
         CheckConstraint("preview_revision >= 0", name="ck_import_job_preview_revision"),
         CheckConstraint(
@@ -157,6 +167,7 @@ class ImportJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     collection_job_id: Mapped[UUID] = mapped_column(nullable=False)
+    refresh_queue_id: Mapped[UUID | None] = mapped_column(nullable=True)
     department_id: Mapped[UUID] = mapped_column(
         ForeignKey("departments.id", ondelete="RESTRICT"), nullable=False
     )
@@ -317,6 +328,131 @@ class ImportJobFileClientId(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     client_file_id: Mapped[str] = mapped_column(String(160), nullable=False)
 
     import_job_file: Mapped[ImportJobFile] = relationship(back_populates="client_ids", lazy="raise")
+
+
+class ImportTaskRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "import_task_requests"
+    __table_args__ = (
+        UniqueConstraint("task_token", name="uq_import_task_request_token"),
+        ForeignKeyConstraint(
+            ["import_job_file_id", "import_job_id"],
+            ["import_job_files.id", "import_job_files.import_job_id"],
+            name="fk_import_task_request_file_job",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "dispatch_attempts >= 0 AND run_attempts >= 0",
+            name="ck_import_task_request_attempts_nonnegative",
+        ),
+        CheckConstraint(
+            "(task_kind = 'file_parse' AND import_job_file_id IS NOT NULL "
+            "AND preview_revision IS NULL) "
+            "OR (task_kind = 'confirm' AND import_job_file_id IS NULL "
+            "AND preview_revision IS NOT NULL AND preview_revision >= 1) "
+            "OR (task_kind IN ('legacy_parse', 'preview') "
+            "AND import_job_file_id IS NULL AND preview_revision IS NULL)",
+            name="ck_import_task_request_target",
+        ),
+        CheckConstraint(
+            "(state <> 'completed' OR completed_at IS NOT NULL) "
+            "AND (state <> 'running' OR lease_expires_at IS NOT NULL) "
+            "AND (state <> 'retry_wait' OR next_retry_at IS NOT NULL)",
+            name="ck_import_task_request_state_timestamps",
+        ),
+        Index(
+            "uq_import_task_request_active_legacy_parse",
+            "import_job_id",
+            unique=True,
+            postgresql_where=text(
+                "task_kind = 'legacy_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
+                "task_kind = 'legacy_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+        ),
+        Index(
+            "uq_import_task_request_active_file_parse",
+            "import_job_id",
+            "import_job_file_id",
+            unique=True,
+            postgresql_where=text(
+                "task_kind = 'file_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
+                "task_kind = 'file_parse' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+        ),
+        Index(
+            "uq_import_task_request_active_preview",
+            "import_job_id",
+            unique=True,
+            postgresql_where=text(
+                "task_kind = 'preview' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
+                "task_kind = 'preview' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+        ),
+        Index(
+            "uq_import_task_request_active_confirm",
+            "import_job_id",
+            "preview_revision",
+            unique=True,
+            postgresql_where=text(
+                "task_kind = 'confirm' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+            sqlite_where=text(
+                "task_kind = 'confirm' " "AND state IN ('requested', 'running', 'retry_wait')"
+            ),
+        ),
+        Index(
+            "ix_import_task_requests_due",
+            func.coalesce(text("next_retry_at"), text("requested_at")),
+            "requested_at",
+            "id",
+            postgresql_where=text("state IN ('requested', 'retry_wait')"),
+        ),
+        Index(
+            "ix_import_task_requests_expired_lease",
+            "lease_expires_at",
+            "id",
+            postgresql_where=text("state = 'running'"),
+        ),
+    )
+
+    task_token: Mapped[UUID] = mapped_column(nullable=False)
+    task_kind: Mapped[ImportTaskKind] = mapped_column(
+        Enum(ImportTaskKind, name="import_task_kind", values_callable=enum_values),
+        nullable=False,
+    )
+    import_job_id: Mapped[UUID] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="RESTRICT"), nullable=False
+    )
+    import_job_file_id: Mapped[UUID | None] = mapped_column(nullable=True)
+    preview_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    state: Mapped[ImportTaskState] = mapped_column(
+        Enum(ImportTaskState, name="import_task_state", values_callable=enum_values),
+        nullable=False,
+        default=ImportTaskState.REQUESTED,
+    )
+    dispatch_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    run_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_dispatch_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ImportRow(UUIDPrimaryKeyMixin, TimestampMixin, Base):

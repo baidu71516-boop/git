@@ -36,6 +36,8 @@ from backend_core.imports.models import (
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.service import FileUploadDecision, ImportService
 from backend_core.imports.storage import LocalStorageAdapter
+from backend_core.refresh.enums import RefreshQueueStatus
+from backend_core.refresh.models import RefreshQueue
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -158,13 +160,49 @@ async def bulk_service_harness(
     await engine.dispose()
 
 
-async def create_bulk(harness: BulkServiceHarness) -> ImportJob:
+async def create_bulk(
+    harness: BulkServiceHarness,
+    *,
+    refresh_queue_id: UUID | None = None,
+) -> ImportJob:
     return await harness.service.create_bulk_import_job(
         harness.context,
         collection_job_id=harness.collection.id,
         ip="127.0.0.1",
         user_agent="phase2-bulk-service-test",
+        refresh_queue_id=refresh_queue_id,
     )
+
+
+async def seed_refresh_queue(
+    harness: BulkServiceHarness,
+    *,
+    status: RefreshQueueStatus,
+    department_id: UUID | None = None,
+    operator_id: UUID | None = None,
+) -> RefreshQueue:
+    timestamp = harness.clock.now()
+    queue = RefreshQueue(
+        department_id=department_id or harness.context.department.id,
+        created_by_operator_id=operator_id or harness.operator_id,
+        status=status,
+        as_of=timestamp,
+        requested_limit=1,
+        today_total_limit=1,
+        refresh_limit=1,
+        policy_version=1,
+        criteria_snapshot={"source": "bulk-service-test"},
+        exported_at=(
+            timestamp
+            if status in (RefreshQueueStatus.EXPORTED, RefreshQueueStatus.COMPLETED)
+            else None
+        ),
+        completed_at=timestamp if status is RefreshQueueStatus.COMPLETED else None,
+        cancelled_at=timestamp if status is RefreshQueueStatus.CANCELLED else None,
+    )
+    harness.session.add(queue)
+    await harness.session.commit()
+    return queue
 
 
 async def upload(
@@ -242,6 +280,7 @@ def test_create_bulk_import_job_is_draft_without_legacy_file_facts_and_is_audite
             job = await create_bulk(harness)
 
             assert job.collection_job_id == harness.collection.id
+            assert job.refresh_queue_id is None
             assert job.department_id == harness.context.department.id
             assert job.operator_id == harness.operator_id
             assert job.status is ImportJobStatus.DRAFT
@@ -264,6 +303,108 @@ def test_create_bulk_import_job_is_draft_without_legacy_file_facts_and_is_audite
             assert audits[0].department_id == harness.context.department.id
             assert audits[0].operator_id == harness.operator_id
             assert audits[0].entity_id == job.id
+            assert audits[0].after == {
+                "collection_job_id": str(harness.collection.id),
+                "status": ImportJobStatus.DRAFT.value,
+            }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "queue_status",
+    [RefreshQueueStatus.OPEN, RefreshQueueStatus.EXPORTED],
+)
+def test_create_bulk_import_job_accepts_returnable_refresh_queue(
+    queue_status: RefreshQueueStatus,
+) -> None:
+    async def scenario() -> None:
+        async with bulk_service_harness() as harness:
+            queue = await seed_refresh_queue(harness, status=queue_status)
+
+            job = await create_bulk(harness, refresh_queue_id=queue.id)
+
+            assert job.refresh_queue_id == queue.id
+            assert job.collection_job_id == harness.collection.id
+            assert job.department_id == queue.department_id
+            audits = list(
+                await harness.session.scalars(
+                    select(AuditLog).where(AuditLog.action == AuditAction.IMPORT_BATCH_CREATED)
+                )
+            )
+            assert len(audits) == 1
+            assert audits[0].after == {
+                "collection_job_id": str(harness.collection.id),
+                "status": ImportJobStatus.DRAFT.value,
+                "refresh_queue_id": str(queue.id),
+            }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "queue_status",
+    [RefreshQueueStatus.COMPLETED, RefreshQueueStatus.CANCELLED],
+)
+def test_create_bulk_import_job_rejects_terminal_refresh_queue(
+    queue_status: RefreshQueueStatus,
+) -> None:
+    async def scenario() -> None:
+        async with bulk_service_harness() as harness:
+            queue = await seed_refresh_queue(harness, status=queue_status)
+
+            with pytest.raises(ImportDomainError) as exc_info:
+                await create_bulk(harness, refresh_queue_id=queue.id)
+
+            assert exc_info.value.code == "REFRESH_QUEUE_NOT_RETURNABLE"
+            assert_domain_error(exc_info.value, status_code=409)
+            assert await count_rows(harness.session, ImportJob) == 0
+            assert await count_rows(harness.session, AuditLog) == 0
+
+    asyncio.run(scenario())
+
+
+def test_create_bulk_import_job_hides_unknown_and_cross_department_refresh_queues() -> None:
+    async def scenario() -> None:
+        async with bulk_service_harness() as harness:
+            with pytest.raises(ImportDomainError) as missing_exc:
+                await create_bulk(harness, refresh_queue_id=uuid4())
+            assert missing_exc.value.code == "REFRESH_QUEUE_NOT_FOUND"
+            assert_domain_error(missing_exc.value, status_code=404)
+            await harness.session.rollback()
+            await refresh_context(harness)
+            await harness.session.refresh(harness.collection)
+
+            other_department = Department(
+                name=f"Bulk Queue Other {uuid4().hex}",
+                password_hash="not-used-by-service-test",
+                status=DepartmentStatus.ACTIVE,
+                session_days=30,
+            )
+            harness.session.add(other_department)
+            await harness.session.flush()
+            other_operator = Operator(
+                department_id=other_department.id,
+                name="Bulk Queue Other Operator",
+                role=Role.OPERATOR,
+                status=OperatorStatus.ACTIVE,
+            )
+            harness.session.add(other_operator)
+            await harness.session.flush()
+            queue = await seed_refresh_queue(
+                harness,
+                status=RefreshQueueStatus.OPEN,
+                department_id=other_department.id,
+                operator_id=other_operator.id,
+            )
+
+            with pytest.raises(ImportDomainError) as cross_department_exc:
+                await create_bulk(harness, refresh_queue_id=queue.id)
+
+            assert cross_department_exc.value.code == "REFRESH_QUEUE_NOT_FOUND"
+            assert_domain_error(cross_department_exc.value, status_code=404)
+            assert await count_rows(harness.session, ImportJob) == 0
+            assert await count_rows(harness.session, AuditLog) == 0
 
     asyncio.run(scenario())
 

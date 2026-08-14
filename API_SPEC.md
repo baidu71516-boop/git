@@ -5,7 +5,8 @@
 Base：`/api/v1`
 
 - Phase 1A–1C 接口已实现；以 Router、Schema 和测试为运行事实源。
-- Phase 2 接口在 Task 0 已冻结，但尚未实现。下文以 **Phase 2 Planned** 标识，不能据此宣称服务端当前可调用。
+- 当前开发分支已实现 Phase 2 Task 1–9 的 Bulk Import、Structured Screening、Unified Preview、Atomic Confirm/Recovery、Freshness、Refresh Queue 与 Refresh Return；仍以 Router、Schema 和测试为运行事实源。
+- Task 10 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称当前可调用。
 - Phase 2 详细语义以 `docs/PHASE_2_SCOPE.md` 为准。
 - 旧的 `/imports` 草案路径已废弃；正式导入资源前缀为 `/import-jobs`。
 
@@ -65,7 +66,7 @@ Base：`/api/v1`
 - `GET /collection-jobs`
 - `GET /collection-jobs/{id}`
 
-### Phase 2 Planned
+### Phase 2 Tasks 1–6 Implemented
 
 - 现有 create/read 响应增加 `screening_rules` 与 `screening_rules_revision`。
 - `PUT /collection-jobs/{id}/screening-rules`
@@ -100,7 +101,7 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/confirm`
 - `POST /import-jobs/{id}/cancel`
 
-### Phase 2 Planned — Bulk Batch
+### Phase 2 Tasks 1–6 + Task 9 Implemented — Bulk Batch / Linked Return
 
 - `POST /import-jobs/bulk`：创建 Draft Batch，一个 ImportJob 对应一个 Bulk Batch。
 - `GET /import-jobs`
@@ -109,7 +110,6 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `GET /import-jobs/{id}/files`
 - `PATCH /import-jobs/{id}/files/{file_id}`：仅在首次 Preview 前修改 `source_acquired_at`。
 - `PUT /import-jobs/{id}/files/{file_id}/mapping`
-- `POST /import-jobs/{id}/files/{file_id}/replace`
 - `POST /import-jobs/{id}/files/{file_id}/exclude`
 - `POST /import-jobs/{id}/files/{file_id}/retry`
 - `POST /import-jobs/{id}/preview`
@@ -118,9 +118,19 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/retry`
 - `POST /import-jobs/{id}/cancel`
 
+冻结设计中的 `POST /import-jobs/{id}/files/{file_id}/replace` 当前尚未实现，不能按现有接口调用；当前可通过 exclude 旧 occurrence 后上传新 occurrence 完成显式替换流程。该状态说明不授权 Task 7 或其他新范围。
+
 `0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`、`source_acquired_at_confirmation_required=false`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
-`0004`/Task 2 阶段的 `POST /import-jobs/bulk` JSON 只接受 `collection_job_id`，传入 `refresh_queue_id` 按 extra-forbid 返回 422。`0005` 部署后才 additive 接受可选 `refresh_queue_id`；Queue 必须属于目标 Department 且状态为 open/exported，completed/cancelled 返回 409。一个 Job 最多关联一个 Queue，但一个未完成 Queue 可以接收多个回流 Job。
+Task 9 的 `POST /import-jobs/bulk` JSON additive 接受可选 `refresh_queue_id`。Queue 必须存在、与 Collection/ImportJob 同 Department 且为 open/exported；未知或跨部门 Queue 返回 safe 404，completed/cancelled 返回 409 `REFRESH_QUEUE_NOT_RETURNABLE`。一个 Job 最多关联一个 Queue，一个未完成 Queue 可接收多个回流 Job。
+
+Queue-linked Unified Preview 在现有响应中 additive 返回：
+
+- `ImportJob.preview_summary.refresh_return`：matched/outside/pending、Queue Item with/without return、各 expected status、conflict 与稳定 `missing_queue_item_ids`。
+- 每个 `ImportRow.merge_plan.refresh_return`：matched Queue Item、expected fulfillment、稳定 reason 与唯一 Last Return claimant evidence。
+- Confirm result 的 `refresh_return`：同一 summary、claimed Item 数与 Queue 是否完成。
+
+Preview 不修改 Queue。没有 `refresh_queue_id` 的普通 Bulk 不产生上述 key，既有响应与 Plan Hash 语义保持不变；Task 9 不增加专用 Return endpoint。
 
 `POST /import-jobs/{id}/files` multipart 至少包含：
 
@@ -165,7 +175,7 @@ Batch File 状态：
 - failed
 - excluded
 
-`uploaded/parsing/mapping_required/failed` 都是 blocking；只有至少一个 included file 且所有 included files 都为 ready 才能 Preview，否则 Batch 保持 Draft 并返回稳定冲突错误。用户可在 Preview 前 replace、exclude 或 retry。第一次成功 Preview 后，文件集合、Mapping 与 `source_acquired_at` 永久冻结。
+`uploaded/parsing/mapping_required/failed` 都是 blocking；只有至少一个 included file 且所有 included files 都为 ready 才能 Preview，否则 Batch 保持 Draft 并返回稳定冲突错误。当前 API 支持用户在 Preview 前 exclude 或 retry；冻结设计中的原位 replace endpoint 尚未实现。第一次成功 Preview 后，文件集合、Mapping 与 `source_acquired_at` 永久冻结。
 
 Job 级 `POST /retry` 只按持久化 `failed_stage` 恢复：Preview 失败回 `previewing`；已人工确认的 Confirm 失败回 `confirm_queued` 并重用同一 revision；未知 legacy stage 返回 409。
 
@@ -193,6 +203,25 @@ Preview 响应至少包含：
 
 Preview 不写达人业务表。Confirm 必须显式携带 revision，整批重新计算 Plan Hash，在一个 PostgreSQL transaction 中提交；MVP 不提供 auto-confirm。
 
+Task 6 Confirm 请求体：
+
+```json
+{
+  "preview_revision": 3
+}
+```
+
+Task 6 Confirm/Recovery 契约：
+
+- Confirm 只接受当前 `preview_ready` revision；首次请求把 Job 转为 `confirm_queued`，并将 Job 状态、confirmed revision、唯一持久 task token 和首次 dispatch reservation 在一个数据库事务中提交，提交后才投递 Broker。
+- Broker payload 只携带 canonical UUID 形式的 Job ID、`preview_revision` 和持久 task token；Worker 必须用这三个值精确 claim PostgreSQL task request，不能把 Broker/Celery metadata 当作事实源。
+- 相同 Job/revision 在 `confirm_queued`、`importing` 或 `completed` 重放时返回原 task token 和 HTTP 200，不创建第二个 active Confirm；不同或旧 revision 返回 409 `PREVIEW_STALE`。
+- Worker 写入前重建完整统一 Plan，并核对 file manifest/SHA、Mapping、acquisition、Screening、normalized row、owner/identity、行级 plan hash、locator 与汇总。任一差异使整批进入 `preview_stale`，不写达人业务表。
+- Confirm 对所有 included files 只使用一个 PostgreSQL business transaction；业务结果、ImportRow committed lineage、Job completed、task completed 和成功 Audit 同事务提交。`MANUAL_REVIEW`、`ERROR`、`SKIP` 行保留 committed lineage，但不自动写达人业务实体。
+- API 在业务事务提交后投递 Broker；投递异常不会撤销已持久化 request。Scheduler 通过到期 reservation 和 `FOR UPDATE SKIP LOCKED` reconciliation 重投，因此 API/Redis/Broker 短暂故障不会形成永久 crash gap。
+- `POST /import-jobs/{id}/retry` 只根据持久 `failed_stage` 恢复失败的 Preview 或已人工确认的 Confirm；Confirm retry 复用原 confirmed revision，并为已终结的旧 request 创建新的持久 token，不创建或隐式确认新 Preview。
+- Cancel 只取消尚未进入数据库业务执行的 `requested/retry_wait` task；已有 `running` task 时返回 409 `IMPORT_TASK_RUNNING`，不执行不安全的进程内 kill。
+
 ---
 
 ## 4. Influencers
@@ -206,7 +235,7 @@ Preview 不写达人业务表。Confirm 必须显式携带 revision，整批重�
 
 不得增加 Influencer POST/PUT/PATCH/DELETE 作为 Phase 2 范围。Influencer 继续公司级读取，不按 Owner、Import Department 或 Refresh Queue Department 分片。
 
-### Phase 2 Planned — Freshness additive fields
+### Phase 2 Task 7 Implemented — Freshness additive fields
 
 `GET /influencers` additive filters：
 
@@ -222,11 +251,18 @@ Preview 不写达人业务表。Confirm 必须显式携带 revision，整批重�
 - freshness_status
 - freshness_age_days
 
+达人级 list/detail summary additive fields：
+
+- freshness_status
+- requires_refresh
+
 Legacy 没有可靠 acquisition time 时 `last_huitun_observed_at=null`。不得用 ImportRow.committed_at、Influencer.updated_at 或文件 mtime 伪造 observed time。
+
+筛选语义固定为：`freshness_status` 精确匹配任一 eligible active Huitun account/source；`requires_refresh` 精确匹配达人汇总布尔值；before/after 分别为 inclusive `<=`/`>=`，缺失 observation 不匹配日期范围。所有四个参数为单值，重复参数、无时区 datetime、非法布尔值或 after > before 均返回 422。四个正式角色继续进行公司级读取，GET 不写 business Audit。
 
 ---
 
-## 5. Refresh Queues（Phase 2 Planned）
+## 5. Refresh Queues（Phase 2 Task 8 Implemented）
 
 - `POST /refresh-queues`
 - `GET /refresh-queues`
@@ -248,7 +284,9 @@ Queue 由 Department 拥有；创建与导出要求非 Viewer、selected Operato
 }
 ```
 
-`department_id` 缺省为 Session Department；只有 `super_admin` 可显式指定其他部门，manager/operator 跨部门请求返回 403。`as_of`、`policy_version` 和 `criteria_snapshot` 由服务器生成，不接受客户端传入；MVP 也不接受任意 `criteria` JSON。三个 limit 必须为正整数，并满足 `requested_limit <= refresh_limit <= today_total_limit`。额度只是本 Queue 的用户输入参数，系统不宣称知道灰豚真实剩余额度。
+`department_id` 缺省为 Session Department；只有 `super_admin` 可显式指定其他部门，manager/operator 跨部门请求返回 403。`as_of`、`policy_version` 和 `criteria_snapshot` 由服务器生成，不接受客户端传入；MVP 也不接受任意 `criteria` JSON。三个 limit 必须为严格正整数，并满足 `requested_limit <= refresh_limit <= today_total_limit`，其中 `requested_limit <= 2000`。额度只是本 Queue 的用户输入参数，系统不宣称知道灰豚真实剩余额度。
+
+Task 8 固定 `policy_version=1`，priority tier 为整数 1–5，reason codes 为 `FRESHNESS_UNKNOWN / VERY_STALE / STALE / AGING / FOLLOWERS_MISSING`。Queue creation、priority、baseline 与 Identity snapshot 使用同一个 server UTC `as_of` 和同一 candidate statement；不接受 `priority_score`、自定义权重或客户端 reason。
 
 Queue/Item GET 使用 `offset=0`、`limit=50`、最大 200。Queue 按 `created_at DESC, id DESC`；Item 按创建时冻结字段 `priority_tier ASC, baseline_last_observed_at ASC NULLS FIRST, influencer_id ASC, platform_account_id ASC, id ASC`，不用 live Freshness 导致翻页漂移。
 
@@ -260,7 +298,7 @@ Queue/Item GET 使用 `offset=0`、`limit=50`、最大 200。Queue 按 `created_
 
 - `GET /audit-logs`：仅管理员（后续接口，按实际 Router 为准）。
 
-Phase 2 Planned AuditAction 至少覆盖：
+Phase 2 Task 1–6 已实现 AuditAction：
 
 - IMPORT_BATCH_CREATED
 - IMPORT_BATCH_PREVIEW_CREATED
@@ -270,17 +308,23 @@ Phase 2 Planned AuditAction 至少覆盖：
 - IMPORT_BATCH_RETRIED
 - IMPORT_BATCH_CANCELLED
 - IMPORT_FILE_UPLOADED
-- IMPORT_FILE_REPLACED
 - IMPORT_FILE_EXCLUDED
 - IMPORT_FILE_RETRIED
 - IMPORT_FILE_MAPPING_UPDATED
 - IMPORT_FILE_SOURCE_ACQUIRED_AT_UPDATED
 - COLLECTION_SCREENING_RULES_UPDATED
+
+Stale Confirm 复用现有 `IMPORT_PREVIEW_STALE`。`IMPORT_FILE_REPLACED` 仍属后续 planned action：
+
+- IMPORT_FILE_REPLACED
+
+Task 8 已实现：
+
 - REFRESH_QUEUE_CREATED
 - REFRESH_QUEUE_EXPORTED
 - REFRESH_QUEUE_CANCELLED
 
-Audit 不记录原始行、Contact、密码、Token、Secret 或 Storage 内容。
+Audit 不记录原始行、Contact、密码、Session/Auth/Access Token、Secret 或 Storage 内容；persisted import task token 只可作为 Task 6 的必要 task identity 白名单字段。
 
 ---
 

@@ -8,6 +8,7 @@ from backend_core.imports.models import (
     ImportJobFile,
     ImportJobFileClientId,
     ImportRow,
+    ImportTaskRequest,
     StoredImportFile,
 )
 from backend_core.influencers.models import (
@@ -19,6 +20,7 @@ from backend_core.influencers.models import (
     InfluencerSourceState,
     PlatformAccountSourceIdentity,
 )
+from backend_core.refresh.models import RefreshQueue, RefreshQueueItem
 
 __all__ = [
     "AuditLog",
@@ -30,6 +32,7 @@ __all__ = [
     "ImportJobFile",
     "ImportJobFileClientId",
     "ImportRow",
+    "ImportTaskRequest",
     "Influencer",
     "InfluencerContact",
     "InfluencerCurrentMetrics",
@@ -37,6 +40,8 @@ __all__ = [
     "InfluencerPlatformAccount",
     "InfluencerSourceState",
     "PlatformAccountSourceIdentity",
+    "RefreshQueue",
+    "RefreshQueueItem",
     "Operator",
     "StoredImportFile",
 ]

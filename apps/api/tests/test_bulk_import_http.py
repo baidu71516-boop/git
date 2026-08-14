@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from app.http.dependencies import (
     get_database_session,
@@ -32,9 +32,18 @@ from backend_core.imports.enums import (
     ImportJobStatus,
     ImportMatchType,
     ImportRowAction,
+    ImportTaskState,
 )
-from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow, StoredImportFile
+from backend_core.imports.models import (
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    ImportTaskRequest,
+    StoredImportFile,
+)
 from backend_core.imports.storage import LocalStorageAdapter
+from backend_core.refresh.enums import RefreshQueueStatus
+from backend_core.refresh.models import RefreshQueue
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient, Response
 from openpyxl import Workbook
@@ -121,9 +130,11 @@ class NoopDispatcher:
         self.parse_calls: list[tuple[UUID, str]] = []
         self.parse_file_calls: list[tuple[UUID, UUID, str]] = []
         self.preview_calls: list[tuple[UUID, str]] = []
+        self.confirm_calls: list[tuple[UUID, int, str]] = []
         self.file_dispatch_had_open_transaction: list[bool] = []
         self.fail_parse_file = False
         self.fail_preview = False
+        self.fail_confirm = False
         self.session: AsyncSession | None = None
 
     async def parse(self, import_job_id: UUID, task_id: str) -> None:
@@ -142,7 +153,9 @@ class NoopDispatcher:
             raise RuntimeError("synthetic file broker failure")
 
     async def confirm(self, import_job_id: UUID, preview_revision: int, task_id: str) -> None:
-        _ = (import_job_id, preview_revision, task_id)
+        self.confirm_calls.append((import_job_id, preview_revision, task_id))
+        if self.fail_confirm:
+            raise RuntimeError("synthetic Confirm broker failure")
 
     async def preview(self, import_job_id: UUID, task_id: str) -> None:
         self.preview_calls.append((import_job_id, task_id))
@@ -238,6 +251,17 @@ def set_context(harness: BulkHttpHarness, name: str) -> None:
     harness.current["auth"] = harness.contexts[name]
 
 
+async def complete_task(session: AsyncSession, task_id: str) -> None:
+    task = await session.scalar(
+        select(ImportTaskRequest).where(ImportTaskRequest.task_token == UUID(task_id))
+    )
+    assert task is not None
+    task.state = ImportTaskState.COMPLETED
+    task.completed_at = datetime.now(UTC)
+    task.next_retry_at = None
+    task.lease_expires_at = None
+
+
 async def create_collection(client: AsyncClient, *, name: str = "Bulk HTTP Collection") -> UUID:
     response = await client.post(
         "/api/v1/collection-jobs",
@@ -254,11 +278,52 @@ async def create_collection(client: AsyncClient, *, name: str = "Bulk HTTP Colle
     return UUID(response.json()["data"]["id"])
 
 
-async def create_bulk(client: AsyncClient, collection_job_id: UUID) -> Response:
+async def create_bulk(
+    client: AsyncClient,
+    collection_job_id: UUID,
+    *,
+    refresh_queue_id: UUID | None = None,
+) -> Response:
+    payload = {"collection_job_id": str(collection_job_id)}
+    if refresh_queue_id is not None:
+        payload["refresh_queue_id"] = str(refresh_queue_id)
     return await client.post(
         "/api/v1/import-jobs/bulk",
-        json={"collection_job_id": str(collection_job_id)},
+        json=payload,
     )
+
+
+async def seed_refresh_queue(
+    session: AsyncSession,
+    context: AuthContext,
+    *,
+    status: RefreshQueueStatus,
+) -> RefreshQueue:
+    assert context.operator is not None
+    await session.refresh(context.department)
+    await session.refresh(context.operator)
+    timestamp = datetime(2026, 8, 12, 6, 0, tzinfo=UTC)
+    queue = RefreshQueue(
+        department_id=context.department.id,
+        created_by_operator_id=context.operator.id,
+        status=status,
+        as_of=timestamp,
+        requested_limit=1,
+        today_total_limit=1,
+        refresh_limit=1,
+        policy_version=1,
+        criteria_snapshot={"source": "bulk-http-test"},
+        exported_at=(
+            timestamp
+            if status in (RefreshQueueStatus.EXPORTED, RefreshQueueStatus.COMPLETED)
+            else None
+        ),
+        completed_at=timestamp if status is RefreshQueueStatus.COMPLETED else None,
+        cancelled_at=timestamp if status is RefreshQueueStatus.CANCELLED else None,
+    )
+    session.add(queue)
+    await session.commit()
+    return queue
 
 
 async def upload_file(
@@ -337,17 +402,9 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
             assert created.json()["data"]["stored_file_id"] is None
             assert created.json()["data"]["original_filename"] is None
             assert created.json()["data"]["sha256"] is None
+            assert created.json()["data"]["refresh_queue_id"] is None
             assert_no_storage_key(created.json())
             import_job_id = UUID(created.json()["data"]["id"])
-
-            refresh_queue_is_not_a_task_2_field = await harness.client.post(
-                "/api/v1/import-jobs/bulk",
-                json={
-                    "collection_job_id": str(collection_id),
-                    "refresh_queue_id": str(collection_id),
-                },
-            )
-            assert refresh_queue_is_not_a_task_2_field.status_code == 422
 
             first_content = valid_csv("first")
             first = await upload_file(
@@ -377,6 +434,18 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
                 first_file["parse_task_id"],
             )
             assert harness.dispatcher.file_dispatch_had_open_transaction == [False]
+            upload_task = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(first_file["parse_task_id"])
+                )
+            )
+            assert upload_task is not None
+            assert upload_task.import_job_id == import_job_id
+            assert upload_task.import_job_file_id == first_file_id
+            assert upload_task.state is ImportTaskState.REQUESTED
+            assert upload_task.dispatch_attempts == 1
+            assert upload_task.last_dispatch_attempt_at is not None
+            assert upload_task.next_retry_at is not None
 
             replay = await upload_file(
                 harness.client,
@@ -551,7 +620,116 @@ def test_bulk_import_http_multi_file_idempotency_acquisition_and_exclude() -> No
     asyncio.run(scenario())
 
 
-def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
+def test_bulk_import_http_links_only_returnable_same_department_refresh_queue() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="Bulk Queue Return")
+            operator_context = harness.contexts["operator"]
+            open_queue = await seed_refresh_queue(
+                harness.session,
+                operator_context,
+                status=RefreshQueueStatus.OPEN,
+            )
+            exported_queue = await seed_refresh_queue(
+                harness.session,
+                operator_context,
+                status=RefreshQueueStatus.EXPORTED,
+            )
+            open_queue_id = open_queue.id
+            exported_queue_id = exported_queue.id
+
+            for queue_id in (open_queue_id, exported_queue_id):
+                response = await create_bulk(
+                    harness.client,
+                    collection_id,
+                    refresh_queue_id=queue_id,
+                )
+                data = assert_success_envelope(response)["data"]
+                assert response.status_code == 201
+                assert data["refresh_queue_id"] == str(queue_id)
+                assert data["collection_job_id"] == str(collection_id)
+                persisted = await harness.session.get(ImportJob, UUID(data["id"]))
+                assert persisted is not None
+                assert persisted.refresh_queue_id == queue_id
+
+            linked_job_id = UUID(response.json()["data"]["id"])
+            audit = await harness.session.scalar(
+                select(AuditLog).where(AuditLog.entity_id == linked_job_id)
+            )
+            assert audit is not None
+            assert audit.after is not None
+            assert audit.after["refresh_queue_id"] == str(exported_queue_id)
+
+            for status in (RefreshQueueStatus.COMPLETED, RefreshQueueStatus.CANCELLED):
+                terminal_queue = await seed_refresh_queue(
+                    harness.session,
+                    operator_context,
+                    status=status,
+                )
+                rejected = await create_bulk(
+                    harness.client,
+                    collection_id,
+                    refresh_queue_id=terminal_queue.id,
+                )
+                assert_error_envelope(
+                    rejected,
+                    status_code=409,
+                    code="REFRESH_QUEUE_NOT_RETURNABLE",
+                )
+
+            missing = await create_bulk(
+                harness.client,
+                collection_id,
+                refresh_queue_id=uuid4(),
+            )
+            assert_error_envelope(
+                missing,
+                status_code=404,
+                code="REFRESH_QUEUE_NOT_FOUND",
+            )
+
+            cross_department_queue = await seed_refresh_queue(
+                harness.session,
+                harness.contexts["cross_department"],
+                status=RefreshQueueStatus.OPEN,
+            )
+            cross_department = await create_bulk(
+                harness.client,
+                collection_id,
+                refresh_queue_id=cross_department_queue.id,
+            )
+            assert_error_envelope(
+                cross_department,
+                status_code=404,
+                code="REFRESH_QUEUE_NOT_FOUND",
+            )
+
+            set_context(harness, "viewer")
+            viewer = await create_bulk(
+                harness.client,
+                collection_id,
+                refresh_queue_id=open_queue_id,
+            )
+            assert_error_envelope(viewer, status_code=403, code="PERMISSION_DENIED")
+
+            set_context(harness, "no_operator")
+            no_operator = await create_bulk(
+                harness.client,
+                collection_id,
+                refresh_queue_id=open_queue_id,
+            )
+            assert_error_envelope(no_operator, status_code=409, code="OPERATOR_REQUIRED")
+
+            set_context(harness, "operator")
+            ordinary = await create_bulk(harness.client, collection_id)
+            ordinary_data = assert_success_envelope(ordinary)["data"]
+            assert ordinary.status_code == 201
+            assert ordinary_data["refresh_queue_id"] is None
+
+    asyncio.run(scenario())
+
+
+def test_bulk_file_mapping_retry_and_broker_failure_are_durable() -> None:
     async def scenario() -> None:
         async with bulk_http_harness() as harness:
             collection_id = await create_collection(harness.client, name="Bulk File Parse")
@@ -578,6 +756,8 @@ def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
 
             occurrence = await harness.session.get(ImportJobFile, import_job_file_id)
             assert occurrence is not None
+            assert occurrence.parse_task_id is not None
+            await complete_task(harness.session, occurrence.parse_task_id)
             occurrence.status = ImportJobFileStatus.MAPPING_REQUIRED
             occurrence.detected_fields = ["达人名称", "达人官方地址"]
             await harness.session.commit()
@@ -604,6 +784,8 @@ def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
             )
 
             await harness.session.refresh(occurrence)
+            assert occurrence.parse_task_id is not None
+            await complete_task(harness.session, occurrence.parse_task_id)
             occurrence.status = ImportJobFileStatus.FAILED
             occurrence.error_code = "INVALID_CSV"
             occurrence.error_message = "synthetic deterministic failure"
@@ -632,11 +814,7 @@ def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
                 content=valid_csv("dispatch-failure"),
                 content_type="text/csv",
             )
-            assert_error_envelope(
-                dispatch_failed,
-                status_code=503,
-                code="TASK_DISPATCH_FAILED",
-            )
+            assert dispatch_failed.status_code == 201, dispatch_failed.text
             harness.dispatcher.fail_parse_file = False
 
             failed_job = await harness.session.get(ImportJob, failed_job_id)
@@ -648,8 +826,20 @@ def test_bulk_file_mapping_retry_and_dispatch_failure_are_file_scoped() -> None:
                 )
             ).all()
             assert len(failed_occurrences) == 1
-            assert failed_occurrences[0].status is ImportJobFileStatus.FAILED
-            assert failed_occurrences[0].error_code == "TASK_DISPATCH_FAILED"
+            failed_occurrence = failed_occurrences[0]
+            assert failed_occurrence.status is ImportJobFileStatus.PARSING
+            assert failed_occurrence.error_code is None
+            assert failed_occurrence.parse_task_id is not None
+            durable = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(failed_occurrence.parse_task_id)
+                )
+            )
+            assert durable is not None
+            assert durable.state is ImportTaskState.REQUESTED
+            assert durable.dispatch_attempts == 1
+            assert durable.last_dispatch_attempt_at is not None
+            assert durable.next_retry_at is not None
 
     asyncio.run(scenario())
 
@@ -892,6 +1082,8 @@ def test_bulk_preview_dispatch_is_idempotent_rows_are_categorized_and_confirm_is
 
             job = await harness.session.get(ImportJob, import_job_id)
             assert job is not None
+            assert job.parse_task_id is not None
+            await complete_task(harness.session, job.parse_task_id)
             job.status = ImportJobStatus.PREVIEW_READY
             job.preview_revision = 1
             job.preview_summary = {"raw_rows": 4}
@@ -1099,16 +1291,6 @@ def test_bulk_preview_dispatch_is_idempotent_rows_are_categorized_and_confirm_is
             )
             assert audits_after_reads == audits_before_reads
 
-            bulk_confirm = await harness.client.post(
-                f"/api/v1/import-jobs/{import_job_id}/confirm",
-                json={"preview_revision": 1},
-            )
-            assert_error_envelope(
-                bulk_confirm,
-                status_code=409,
-                code="BULK_CONFIRM_NOT_AVAILABLE",
-            )
-
             delayed_retry = await harness.client.post(
                 f"/api/v1/import-jobs/{import_job_id}/preview"
             )
@@ -1134,6 +1316,45 @@ def test_bulk_preview_dispatch_is_idempotent_rows_are_categorized_and_confirm_is
                 import_job_id,
                 rebuild_data["task_id"],
             )
+
+            await complete_task(harness.session, rebuild_data["task_id"])
+            job.status = ImportJobStatus.PREVIEW_READY
+            job.preview_revision = 2
+            job.preview_summary = {"raw_rows": 4}
+            await harness.session.commit()
+            harness.dispatcher.fail_confirm = True
+            bulk_confirm = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/confirm",
+                json={"preview_revision": 2},
+            )
+            assert bulk_confirm.status_code == 202, bulk_confirm.text
+            confirm_data = assert_success_envelope(bulk_confirm)["data"]
+            assert confirm_data["status"] == "confirm_queued"
+            assert harness.dispatcher.confirm_calls[-1] == (
+                import_job_id,
+                2,
+                confirm_data["task_id"],
+            )
+            await harness.session.refresh(job)
+            assert job.status is ImportJobStatus.CONFIRM_QUEUED
+            confirm_task = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(confirm_data["task_id"])
+                )
+            )
+            assert confirm_task is not None
+            assert confirm_task.state is ImportTaskState.REQUESTED
+            assert confirm_task.dispatch_attempts == 1
+            harness.dispatcher.fail_confirm = False
+            replay_confirm = await harness.client.post(
+                f"/api/v1/import-jobs/{import_job_id}/confirm",
+                json={"preview_revision": 2},
+            )
+            assert replay_confirm.status_code == 200, replay_confirm.text
+            replay_confirm_data = assert_success_envelope(replay_confirm)["data"]
+            assert replay_confirm_data["idempotent"] is True
+            assert replay_confirm_data["task_id"] == confirm_data["task_id"]
+            assert len(harness.dispatcher.confirm_calls) == 1
 
     asyncio.run(scenario())
 
@@ -1293,7 +1514,7 @@ def test_bulk_preview_freeze_gates_report_exact_blocking_files() -> None:
     asyncio.run(scenario())
 
 
-def test_bulk_preview_retry_is_idempotent_and_rejects_confirm_stage() -> None:
+def test_bulk_preview_broker_failure_is_durable_and_confirm_stage_retry_is_exact() -> None:
     async def scenario() -> None:
         async with bulk_http_harness() as harness:
             collection_id = await create_collection(harness.client, name="Bulk Retry HTTP")
@@ -1321,56 +1542,72 @@ def test_bulk_preview_retry_is_idempotent_and_rejects_confirm_stage() -> None:
             dispatch_failed = await harness.client.post(
                 f"/api/v1/import-jobs/{import_job_id}/preview"
             )
-            assert_error_envelope(
-                dispatch_failed,
-                status_code=503,
-                code="TASK_DISPATCH_FAILED",
-            )
+            assert dispatch_failed.status_code == 202, dispatch_failed.text
+            failed_data = assert_success_envelope(dispatch_failed)["data"]
             await harness.session.refresh(job)
             await harness.session.refresh(occurrence)
-            assert job.status is ImportJobStatus.FAILED
-            assert job.failed_stage is ImportJobFailedStage.PREVIEW
+            assert job.status is ImportJobStatus.PREVIEWING
+            assert job.failed_stage is None
             assert occurrence.status is ImportJobFileStatus.READY
             assert len(harness.dispatcher.preview_calls) == 1
+            durable = await harness.session.scalar(
+                select(ImportTaskRequest).where(
+                    ImportTaskRequest.task_token == UUID(failed_data["task_id"])
+                )
+            )
+            assert durable is not None
+            assert durable.state is ImportTaskState.REQUESTED
+            assert durable.dispatch_attempts == 1
             harness.dispatcher.fail_preview = False
 
             wrong_endpoint = await harness.client.post(
                 f"/api/v1/import-jobs/{import_job_id}/preview"
             )
-            assert_error_envelope(
-                wrong_endpoint,
-                status_code=409,
-                code="INVALID_STATE_TRANSITION",
-            )
+            assert wrong_endpoint.status_code == 200, wrong_endpoint.text
+            wrong_data = assert_success_envelope(wrong_endpoint)["data"]
+            assert wrong_data["task_id"] == failed_data["task_id"]
+            assert wrong_data["idempotent"] is True
             assert len(harness.dispatcher.preview_calls) == 1
 
             first = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
-            assert first.status_code == 202, first.text
+            assert first.status_code == 200, first.text
             first_data = assert_success_envelope(first)["data"]
             assert first_data["status"] == "previewing"
-            assert first_data["idempotent"] is False
-            assert harness.dispatcher.preview_calls[-1] == (
-                import_job_id,
-                first_data["task_id"],
-            )
+            assert first_data["idempotent"] is True
+            assert first_data["task_id"] == failed_data["task_id"]
+            assert len(harness.dispatcher.preview_calls) == 1
 
             replay = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
             assert replay.status_code == 200, replay.text
             replay_data = assert_success_envelope(replay)["data"]
             assert replay_data["task_id"] == first_data["task_id"]
             assert replay_data["idempotent"] is True
-            assert len(harness.dispatcher.preview_calls) == 2
+            assert len(harness.dispatcher.preview_calls) == 1
 
+            durable.state = ImportTaskState.TERMINAL_FAILED
+            durable.completed_at = datetime.now(UTC)
+            durable.next_retry_at = None
             job.status = ImportJobStatus.FAILED
             job.failed_stage = ImportJobFailedStage.CONFIRM
+            job.preview_revision = 1
+            job.preview_summary = {"schema_version": 1, "batch_plan_hash": "a" * 64}
+            job.confirmed_revision = 1
             await harness.session.commit()
             confirm_stage = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
-            assert_error_envelope(
-                confirm_stage,
-                status_code=409,
-                code="INVALID_STATE_TRANSITION",
-            )
-            assert len(harness.dispatcher.preview_calls) == 2
+            assert confirm_stage.status_code == 202, confirm_stage.text
+            confirm_data = assert_success_envelope(confirm_stage)["data"]
+            assert confirm_data["status"] == "confirm_queued"
+            assert confirm_data["idempotent"] is False
+            assert UUID(confirm_data["task_id"])
+            assert len(harness.dispatcher.preview_calls) == 1
+            assert harness.dispatcher.confirm_calls == [(import_job_id, 1, confirm_data["task_id"])]
+
+            confirm_replay = await harness.client.post(f"/api/v1/import-jobs/{import_job_id}/retry")
+            assert confirm_replay.status_code == 200, confirm_replay.text
+            replay_data = assert_success_envelope(confirm_replay)["data"]
+            assert replay_data["task_id"] == confirm_data["task_id"]
+            assert replay_data["idempotent"] is True
+            assert len(harness.dispatcher.confirm_calls) == 1
 
     asyncio.run(scenario())
 
@@ -1751,7 +1988,19 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
 
     bulk_envelope = _response_schema(document, bulk_create, 201)
     bulk_data = _resolve_openapi_schema(document, bulk_envelope["properties"]["data"])
-    assert {"id", "collection_job_id", "status", "stored_file_id"} <= set(bulk_data["properties"])
+    assert {
+        "id",
+        "collection_job_id",
+        "refresh_queue_id",
+        "status",
+        "stored_file_id",
+    } <= set(bulk_data["properties"])
+    bulk_request = _resolve_openapi_schema(
+        document,
+        bulk_create["requestBody"]["content"]["application/json"]["schema"],
+    )
+    assert "refresh_queue_id" in bulk_request["properties"]
+    assert "refresh_queue_id" not in bulk_request["required"]
 
     upload_201 = _response_schema(document, upload, 201)
     upload_200 = _response_schema(document, upload, 200)
@@ -1782,9 +2031,8 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
         file_data = _resolve_openapi_schema(document, file_envelope["properties"]["data"])
         assert "parse_task_id" in file_data["properties"]
         assert "field_mapping" in file_data["properties"]
-        assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(
-            operation["responses"]
-        )
+        assert {"200", "202", "401", "403", "404", "409", "422"} <= set(operation["responses"])
+        assert "503" not in operation["responses"]
 
     validation_envelope = _response_schema(document, upload, 422)
     assert {"success", "data", "error", "request_id"} <= set(validation_envelope["properties"])
@@ -1811,16 +2059,16 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
         "default": False,
     }
     assert preview_request["additionalProperties"] is False
-    assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(preview["responses"])
+    assert {"200", "202", "401", "403", "404", "409", "422"} <= set(preview["responses"])
+    assert "503" not in preview["responses"]
     for status_code in (200, 202):
         retry_envelope = _response_schema(document, retry_preview, status_code)
         retry_data = _resolve_openapi_schema(document, retry_envelope["properties"]["data"])
         assert {"import_job_id", "status", "preview_revision", "task_id", "idempotent"} <= set(
             retry_data["properties"]
         )
-    assert {"200", "202", "401", "403", "404", "409", "422", "503"} <= set(
-        retry_preview["responses"]
-    )
+    assert {"200", "202", "401", "403", "404", "409", "422"} <= set(retry_preview["responses"])
+    assert "503" not in retry_preview["responses"]
 
     rows_envelope = _response_schema(document, rows, 200)
     rows_data = _resolve_openapi_schema(document, rows_envelope["properties"]["data"])
@@ -1854,8 +2102,8 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
         "413",
         "415",
         "422",
-        "503",
     } <= set(upload["responses"])
+    assert "503" not in upload["responses"]
     for operation, success_status in (
         (bulk_create, 201),
         (upload, 200),

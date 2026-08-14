@@ -13,12 +13,14 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend_core.config.settings import Settings
 from backend_core.imports.adapters import (
     GenericCsvAdapter,
     HuitunCsvAdapter,
@@ -65,6 +67,7 @@ from backend_core.imports.planner import (
 )
 from backend_core.imports.repository import ImportRepository
 from backend_core.imports.storage import StorageAdapter
+from backend_core.imports.task_service import ImportTaskService
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +108,13 @@ class _StagingRow:
         )
 
 
+class RevalidationMode(StrEnum):
+    """Controls whether rebuilt bytes may replace the persisted row cache."""
+
+    PREVIEW_REPLACE = "preview_replace"
+    CONFIRM_PRESERVE = "confirm_preserve"
+
+
 class BatchImportProcessor:
     """Parse one occurrence and atomically rebuild the included batch graph."""
 
@@ -115,6 +125,7 @@ class BatchImportProcessor:
         *,
         parser_limits: ParserLimits,
         max_batch_rows: int = 10_000,
+        task_settings: Settings | None = None,
     ) -> None:
         if max_batch_rows < 1:
             raise ValueError("max_batch_rows must be positive")
@@ -123,15 +134,22 @@ class BatchImportProcessor:
         self.repository = ImportRepository(session)
         self.parser_limits = parser_limits
         self.max_batch_rows = max_batch_rows
+        self.task_service = (
+            ImportTaskService(session, task_settings) if task_settings is not None else None
+        )
 
     async def parse_file(
         self,
         import_job_id: UUID,
         import_job_file_id: UUID,
         task_id: str,
+        *,
+        task_token: UUID | None = None,
+        task_generation: int | None = None,
     ) -> dict[str, Any]:
         """Parse one persisted occurrence when its task token is still current."""
 
+        task_context = self._task_context(task_token, task_generation)
         try:
             snapshot, early_result = await self._task_snapshot(
                 import_job_id, import_job_file_id, task_id
@@ -153,14 +171,27 @@ class BatchImportProcessor:
             )
             mapping, adapter = self._mapping_and_adapter(snapshot, table)
             if adapter is None:
-                return await self._persist_mapping_required(snapshot, table, mapping)
+                return await self._persist_mapping_required(
+                    snapshot,
+                    table,
+                    mapping,
+                    task_context=task_context,
+                )
 
             adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
-            return await self._persist_parsed_file(snapshot, table, mapping, adapted_rows)
+            return await self._persist_parsed_file(
+                snapshot,
+                table,
+                mapping,
+                adapted_rows,
+                task_context=task_context,
+            )
         except BaseException as exc:
             if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             await self.session.rollback()
+            if task_context is not None:
+                raise
             await self._mark_failed(import_job_id, import_job_file_id, task_id, exc)
             if isinstance(exc, ImportDomainError):
                 raise
@@ -198,15 +229,19 @@ class BatchImportProcessor:
         self,
         job: ImportJob,
         files: Sequence[ImportJobFile],
+        *,
+        mode: RevalidationMode,
     ) -> list[_StagingRow]:
-        """Re-read and normalize every included READY occurrence for Preview.
+        """Re-read and normalize every included READY occurrence.
 
         Task 3 staging is deliberately not trusted as the source of a Unified
         Preview.  This method verifies each immutable StoredImportFile, runs the
         same safe parser and source adapter again, and reconstructs rows from the
         bytes protected by the frozen per-file mapping.  Any row replacement or
         deletion remains in the caller's Preview transaction, so a later failure
-        restores the last complete revision atomically.
+        restores the last complete revision atomically.  Confirm uses
+        ``CONFIRM_PRESERVE`` because revalidation must never prune the frozen
+        Preview rows it is comparing against.
         """
 
         records = await self.repository.list_import_job_file_records(job.id)
@@ -309,9 +344,10 @@ class BatchImportProcessor:
         # Staging is only a locator cache.  Revalidation is authoritative: an
         # unexpected persisted row is removed in the same transaction that will
         # publish the rebuilt Preview, never as a separate Task 3 mutation.
-        for model in persisted_models:
-            if (model.import_job_file_id, model.row_number) not in rebuilt_locators:
-                await self.session.delete(model)
+        if mode is RevalidationMode.PREVIEW_REPLACE:
+            for model in persisted_models:
+                if (model.import_job_file_id, model.row_number) not in rebuilt_locators:
+                    await self.session.delete(model)
         staging_rows.sort(key=lambda item: item.locator.sort_key)
         return staging_rows
 
@@ -417,6 +453,8 @@ class BatchImportProcessor:
         snapshot: _TaskSnapshot,
         table: ParsedTable,
         mapping: dict[str, str],
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> dict[str, Any]:
         job, occurrence, stored_file = await self._locked_current_task(snapshot)
         if stored_file is None:
@@ -445,6 +483,7 @@ class BatchImportProcessor:
         }
         files = await self.repository.list_import_job_files(job.id, for_update=True)
         await self._persist_replanned_rows(job, files, replacement=None)
+        await self._complete_task(task_context)
         await self.session.commit()
         return self._file_result(job, occurrence)
 
@@ -454,6 +493,8 @@ class BatchImportProcessor:
         table: ParsedTable,
         mapping: dict[str, str],
         adapted_rows: list[AdaptedRow],
+        *,
+        task_context: tuple[UUID, int] | None = None,
     ) -> dict[str, Any]:
         job, occurrence, stored_file = await self._locked_current_task(snapshot)
         if stored_file is None:
@@ -530,6 +571,7 @@ class BatchImportProcessor:
         # replacement rows; the surrounding transaction rolls it back if any
         # planning or persistence step fails.
         await self._persist_replanned_rows(job, files, replacement=replacement)
+        await self._complete_task(task_context)
         await self.session.commit()
         return self._file_result(job, occurrence)
 
@@ -1052,6 +1094,28 @@ class BatchImportProcessor:
                 await self.session.commit()
             else:
                 await self.session.rollback()
+
+    @staticmethod
+    def _task_context(
+        task_token: UUID | None,
+        task_generation: int | None,
+    ) -> tuple[UUID, int] | None:
+        if task_token is None and task_generation is None:
+            return None
+        if task_token is None or task_generation is None or task_generation < 1:
+            raise ValueError("task_token and a positive task_generation must be provided together")
+        return task_token, task_generation
+
+    async def _complete_task(self, task_context: tuple[UUID, int] | None) -> None:
+        if task_context is None:
+            return
+        assert self.task_service is not None
+        task_token, generation = task_context
+        if not await self.task_service.complete(task_token, generation):
+            raise ImportDomainError(
+                "IMPORT_TASK_LEASE_LOST",
+                "File Parse lost its authoritative task lease before commit",
+            )
 
     @staticmethod
     def _require_bulk_draft(job: ImportJob | None) -> None:

@@ -16,8 +16,8 @@
 
 - Phase 1A–1C 使用 `Influencer + InfluencerPlatformAccount + SourceState/SourceIdentity + Contact + CurrentMetrics + MetricSnapshot`，不是把小红书/灰豚字段直接塞入 Influencer。
 - Import 使用 `StoredImportFile + CollectionJob + ImportJob + ImportRow`、持久化 Preview Revision 和人工 Confirm。
-- 当前 Phase 2 开发分支 Alembic head 是 `0004_phase2_bulk_import`；正式测试服务器仍停留在 `0003_phase1b`。
-- `0004` 尚未 merge/deploy，已授权直接完善 client-ID alias 与 occurrence-level acquisition confirmation 结构；不得为此创建新 Migration，`0005` 仍保留给 Refresh Queue。
+- 当前 Phase 2 开发分支 Alembic head 是 `0005_phase2_refresh_queue`；正式测试服务器仍停留在 `0003_phase1b`。
+- `0004` 保持冻结；Task 8 已以唯一新 Revision `0005` 实现 Refresh Queue Schema，未创建 `0006`。
 
 ---
 
@@ -102,7 +102,39 @@ CollectionJob (one originating collection)
 
 幂等真值：A+X 首次创建 occurrence X 和 alias A；A+X 重放返回 X；A+Y 返回 409；B+X 为 X 新增 alias B；其后的 B+Y 返回 409。并发 A+X/A+X 最终一个 occurrence/一个 alias，并发 A+X/B+X 最终一个 occurrence/两个 aliases，并发 A+X/A+Y 最终一个 A binding、一个成功和一个 deterministic 409。所有最终状态由 PostgreSQL transaction、Job 范围锁、unique 和 composite FK 约束保证，不允许 500、silent overwrite 或全局锁。
 
-### A.3 `import_jobs` / `import_rows` / `collection_jobs`（0004 additive changes）
+### A.3 `import_task_requests`（0004）
+
+PostgreSQL 是 Import task lifecycle 与 retry exhaustion 的唯一 authoritative source；Celery/Redis 只负责 at-least-once delivery。表字段：
+
+- `id UUID PK`、`task_token UUID UNIQUE`
+- `task_kind ENUM(legacy_parse, file_parse, preview, confirm)`
+- `import_job_id UUID NOT NULL`、`import_job_file_id UUID nullable`、`preview_revision INT nullable`
+- `state ENUM(requested, running, retry_wait, completed, terminal_failed, cancelled)`
+- `dispatch_attempts / run_attempts INT NOT NULL DEFAULT 0`
+- `requested_at TIMESTAMPTZ NOT NULL`
+- `last_dispatch_attempt_at / next_retry_at / lease_expires_at / started_at / completed_at TIMESTAMPTZ nullable`
+- `created_at / updated_at TIMESTAMPTZ NOT NULL`
+
+约束：
+
+- file_parse 必须有 file 且 revision 为 NULL；confirm 必须无 file 且 revision `>=1`；legacy_parse/preview 的 file 与 revision 均为 NULL。
+- `(import_job_file_id, import_job_id)` 复合 FK 保证文件属于同一 Job；attempt counters 不得小于 0。
+- completed 必须有 completed_at；running 必须有 lease_expires_at；retry_wait 必须有 next_retry_at。
+- active 状态固定为 requested/running/retry_wait；legacy_parse(Job)、file_parse(Job/File)、preview(Job)、confirm(Job/Revision) 分别使用 partial unique index，terminal 历史可保留。
+- due requested/retry_wait 与 expired running lease 使用 partial indexes 支持 bounded、deterministic、`FOR UPDATE SKIP LOCKED` reconciliation。
+
+业务状态与 task request 必须同事务创建；业务完成写入与 task completed 必须同事务提交。Migration 不为历史 Parse/Preview/Confirm 伪造 task records。只要表中存在任何 durable task record，`0004 → 0003` downgrade 必须拒绝。
+
+Task 6 运行时状态约束：
+
+- API 在同一事务中持久化业务 queued/parsing 状态、request 和首次 dispatch reservation（增加 `dispatch_attempts`，写入 `last_dispatch_attempt_at/next_retry_at`）；该事务提交后才允许发布 Broker message。
+- Worker 只按 UUID token 和精确 kind/target claim active request。合法 claim 将 request 置为 `running`、持久增加 `run_attempts`，以当前 run attempt 作为 generation，并写入 `started_at/lease_expires_at`；Heartbeat 和 complete 都先锁 task row，再读取 PostgreSQL `clock_timestamp()`，且必须匹配当前 generation 与有效租约。Heartbeat 运行于独立线程/事件循环/数据库连接，避免同步解析阻塞续租。
+- 瞬时失败把同一 active request 置为 `retry_wait` 并写入有界 `next_retry_at`；确定性失败或 run/dispatch exhaustion 置为 `terminal_failed`。Redis/Celery counter、Job `error_code` 和 Audit 均不参与 attempts 判定。
+- Scheduler 只在有界 batch 内领取到期 `requested/retry_wait` 或 lease 已过期的 `running`，按 due/requested/id 稳定排序并使用 `FOR UPDATE SKIP LOCKED`；reservation 在 Broker publish 前提交，publish 失败后由下一次到期 reconciliation 恢复。
+- Confirm 的 Influencer/Account/Source/Contact/Metrics/Snapshot 写入、ImportRow committed lineage、Job completed/result、request completed 与成功 Audit 是一个 business transaction。`completed` 重放只读原结果，不再次 Merge。
+- Cancel 只允许 active `requested/retry_wait` request 进入 `cancelled`；若任一相关 request 已为 `running`，API 返回 409，避免在事务执行期间产生“Job 已取消但业务写入仍提交”的分叉。
+
+### A.4 `import_jobs` / `import_rows` / `collection_jobs`（0004 additive changes）
 
 `import_jobs`：
 
@@ -128,7 +160,7 @@ CollectionJob (one originating collection)
 - JSONB 只保存 schema version/platform/source_tags exact 规则；Followers min/max 继续使用 CollectionJob 现有列。JSON、revision 与范围列共同进入 rule hash；缺失/非法输入产生 UNKNOWN。
 - Legacy CollectionJob 回填 `{"schema_version":1,"platforms":[],"source_tags_exact_any":[]}` 与 revision=1。
 
-### A.4 Freshness
+### A.5 Freshness
 
 - Freshness 粒度为 `PlatformAccount + Source`。
 - `last_huitun_observed_at` 只能由成功 Confirm 的文件 lineage 中可靠 `source_acquired_at` 推导。
@@ -136,7 +168,7 @@ CollectionJob (one originating collection)
 - 阈值来自 validated Settings，并按 UTC elapsed duration：fresh `<=7*24h`、aging `>7*24h且<=30*24h`、stale `>30*24h且<=90*24h`、very_stale `>90*24h`。
 - 不新增 FreshnessPolicy 表、Influencer.last_observed_at 或 Metrics 投影列。
 
-### A.5 `refresh_queues`（计划由 0005 新增）
+### A.6 `refresh_queues`（已由 0005 新增）
 
 - id UUID PK
 - department_id UUID FK
@@ -152,7 +184,7 @@ CollectionJob (one originating collection)
 
 Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQuotaPlan。`criteria_snapshot` 是服务器生成的 validated rule/limit 快照，MVP 不接受任意客户端 criteria JSON。
 
-### A.6 `refresh_queue_items`（计划由 0005 新增）
+### A.7 `refresh_queue_items`（已由 0005 新增）
 
 - id UUID PK
 - department_id UUID FK
@@ -173,6 +205,8 @@ Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQu
 - last_return_import_row_id UUID nullable
 - created_at / updated_at
 
+Task 8 按 frozen deterministic tier 实现，没有添加 weighted `priority_score`。`priority_reasons`、`identity_snapshot` 与 `criteria_snapshot` 均由 closed typed schema 生成；policy/schema version 为 1，Identity 仅含公开 locator 与冻结的单一 `followers_count` 标量。`baseline_source_updated_at` 取 Huitun SourceState，多个真实 external account ID 稳定选择非空字典序最小值。
+
 约束：
 
 - unique(queue_id, platform_account_id, source)
@@ -185,18 +219,18 @@ Queue 由 Department 拥有；额度只是用户输入参数，不创建 DailyQu
 
 `import_jobs` 在 0005 增加可选 `refresh_queue_id`。NO_CHANGE 只有在返回文件 `source_acquired_at` 严格晚于非空 Item baseline 且 `source_acquired_at_confirmation_required=false` 时才可核销；baseline 为空或 confirmation required=true 时 NO_CHANGE 保持 unresolved。
 
-### A.7 Raw File Retention
+### A.8 Raw File Retention
 
 任何仍被 `ImportJobFile` lineage 引用的 StoredImportFile 均不得物理删除。现有 `expires_at` 不是删除授权；Phase 2 MVP 不实现 archive/delete lifecycle。
 
-### A.8 Migration 顺序
+### A.9 Migration 顺序
 
 1. `0004_phase2_bulk_import`
 2. `0005_phase2_refresh_queue`
 
 禁止合并为一个 Migration，也禁止创建空 Migration。`0004 → 0003` 仅在没有 Phase 2 创建的 Bulk Job/新 occurrence、所有 Screening 规则仍是 Migration 默认空值时允许；只由 Migration 回填的 Legacy 单 occurrence 可恢复。不得只在多文件时拒绝，因为单 occurrence Bulk 的 Draft/File/acquisition/Mapping/task metadata 也会丢失。`0005 → 0004` 仅在 Queue/Item 和 Queue 引用全空时允许；其他情况必须安全拒绝。
 
-client-ID alias 与 `source_acquired_at_confirmation_required`/CHECK 属于尚未发布 `0004_phase2_bulk_import` 的最终 Schema，直接完善 `0004`，不创建新 Revision。Legacy 回填 occurrence 不创建 alias 且 confirmation required=false；alias unique/composite FK、confirmation 合法/非法组合、fresh/repeat/0003-realistic-data/downgrade guard/metadata drift/`alembic check` 均属于 `0004` Gate。
+client-ID alias、`source_acquired_at_confirmation_required`/CHECK 与 durable `import_task_requests` 属于尚未发布 `0004_phase2_bulk_import` 的最终 Schema，直接完善 `0004`，不创建新 Revision。Legacy 回填 occurrence 不创建 alias 或 task request 且 confirmation required=false；alias/task unique/composite FK、confirmation/task 合法与非法组合、fresh/repeat/0003-realistic-data/downgrade guard/metadata drift/`alembic check` 均属于 `0004` Gate。
 
 ---
 

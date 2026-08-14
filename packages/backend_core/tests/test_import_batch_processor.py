@@ -17,7 +17,7 @@ from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import Department, Operator
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
-from backend_core.imports.batch_processor import BatchImportProcessor
+from backend_core.imports.batch_processor import BatchImportProcessor, RevalidationMode
 from backend_core.imports.enums import (
     CollectionJobStatus,
     ImportJobFailedStage,
@@ -373,6 +373,7 @@ async def _queue_preview(
     job_id: UUID,
     task_id: str,
 ) -> None:
+    task_id = str(UUID(task_id))
     async with factory() as session:
         job = await session.get(ImportJob, job_id)
         assert job is not None
@@ -470,6 +471,59 @@ def test_unified_preview_reparses_blob_instead_of_trusting_staging() -> None:
                 assert rebuilt.normalized_data is not None
                 assert rebuilt.normalized_data["display_name"] == "Fixture blob-authority"
                 assert await _business_count(session) == 0
+
+    asyncio.run(scenario())
+
+
+def test_confirm_revalidation_mode_never_prunes_frozen_rows() -> None:
+    async def scenario() -> None:
+        async with processor_harness() as (factory, storage):
+            fixture = await _seed(factory, storage, [_csv([_row("confirm-preserve")])])
+            occurrence = fixture.files[0]
+            await _parse(factory, storage, fixture.job_id, occurrence)
+
+            frozen_extra_id = uuid4()
+            async with factory() as session:
+                session.add(
+                    ImportRow(
+                        id=frozen_extra_id,
+                        import_job_id=fixture.job_id,
+                        import_job_file_id=occurrence.id,
+                        row_number=999,
+                        raw_data={"frozen": True},
+                        normalized_data={"frozen": True},
+                        action=ImportRowAction.SKIP,
+                        merge_plan={},
+                        warnings=[],
+                        errors=[],
+                        preview_revision=1,
+                        plan_hash="f" * 64,
+                    )
+                )
+                await session.commit()
+
+            async with factory() as session:
+                job = await session.get(ImportJob, fixture.job_id)
+                assert job is not None
+                files = await ImportRepository(session).list_import_job_files(
+                    fixture.job_id,
+                    for_update=True,
+                )
+                processor = BatchImportProcessor(
+                    session,
+                    storage,
+                    parser_limits=ParserLimits(max_rows=10_000),
+                )
+                rebuilt = await processor.revalidate_ready_files(
+                    job,
+                    files,
+                    mode=RevalidationMode.CONFIRM_PRESERVE,
+                )
+                assert [row.row_number for row in rebuilt] == [2]
+                await session.commit()
+
+            async with factory() as session:
+                assert await session.get(ImportRow, frozen_extra_id) is not None
 
     asyncio.run(scenario())
 
@@ -643,7 +697,8 @@ def test_unified_preview_stale_token_is_noop_without_storage_read(
                 job = await session.get(ImportJob, fixture.job_id)
                 assert job is not None
                 assert job.status is ImportJobStatus.PREVIEWING
-                assert job.parse_task_id == current_task
+                assert job.parse_task_id is not None
+                assert UUID(job.parse_task_id) == UUID(current_task)
                 assert job.failed_stage is None
 
     asyncio.run(scenario())

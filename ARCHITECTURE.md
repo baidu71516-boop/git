@@ -4,6 +4,7 @@
 
 - Phase 1A–1C 的实际实现以 `packages/backend_core`、FastAPI/Worker 薄入口、`0001`–`0003_phase1b` migrations 和已通过测试为准。
 - Phase 2 的冻结目标以 `docs/PHASE_2_SCOPE.md` 为唯一详细设计；本文件只记录系统级架构边界。
+- 当前开发分支已经落地 Task 1–9；Task 9 复用现有 Hard Matcher、Unified Preview、Atomic Confirm 与 Merge，在同一事务核销 Queue Item；没有实现 Web 或 Task 10。
 - 旧的 Browser Automation 方案已废弃。当前 Phase 2 不包含灰豚登录、页面自动化或自动采集器。
 - 唯一共享 Python 业务核心是 `packages/backend_core`。`apps/api` 只负责 HTTP，`apps/worker` 只负责异步任务入口；禁止 API 内 Service、根目录 `services/` 或第二套 Matcher/Merge。
 
@@ -53,14 +54,17 @@ flowchart LR
     J --> F["ImportJobFile occurrences"]
     F --> S["StoredImportFile blobs"]
     F --> P["Per-file parse and mapping"]
-    P --> R["ImportRows with file lineage"]
-    R --> A["Existing Source Adapters"]
+    P --> IR["ImportRows with file lineage"]
+    IR --> A["Existing Source Adapters"]
     A --> C["Canonical records"]
-    C --> M["One existing ImportPlanner and Matcher"]
-    M --> V["Unified persisted Preview Revision"]
+    C --> M["UnifiedPlanBuilder + frozen Matcher/Planner"]
+    M --> V["Unified persisted Preview Revision + row plan hash"]
     V --> H["Human Confirm"]
-    H --> T["One PostgreSQL transaction"]
-    T --> I["Influencer + PlatformAccount + Source + Contact + Metrics"]
+    H --> Q["Durable confirm task request"]
+    Q --> RV["Rebuild and compare the complete plan"]
+    RV --> T["One PostgreSQL business transaction"]
+    T --> I["ImportMergeApplier + frozen Phase 1B semantics"]
+    T --> R["Linked Refresh Queue fulfillment"]
 ```
 
 核心不变量：
@@ -68,9 +72,12 @@ flowchart LR
 - 一个 `ImportJob` 就是一个多文件 Bulk Batch；不新增 `ImportBatch` 或 `BatchRow`。
 - 每个文件通过 `ImportJobFile` 保留 occurrence、Mapping、SHA-256、`source_acquired_at` 与行级 lineage。
 - 同一 Batch 的所有文件经过同一个 Canonical Contract、Matcher、Planner、Preview Revision 和 Confirm Transaction。
+- Preview 与 Confirm 共用唯一 `UnifiedPlanBuilder`；Preview 使用 replace-staging 模式，Confirm 使用 non-pruning revalidation 模式，避免重算时删除用户已看到并被 revision 绑定的持久 Row。
+- Legacy 与 Bulk Confirm 共用唯一 `ImportMergeApplier` 实现 Phase 1B Merge；Bulk 只负责预取、稳定锁、分阶段 flush 和事务编排，不建立第二套 Matcher/Merge。
 - Preview 不写达人业务表；MVP 没有 auto-confirm。
 - 文件内、跨文件和数据库三层去重都复用 Phase 1B 的硬身份规则；Email 只产生疑似重复。
 - Phase 1B 的新鲜度合并、人工数据保护、Contact 和不可变 Metric Snapshot 语义不变。
+- Queue-linked Batch 只在现有 Hard Matcher 唯一确定 owner/effective account 后按 account+source 关联 Item；Queue identity snapshot 永不进入 Matcher。Preview 只冻结 reconciliation evidence，Confirm 才在上述同一事务写 fulfillment/Last Return 并聚合 Queue completion。
 
 ---
 
@@ -148,20 +155,22 @@ Phase 2 Bulk Batch 逐文件选择 Adapter，但通用 Planner/Matcher/Repositor
 
 - 仍使用现有 Celery Worker 与 Scheduler，不增加服务。
 - 当前 4C/8GB 测试服务器的 Worker concurrency 固定为 `2`。
-- Heavy Import Preview/Confirm 全局同时最多运行 `1` 个，通过可恢复的锁/lease 控制，而不是仅依赖进程内变量。
+- Heavy Import Preview/Confirm 全局同时最多运行 `1` 个；同一 PostgreSQL advisory-lock key family 先序列化 heavy execution，再进行 task claim，锁竞争不消耗持久 run attempt。session 退出会释放锁，不能只依赖进程内 semaphore 或 Redis 锁。
 - 任务入口只解析参数、装配 Session 并调用 `backend_core`；不得复制业务逻辑。
-- Retry 必须重新读取持久化 Job/File/Row/Preview 状态；同 Job/Revision 的操作保持幂等。
-- Scheduler 只负责持久化任务的 reconciliation，不创建 Browser Automation 或采集器。
+- `import_task_requests` 持久化 task token、kind、target、state、dispatch/run attempts、retry time 与 Worker lease；PostgreSQL 是唯一恢复事实源和 lease wall-clock，Celery/Redis 只提供 at-least-once delivery。
+- API 将业务状态、task request 和首次 dispatch reservation 同事务提交，提交后才发布 ID-only Broker message；发布失败保留到期 reservation，由 Scheduler 恢复，不向内存或 Audit 写第二套 outbox 状态。
+- Worker 使用 token/kind/Job/File/revision 精确 claim；claim 在执行前单独提交，持久增加 `run_attempts`、分配 generation 并设置 lease。Heartbeat 使用独立线程、事件循环和数据库连接，避免同步文件读取/解析饿死续租；heartbeat/complete 都先锁 task row，再读取 PostgreSQL `clock_timestamp()` 校验当前 generation 与 lease。旧 Worker、旧 generation 或租约丢失后不得完成 task。
+- Confirm 成功时，达人业务写入、Row committed lineage、linked Queue fulfillment/completion、Job result/completed、task completed 和成功 Audit 在同一事务提交。提交结果不确定时先按 token 查询 PostgreSQL；completed 优先于重复执行。
+- 确定性业务错误进入 `terminal_failed`；瞬时错误进入 `retry_wait`。Dispatch/run attempts、指数退避上限和 exhaustion 都由 PostgreSQL/Settings 决定，不能使用 Celery retry metadata 作为 authoritative count。
+- Scheduler 只负责 bounded、deterministic 的持久化任务 reconciliation；使用 `FOR UPDATE SKIP LOCKED` 领取到期 requested/retry_wait 或 lease 过期 running task，并在发布 Broker 前提交 reservation。多 Scheduler 不会重复领取同一行；发布失败等待下一次持久重试。
+- Cancel 只将尚未运行的 requested/retry_wait task 与 Job 同事务取消；running task 返回 409，不尝试远程杀死已开始的数据库事务。
 
 ---
 
 ## 7. 数据库与 Migration 边界
 
-- 当前生产/测试基线 head 为 `0003_phase1b`。
-- Phase 2 实现阶段按顺序新增：
-  1. `0004_phase2_bulk_import`
-  2. `0005_phase2_refresh_queue`
-- Task 0 只冻结设计，不创建上述 migration 文件，也不创建空 migration。
+- 当前开发分支 Alembic head 为 `0005_phase2_refresh_queue`；正式服务器仍停留在 `0003_phase1b`，Task 9 不执行部署。
+- `0004_phase2_bulk_import` 保持冻结不变；`0005_phase2_refresh_queue` 只承载 Queue/Item、同部门约束、ImportJob nullable Queue FK 与 Queue Audit enum。任何 Queue 证据都会让危险 downgrade 安全拒绝。
 - 仍被 `ImportJobFile` lineage 引用的 `StoredImportFile` 不得被 cleaner 物理删除；`expires_at` 不是删除授权。
 - 含真实多文件或 Queue 数据时，破坏性 downgrade 必须安全拒绝并给出原因，不能静默丢失 lineage。
 
@@ -202,7 +211,7 @@ Phase 2 Bulk Batch 逐文件选择 Adapter，但通用 Planner/Matcher/Repositor
 - Queue 创建、导出与核销结果。
 - API/Worker/Import/Login 失败。
 
-禁止记录密码、Token、Secret、完整 Contact 或原始敏感行。日志字段只能使用白名单摘要和实体 ID。
+禁止记录密码、Session/Auth/Access Token、Secret、完整 Contact 或原始敏感行。日志字段只能使用白名单摘要和实体 ID；persisted import task token 只可作为 Task 6 的必要 task identity 白名单字段。
 
 ---
 

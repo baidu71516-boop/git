@@ -34,6 +34,22 @@ source_acquired_at_origin = postgresql.ENUM(
     name="source_acquired_at_origin",
 )
 import_job_failed_stage = postgresql.ENUM("preview", "confirm", name="import_job_failed_stage")
+import_task_kind = postgresql.ENUM(
+    "legacy_parse",
+    "file_parse",
+    "preview",
+    "confirm",
+    name="import_task_kind",
+)
+import_task_state = postgresql.ENUM(
+    "requested",
+    "running",
+    "retry_wait",
+    "completed",
+    "terminal_failed",
+    "cancelled",
+    name="import_task_state",
+)
 
 AUDIT_ACTIONS = (
     "IMPORT_BATCH_CREATED",
@@ -83,6 +99,11 @@ def _preflight_upgrade() -> None:
 
 
 def _preflight_downgrade() -> None:
+    if _count("SELECT count(*) FROM import_task_requests") != 0:
+        raise RuntimeError(
+            "0004 downgrade blocked: durable import task requests cannot be represented in 0003"
+        )
+
     non_default_rules = (
         op.get_bind()
         .execute(
@@ -188,6 +209,8 @@ def upgrade() -> None:
     import_job_file_status.create(bind, checkfirst=True)
     source_acquired_at_origin.create(bind, checkfirst=True)
     import_job_failed_stage.create(bind, checkfirst=True)
+    import_task_kind.create(bind, checkfirst=True)
+    import_task_state.create(bind, checkfirst=True)
 
     op.add_column(
         "collection_jobs",
@@ -400,6 +423,126 @@ def upgrade() -> None:
         ["import_job_file_id"],
     )
 
+    op.create_table(
+        "import_task_requests",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("task_token", sa.Uuid(), nullable=False),
+        sa.Column(
+            "task_kind",
+            postgresql.ENUM(name="import_task_kind", create_type=False),
+            nullable=False,
+        ),
+        sa.Column("import_job_id", sa.Uuid(), nullable=False),
+        sa.Column("import_job_file_id", sa.Uuid(), nullable=True),
+        sa.Column("preview_revision", sa.Integer(), nullable=True),
+        sa.Column(
+            "state",
+            postgresql.ENUM(name="import_task_state", create_type=False),
+            nullable=False,
+        ),
+        sa.Column("dispatch_attempts", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column("run_attempts", sa.Integer(), nullable=False, server_default="0"),
+        sa.Column(
+            "requested_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column("last_dispatch_attempt_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("next_retry_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("lease_expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.CheckConstraint(
+            "dispatch_attempts >= 0 AND run_attempts >= 0",
+            name="ck_import_task_request_attempts_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "(task_kind = 'file_parse' AND import_job_file_id IS NOT NULL "
+            "AND preview_revision IS NULL) "
+            "OR (task_kind = 'confirm' AND import_job_file_id IS NULL "
+            "AND preview_revision IS NOT NULL AND preview_revision >= 1) "
+            "OR (task_kind IN ('legacy_parse', 'preview') "
+            "AND import_job_file_id IS NULL AND preview_revision IS NULL)",
+            name="ck_import_task_request_target",
+        ),
+        sa.CheckConstraint(
+            "(state <> 'completed' OR completed_at IS NOT NULL) "
+            "AND (state <> 'running' OR lease_expires_at IS NOT NULL) "
+            "AND (state <> 'retry_wait' OR next_retry_at IS NOT NULL)",
+            name="ck_import_task_request_state_timestamps",
+        ),
+        sa.ForeignKeyConstraint(["import_job_id"], ["import_jobs.id"], ondelete="RESTRICT"),
+        sa.ForeignKeyConstraint(
+            ["import_job_file_id", "import_job_id"],
+            ["import_job_files.id", "import_job_files.import_job_id"],
+            name="fk_import_task_request_file_job",
+            ondelete="RESTRICT",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("task_token", name="uq_import_task_request_token"),
+    )
+    op.create_index(
+        "uq_import_task_request_active_legacy_parse",
+        "import_task_requests",
+        ["import_job_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "task_kind = 'legacy_parse' AND state IN ('requested', 'running', 'retry_wait')"
+        ),
+    )
+    op.create_index(
+        "uq_import_task_request_active_file_parse",
+        "import_task_requests",
+        ["import_job_id", "import_job_file_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "task_kind = 'file_parse' AND state IN ('requested', 'running', 'retry_wait')"
+        ),
+    )
+    op.create_index(
+        "uq_import_task_request_active_preview",
+        "import_task_requests",
+        ["import_job_id"],
+        unique=True,
+        postgresql_where=sa.text(
+            "task_kind = 'preview' AND state IN ('requested', 'running', 'retry_wait')"
+        ),
+    )
+    op.create_index(
+        "uq_import_task_request_active_confirm",
+        "import_task_requests",
+        ["import_job_id", "preview_revision"],
+        unique=True,
+        postgresql_where=sa.text(
+            "task_kind = 'confirm' AND state IN ('requested', 'running', 'retry_wait')"
+        ),
+    )
+    op.create_index(
+        "ix_import_task_requests_due",
+        "import_task_requests",
+        [sa.text("COALESCE(next_retry_at, requested_at)"), "requested_at", "id"],
+        postgresql_where=sa.text("state IN ('requested', 'retry_wait')"),
+    )
+    op.create_index(
+        "ix_import_task_requests_expired_lease",
+        "import_task_requests",
+        ["lease_expires_at", "id"],
+        postgresql_where=sa.text("state = 'running'"),
+    )
+
     if _count(
         """
         SELECT count(*) FROM import_jobs AS job
@@ -454,7 +597,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         "LOCK TABLE collection_jobs, import_jobs, import_job_files, "
-        "import_job_file_client_ids, import_rows "
+        "import_job_file_client_ids, import_task_requests, import_rows "
         "IN ACCESS EXCLUSIVE MODE"
     )
     _preflight_downgrade()
@@ -472,6 +615,31 @@ def downgrade() -> None:
         table_name="import_job_file_client_ids",
     )
     op.drop_table("import_job_file_client_ids")
+    op.drop_index(
+        "uq_import_task_request_active_confirm",
+        table_name="import_task_requests",
+    )
+    op.drop_index(
+        "ix_import_task_requests_expired_lease",
+        table_name="import_task_requests",
+    )
+    op.drop_index(
+        "ix_import_task_requests_due",
+        table_name="import_task_requests",
+    )
+    op.drop_index(
+        "uq_import_task_request_active_preview",
+        table_name="import_task_requests",
+    )
+    op.drop_index(
+        "uq_import_task_request_active_legacy_parse",
+        table_name="import_task_requests",
+    )
+    op.drop_index(
+        "uq_import_task_request_active_file_parse",
+        table_name="import_task_requests",
+    )
+    op.drop_table("import_task_requests")
     op.drop_table("import_job_files")
 
     op.drop_constraint(
@@ -493,6 +661,8 @@ def downgrade() -> None:
 
     bind = op.get_bind()
     import_job_failed_stage.drop(bind, checkfirst=True)
+    import_task_state.drop(bind, checkfirst=True)
+    import_task_kind.drop(bind, checkfirst=True)
     source_acquired_at_origin.drop(bind, checkfirst=True)
     import_job_file_status.drop(bind, checkfirst=True)
 

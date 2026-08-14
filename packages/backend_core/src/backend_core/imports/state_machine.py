@@ -51,7 +51,7 @@ ALLOWED_TRANSITIONS: dict[ImportJobStatus, frozenset[ImportJobStatus]] = {
         }
     ),
     ImportJobStatus.COMPLETED: frozenset(),
-    ImportJobStatus.FAILED: frozenset({ImportJobStatus.PREVIEWING}),
+    ImportJobStatus.FAILED: frozenset({ImportJobStatus.PREVIEWING, ImportJobStatus.CONFIRM_QUEUED}),
     ImportJobStatus.CANCELLED: frozenset(),
 }
 
@@ -65,6 +65,16 @@ def transition_import_job(job: ImportJob, target: ImportJobStatus) -> None:
         raise ImportDomainError(
             "INVALID_STATE_TRANSITION",
             "Only a failed Preview stage can be retried as Preview",
+            status_code=409,
+        )
+    if (
+        job.status is ImportJobStatus.FAILED
+        and target is ImportJobStatus.CONFIRM_QUEUED
+        and job.failed_stage is not ImportJobFailedStage.CONFIRM
+    ):
+        raise ImportDomainError(
+            "INVALID_STATE_TRANSITION",
+            "Only a failed Confirm stage can be retried as Confirm",
             status_code=409,
         )
     if target not in ALLOWED_TRANSITIONS[job.status]:

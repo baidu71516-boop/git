@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 from app.http.dependencies import get_database_session, get_redis
@@ -24,6 +25,7 @@ from backend_core.influencers.enums import (
     InfluencerStatus,
     Platform,
 )
+from backend_core.influencers.freshness import FreshnessStatus
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -326,6 +328,15 @@ def test_registered_endpoints_auth_csrf_contact_and_envelope() -> None:
                 assert list_data["page"] == 1
                 assert list_data["page_size"] == 50
                 assert list_data["total"] == 1
+                item = list_data["items"][0]
+                assert item["freshness_status"] == FreshnessStatus.UNKNOWN.value
+                assert item["requires_refresh"] is True
+                account_freshness = item["platform_accounts"][0]
+                assert account_freshness["last_huitun_observed_at"] is None
+                assert account_freshness["last_huitun_imported_at"] is None
+                assert account_freshness["freshness_status"] == FreshnessStatus.UNKNOWN.value
+                assert account_freshness["freshness_age_days"] is None
+                assert account_freshness["requires_refresh"] is True
                 contacts = list_data["items"][0]["current_contacts"]
                 assert [contact["display_value"] for contact in contacts] == ["***", "***"]
                 assert "normalized_value" not in listed.text
@@ -340,11 +351,33 @@ def test_registered_endpoints_auth_csrf_contact_and_envelope() -> None:
                 detail = await client.get(f"/api/v1/influencers/{INFLUENCER_ID}")
                 assert detail.status_code == 200
                 detail_data = assert_success_envelope(detail)["data"]
+                assert detail_data["freshness_status"] == FreshnessStatus.UNKNOWN.value
+                assert detail_data["requires_refresh"] is True
                 assert [contact["display_value"] for contact in detail_data["contacts"]] == [
                     "***",
                     "***",
                 ]
                 assert "normalized_value" not in detail.text
+
+                unknown = await client.get(
+                    "/api/v1/influencers",
+                    params={"freshness_status": FreshnessStatus.UNKNOWN.value},
+                )
+                assert unknown.status_code == 200
+                assert unknown.json()["data"]["total"] == 1
+                refresh_required = await client.get(
+                    "/api/v1/influencers", params={"requires_refresh": "true"}
+                )
+                assert refresh_required.json()["data"]["total"] == 1
+                no_refresh = await client.get(
+                    "/api/v1/influencers", params={"requires_refresh": "false"}
+                )
+                assert no_refresh.json()["data"]["total"] == 0
+                observed_range = await client.get(
+                    "/api/v1/influencers",
+                    params={"last_huitun_observed_before": NOW.isoformat()},
+                )
+                assert observed_range.json()["data"]["total"] == 0
 
                 snapshots = await client.get(
                     f"/api/v1/influencers/{INFLUENCER_ID}/metric-snapshots"
@@ -383,6 +416,15 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"followers_min": "0"},
                     {"owner_operator_id": str(environment.owner_id)},
                     {"crm_stage": CRMStage.HIGH_INTENT.value},
+                    {"freshness_status": FreshnessStatus.UNKNOWN.value},
+                    {"requires_refresh": "true"},
+                    {"requires_refresh": "false"},
+                    {"last_huitun_observed_before": "2026-08-11T12:00:00+08:00"},
+                    {"last_huitun_observed_after": "2026-08-10T20:00:00Z"},
+                    {
+                        "last_huitun_observed_after": "2026-08-10T20:00:00Z",
+                        "last_huitun_observed_before": "2026-08-11T12:00:00+08:00",
+                    },
                     {"page_size": "100"},
                 ]
                 for params in valid_requests:
@@ -390,6 +432,7 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     assert response.status_code == 200
 
                 invalid_requests: list[dict[str, object]] = [
+                    {"unexpected_filter": "ignored-no-longer"},
                     {"q": "名" * 161},
                     {"tag": "T" * 161},
                     {"followers_min": "-1"},
@@ -397,6 +440,16 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"followers_min": "2", "followers_max": "1"},
                     {"owner_operator_id": "not-a-uuid"},
                     {"crm_stage": "不存在阶段"},
+                    {"freshness_status": "not-a-status"},
+                    {"requires_refresh": "1"},
+                    {"requires_refresh": "TRUE"},
+                    {"requires_refresh": "yes"},
+                    {"last_huitun_observed_before": "2026-08-11T04:00:00"},
+                    {"last_huitun_observed_after": "not-a-datetime"},
+                    {
+                        "last_huitun_observed_after": "2026-08-11T04:00:00Z",
+                        "last_huitun_observed_before": "2026-08-11T03:59:59Z",
+                    },
                     {"page": "0"},
                     {"page_size": "101"},
                 ]
@@ -410,6 +463,19 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     "followers_max": ("1", "2"),
                     "owner_operator_id": (str(uuid4()), str(uuid4())),
                     "crm_stage": (CRMStage.TO_DEVELOP.value, CRMStage.HIGH_INTENT.value),
+                    "freshness_status": (
+                        FreshnessStatus.FRESH.value,
+                        FreshnessStatus.STALE.value,
+                    ),
+                    "requires_refresh": ("true", "false"),
+                    "last_huitun_observed_before": (
+                        "2026-08-11T04:00:00Z",
+                        "2026-08-12T04:00:00Z",
+                    ),
+                    "last_huitun_observed_after": (
+                        "2026-08-10T04:00:00Z",
+                        "2026-08-11T04:00:00Z",
+                    ),
                     "page": ("1", "2"),
                     "page_size": ("50", "100"),
                 }
@@ -469,6 +535,12 @@ def test_detail_snapshot_errors_and_snapshot_query_validation() -> None:
                 assert_validation_error(
                     await client.get(
                         snapshot_base,
+                        params={"unexpected_filter": "ignored-no-longer"},
+                    )
+                )
+                assert_validation_error(
+                    await client.get(
+                        snapshot_base,
                         params=[("page_size", "50"), ("page_size", "100")],
                     )
                 )
@@ -496,6 +568,21 @@ def test_permission_error_translation_uses_existing_error_envelope() -> None:
 
 def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
     schema = app.openapi()
+
+    def resolve(contract: dict[str, Any]) -> dict[str, Any]:
+        while "$ref" in contract:
+            reference = contract["$ref"]
+            assert isinstance(reference, str)
+            contract = schema["components"]["schemas"][reference.rsplit("/", 1)[-1]]
+        return contract
+
+    def success_data(path: str) -> dict[str, Any]:
+        operation = schema["paths"][path]["get"]
+        response_contract = operation["responses"]["200"]["content"]["application/json"]["schema"]
+        envelope_contract = resolve(response_contract)
+        assert {"success", "data", "error", "request_id"} <= set(envelope_contract["properties"])
+        return resolve(envelope_contract["properties"]["data"])
+
     influencer_paths = {
         path: item
         for path, item in schema["paths"].items()
@@ -532,7 +619,60 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
         "followers_max",
         "owner_operator_id",
         "crm_stage",
+        "freshness_status",
+        "requires_refresh",
+        "last_huitun_observed_before",
+        "last_huitun_observed_after",
         "page",
         "page_size",
     }
     assert snapshot_parameters == {"page", "page_size"}
+
+    parameter_schemas = {
+        parameter["name"]: parameter["schema"]
+        for parameter in influencer_paths["/api/v1/influencers"]["get"]["parameters"]
+        if parameter["in"] == "query"
+    }
+    assert parameter_schemas["freshness_status"]["anyOf"][0] == {
+        "$ref": "#/components/schemas/FreshnessStatus"
+    }
+    assert schema["components"]["schemas"]["FreshnessStatus"]["enum"] == [
+        status.value for status in FreshnessStatus
+    ]
+    assert parameter_schemas["requires_refresh"]["anyOf"][0]["type"] == "boolean"
+    assert parameter_schemas["last_huitun_observed_before"]["anyOf"][0] == {
+        "type": "string",
+        "format": "date-time",
+    }
+    assert parameter_schemas["last_huitun_observed_after"]["anyOf"][0] == {
+        "type": "string",
+        "format": "date-time",
+    }
+
+    list_page = success_data("/api/v1/influencers")
+    list_item = resolve(resolve(list_page["properties"]["items"])["items"])
+    assert {"freshness_status", "requires_refresh"} <= set(list_item["properties"])
+    account_item = resolve(resolve(list_item["properties"]["platform_accounts"])["items"])
+    assert {
+        "last_huitun_observed_at",
+        "last_huitun_imported_at",
+        "freshness_status",
+        "freshness_age_days",
+        "requires_refresh",
+    } <= set(account_item["properties"])
+
+    detail = success_data("/api/v1/influencers/{influencer_id}")
+    assert {"freshness_status", "requires_refresh"} <= set(detail["properties"])
+    detail_account = resolve(resolve(detail["properties"]["platform_accounts"])["items"])
+    assert {
+        "last_huitun_observed_at",
+        "last_huitun_imported_at",
+        "freshness_status",
+        "freshness_age_days",
+        "requires_refresh",
+    } <= set(detail_account["properties"])
+
+    filter_options = success_data("/api/v1/influencers/filter-options")
+    assert {"owners", "tags", "crm_stages"} == set(filter_options["properties"])
+    snapshot_page = success_data("/api/v1/influencers/{influencer_id}/metric-snapshots")
+    assert {"items", "page", "page_size", "total"} == set(snapshot_page["properties"])

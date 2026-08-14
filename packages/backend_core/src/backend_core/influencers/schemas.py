@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -27,6 +27,7 @@ from backend_core.influencers.enums import (
     InfluencerStatus,
     Platform,
 )
+from backend_core.influencers.freshness import FreshnessStatus
 
 type MetricScalar = StrictStr | StrictInt | StrictBool | None
 type MetricValue = MetricScalar | list[MetricValue] | dict[str, MetricValue]
@@ -49,6 +50,43 @@ def validate_query_integer(value: object) -> object:
 type QueryInteger = Annotated[int, BeforeValidator(validate_query_integer)]
 
 
+def validate_query_boolean(value: object) -> bool:
+    """Accept only the two lowercase HTTP spellings, plus native Python booleans."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value == "true":
+            return True
+        if value == "false":
+            return False
+    raise ValueError("value must be either 'true' or 'false'")
+
+
+type QueryBoolean = Annotated[bool, BeforeValidator(validate_query_boolean)]
+
+
+def validate_query_datetime(value: object) -> datetime:
+    """Require an ISO datetime with an offset and normalize it to UTC."""
+
+    if isinstance(value, datetime):
+        candidate = value
+    elif isinstance(value, str):
+        try:
+            candidate = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError("value must be an ISO 8601 datetime") from exc
+    else:
+        raise ValueError("value must be a datetime")
+
+    if candidate.tzinfo is None or candidate.utcoffset() is None:
+        raise ValueError("datetime must be timezone-aware")
+    return candidate.astimezone(UTC)
+
+
+type QueryDateTime = Annotated[datetime, BeforeValidator(validate_query_datetime)]
+
+
 class QueryContract(BaseModel):
     """Closed input contract shared without an HTTP framework dependency."""
 
@@ -68,6 +106,10 @@ class InfluencerListQuery(QueryContract):
     followers_max: QueryInteger | None = Field(default=None, ge=0)
     owner_operator_id: UUID | None = None
     crm_stage: CRMStage | None = None
+    freshness_status: FreshnessStatus | None = None
+    requires_refresh: QueryBoolean | None = None
+    last_huitun_observed_before: QueryDateTime | None = None
+    last_huitun_observed_after: QueryDateTime | None = None
     page: QueryInteger = Field(default=1, ge=1)
     page_size: QueryInteger = Field(default=50, ge=1, le=100)
 
@@ -91,6 +133,18 @@ class InfluencerListQuery(QueryContract):
             raise ValueError("followers_min must not exceed followers_max")
         return self
 
+    @model_validator(mode="after")
+    def validate_observed_range(self) -> InfluencerListQuery:
+        if (
+            self.last_huitun_observed_after is not None
+            and self.last_huitun_observed_before is not None
+            and self.last_huitun_observed_after > self.last_huitun_observed_before
+        ):
+            raise ValueError(
+                "last_huitun_observed_after must not exceed last_huitun_observed_before"
+            )
+        return self
+
 
 class OwnerSummary(ReadContract):
     id: UUID
@@ -108,6 +162,11 @@ class PlatformAccountSummary(ReadContract):
     source: DataSource
     is_active: bool
     source_tags: list[str] = Field(default_factory=list)
+    last_huitun_observed_at: datetime | None = None
+    last_huitun_imported_at: datetime | None = None
+    freshness_status: FreshnessStatus | None = None
+    freshness_age_days: StrictInt | None = Field(default=None, ge=0)
+    requires_refresh: bool = False
 
 
 class CurrentMetricsSummary(ReadContract):
@@ -136,6 +195,8 @@ class InfluencerListItem(ReadContract):
     current_metrics: list[CurrentMetricsSummary] = Field(default_factory=list)
     current_contacts: list[CurrentContactSummary] = Field(default_factory=list)
     possible_duplicate_contact: bool = False
+    freshness_status: FreshnessStatus = FreshnessStatus.UNKNOWN
+    requires_refresh: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -219,6 +280,8 @@ class InfluencerDetail(ReadContract):
     source_states: list[SourceStateDetail] = Field(default_factory=list)
     source_identities: list[SourceIdentityDetail] = Field(default_factory=list)
     current_metrics: list[CurrentMetricsDetail] = Field(default_factory=list)
+    freshness_status: FreshnessStatus = FreshnessStatus.UNKNOWN
+    requires_refresh: bool = False
 
 
 class MetricSnapshotItem(ReadContract):

@@ -145,6 +145,7 @@ def make_context(
     screening: ScreeningRuleSnapshot | None = None,
     import_job_id: UUID | None = None,
     collection_job_id: UUID | None = None,
+    refresh_queue_id: UUID | None = None,
     source_type: ImportSourceType = ImportSourceType.MANUAL_HUITUN_EXPORT,
     planner_version: str = "phase1b-v1",
     relevant_config: dict[str, object] | None = None,
@@ -154,6 +155,7 @@ def make_context(
         preview_revision=1,
         collection_job_id=collection_job_id or stable_uuid("collection"),
         source_type=source_type,
+        refresh_queue_id=refresh_queue_id,
         files=files or (make_file(1), make_file(2)),
         screening=screening or make_screening_snapshot(),
         planner_version=planner_version,
@@ -967,12 +969,15 @@ def test_manifest_rejects_duplicate_positions() -> None:
 
 
 def test_manifest_rejects_included_blocking_files() -> None:
-    for changes in (
-        {"status": ImportJobFileStatus.EXCLUDED},
-        {"confirmation_required": True},
-    ):
-        with pytest.raises(ValidationError):
-            make_file(1, **changes)
+    with pytest.raises(ValidationError):
+        make_file(1, status=ImportJobFileStatus.EXCLUDED)
+
+
+def test_manifest_retains_confirmation_required_as_linked_return_evidence() -> None:
+    manifest = make_file(1, confirmation_required=True)
+
+    assert manifest.included is True
+    assert manifest.source_acquired_at_confirmation_required is True
 
 
 def test_context_hash_changes_for_every_frozen_manifest_or_rule_input() -> None:
@@ -991,6 +996,7 @@ def test_context_hash_changes_for_every_frozen_manifest_or_rule_input() -> None:
     changes = (
         make_context(import_job_id=stable_uuid("other-job")),
         make_context(collection_job_id=stable_uuid("other-collection")),
+        make_context(refresh_queue_id=stable_uuid("refresh-queue")),
         make_context(source_type=ImportSourceType.GENERIC_CSV),
         make_context(planner_version="phase1b-v2"),
         make_context(relevant_config={"max_batch_rows": 9_999, "enabled": False}),

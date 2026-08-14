@@ -53,7 +53,7 @@
 
 ## 4. Phase 2 — 批量获取、智能筛选、数据新鲜度与定向刷新
 
-文档状态：`DESIGN FROZEN — Task 0`。仅 Task 0 小节的已勾选项代表设计冻结；其余均为尚未实现的 MVP 验收门禁。
+文档状态：Phase 2 设计仍按 Task 0 冻结。下方原有主题清单是完整 MVP release checklist；Task 6/7 小节分别记录 Atomic Confirm 与 Freshness 的任务级验收，不代表 Task 8+ 已实现或获得授权。
 
 ### Task 0 设计冻结
 
@@ -84,21 +84,132 @@
 - [ ] `screening_rules.schema_version` 与单调 `screening_rules_revision` 分离；MVP 只使用本次 owner ImportRow 的 Canonical incoming platform、Source Tag 原值精确 ANY 匹配和 Followers 闭区间，数据库旧值不补齐。
 - [ ] industry、subdirection、purpose、notes 不参与模糊推断；缺失或非法数据返回 UNKNOWN；不使用 AI semantic matching。
 
+### Task 6 — Atomic Confirm / Revalidation / Recovery
+
+当前证据口径：`[x]` 表示已有直接自动化测试/真实 PostgreSQL 16 Gate 通过；AC23 单独记录最终全仓质量认证。Task 6 PostgreSQL Atomic Confirm + recovery 组合 Gate 为 25 passed；2000-row mixed correctness run 为 76 SQL（55 SELECT、21 DML、7 advisory lock）、4.005935s、RSS high-water 309,641,216 bytes，最终为 1998 Influencer/Account、1 SourceIdentity、1996 SourceState、2 Contact、1995 CurrentMetrics/Snapshot。正式 37 列灰豚兼容 all-new 性能数据另以 1 次预热 + 5 次测量运行，wall P95=4.483997s、CPU P95=3.918085s、55 SQL、RSS high-water P95=343,638,016 bytes；mixed 业务正确性由前述独立 Gate 覆盖。
+
+- [x] AC1：Unified Preview 可由人工显式携带当前 revision 发起 Confirm；不存在 Auto Confirm。
+- [x] AC2：写入前完整重建并核对 manifest/SHA、Mapping、acquisition/confirmation、Screening revision/hash、normalized rows、duplicate owner、hard match、数据库 current state、row plan hash 与 canonical summary。
+- [x] AC3：revision、plan 或相关数据库事实不一致时整批 `PREVIEW_STALE`，不把重算结果当作新 Preview 自动确认。
+- [x] AC4：所有 included files 的业务写入、Row committed lineage、Job result/completed、task completed 和成功 Audit 在一个 PostgreSQL transaction 中提交。
+- [x] AC5：Legacy/Bulk 共享同一 Phase 1B Matcher/Planner/Merge materialization；Task 6 不建立第二套写入规则。
+- [x] AC6：manual Contact 保护保持不变，Confirm 不以导入值覆盖人工来源 Contact。
+- [x] AC7：Email 只产生 possible duplicate signal，永不成为 Hard Match 或自动 Merge key。
+- [x] AC8：MetricSnapshot 只按 Phase 1B frozen semantics append，禁止 update/delete/merge 旧 Snapshot。
+- [x] AC9：Confirm 双击、同 token 重投和 completed replay 幂等，不重复写入业务实体或 Snapshot。
+- [x] AC10：两个 Batch 并发创建同一 New Identity 时通过稳定锁/约束只提交一份业务实体，另一方整批 stale 或安全重试。
+- [x] AC11：Existing Account 在 Preview/Confirm 间并发变化时无 lost update；旧 Preview 不能覆盖更新后的 current state。
+- [x] AC12：真实 PostgreSQL 16 的 4×500/2000-row Confirm 通过 entity-count、SQL、wall time 与 RSS blocker。
+- [x] AC13：Confirm 最后一批 Row/业务写入注入失败时整个 business transaction 回滚，无部分达人、lineage 或 completed task。
+- [x] AC14：business commit 后、Broker ACK 前崩溃时，重投读取 completed task/result 并幂等结束。
+- [x] AC15：API DB commit 后 Broker publish 丢失由持久 reservation 和 bounded `FOR UPDATE SKIP LOCKED` reconciler 正式关闭。
+- [x] AC16：隔离 Compose Redis 7.4.10 真实服务重启后，PostgreSQL task state/attempts/lease 以同 token 恢复；Confirm 从 dispatch=1/run=0 收敛为 completed/dispatch=2/run=1，无用户重试或重复业务写入。
+- [x] AC17：Redis 停止且 dispatch 未完成时真实重启 API 进程，DB request 保持 requested；API 重启后由首次启动的 Beat/Worker reconciler 自动完成同一 Confirm。
+- [x] AC18：dispatch/run retry 均由 PostgreSQL 计数并受 Settings 上限和 bounded backoff 约束；耗尽进入 terminal。
+- [x] AC19：Cancel 只取消 requested/retry_wait；running 返回 409 `IMPORT_TASK_RUNNING`，不产生取消/提交分叉。
+- [x] AC20：Phase 1B Legacy CSV/XLSX、Preview/Confirm、duplicate confirm、Contact、Metrics 与 Snapshot 回归通过。
+- [x] AC21：Task 5 Unified Preview summary、Screening、Change Summary、category 与 persisted row 输出回归通过（91 项 Task 5 unit + PG 2000-row Preview）。
+- [x] AC22：成功 Confirm 保留未来 Freshness 所需的准确 occurrence/source acquisition/ImportRow committed lineage，但未实现 Task 7 Freshness API。
+- [x] AC23：最终 `make test` 已以显式 PostgreSQL 16 URL 通过（Backend/Integration/Smoke 368、API 24、Worker 20、Web 29）；`make lint`、`make compose-validate`、正式 Task 6 2k/5k 与 Task 4/5 5k/10k opt-in 均实际通过。
+- [x] AC24：Alembic head/current 仍为 `0004_phase2_bulk_import`，真实 PG16 `alembic check` 返回 no new operations；Task 6 未创建 `0005`。
+- [x] AC25：本次 Task 6 未实现、提交、迁移或部署 Task 7+、Web UI 或 Server changes。
+
+### Task 7 — Freshness Domain / Influencer Read API
+
+当前证据口径：Task 7 的真实 PostgreSQL 16 Gate 为 3 passed；列表在 50/500/2000 Influencer 下均为固定 6 SQL（5 SELECT、0 DML），本轮 wall 分别为 0.012543s/0.016759s/0.019685s。2000 规模的全部既有筛选 + Freshness 组合路径仍为 6 SQL、0 DML、wall=0.079464s；对该生产 count statement 原样执行的 EXPLAIN 使用现有 `ix_import_rows_job_action`，execution=28.336ms，扫描 2000 行且未移除行，同时核验 frozen `ix_import_rows_account_committed_job` metadata。显式 PG16 全仓回归为 Backend/Integration/Smoke 420 passed、API 24、Worker 20、Web 29；只有仓库外真实附件及明确的 5k/10k opt-in capacity benchmark 按设计跳过。
+
+- [x] AC1：Freshness 正式粒度为 active `PlatformAccount + Source`，达人只做账号结果汇总。
+- [x] AC2：`last_huitun_observed_at` 只取 completed Confirm、成功 committed action、当前账号、included ready occurrence 与已确认 acquisition 的最大 `source_acquired_at`。
+- [x] AC3：Legacy occurrence 不伪造 observed time，保留 `last_huitun_observed_at=null`。
+- [x] AC4：`last_huitun_imported_at` 独立取真实 committed lineage，绝不填充 observed time。
+- [x] AC5：validated Settings 单点提供严格递增的 7/30/90 UTC elapsed 阈值，精确边界与最小微秒边界通过测试。
+- [x] AC6：无可靠 observation 的 eligible Huitun account 为 unknown；零 eligible account 汇总为 unknown 但 `requires_refresh=false`。
+- [x] AC7：多账号采用最差状态顺序，任一 unknown/stale/very_stale 均使达人 `requires_refresh=true`。
+- [x] AC8：inactive account 不参与 hydration、筛选或达人汇总；Influencer 继续只读 active 且 `deleted_at IS NULL`。
+- [x] AC9：Generic/Manual source lineage 不推进 Huitun Freshness；账号初始 `source` 列本身不作为 Huitun eligibility 证据。
+- [x] AC10：相同 Metrics 的新 observation 和 older Metrics + 新 acquisition 均可推进 Freshness，不依赖新 Snapshot 或 CurrentMetrics 覆盖。
+- [x] AC11：四个 additive filter 可与 q/tag/followers/owner/crm_stage/pagination 全部 AND 组合，并保持稳定排序。
+- [x] AC12：列表固定查询数，不按 Influencer/Account 逐条查询 Import lineage；50 条 portable Gate 与 50/500/2000 PG Gate 均无 N+1。
+- [x] AC13：真实 PostgreSQL 16 的 2000-scale Gate、索引 metadata 与 EXPLAIN 通过，无需新增 speculative index。
+- [x] AC14：list/detail/filter-options/snapshot GET 继续不写 business Audit；Freshness 只读查询为 0 DML。
+- [x] AC15：super_admin/manager/operator/viewer 均保持公司级读取；selected Operator 不改变 Freshness 可见性，未认证仍为 401。
+- [x] AC16：Phase 1A–1C list/detail/snapshot/filter-options 与 Viewer Contact masking 全部回归通过。
+- [x] AC17：Task 1–6 Upload/Parse/Preview/Confirm/Recovery 的显式 PostgreSQL 16 回归通过。
+- [x] AC18：`make test`、`make lint` 与 `make compose-validate` 通过；opt-in Freshness PG Gate 已实际运行。
+- [x] AC19：Alembic head/current 保持 `0004_phase2_bulk_import`，真实 PG16 `alembic check` 无 drift；Task 7 无 Migration。
+- [x] AC20：本次未实现 Task 8、Refresh Queue、`0005`、Refresh Return、Web UI、部署或其他禁区。
+
+### Task 8 — Refresh Queue / Export
+
+当前证据口径：唯一新 Migration 为 `0005_phase2_refresh_queue`；Task 8 专用真实 PostgreSQL 16 Gate 为 13 passed。2000-item 真实 Service create 使用 16 SQL、4 DML、2 条 advisory-lock SQL，wall=1.061177s，RSS high-water=145,342,464 bytes。全仓显式 PG 回归与全部 opt-in 2k/5k/10k Gate 已实际运行；Task 9 未开始。
+
+- [x] AC1：`0005_phase2_refresh_queue` 是唯一新 Migration，`down_revision=0004_phase2_bulk_import`，未修改 0004、未创建 0006。
+- [x] AC2：Queue 为 Department-owned；候选继续来自 company-level Influencer Library，不按 Owner 或 Import Department 分片。
+- [x] AC3：Candidate/Item 粒度为 `Influencer + PlatformAccount + source=huitun`。
+- [x] AC4：Priority 只复用 Task 7 `FreshnessPolicy`，固定 tier 1–5 与稳定 reason codes，不实现 ML/AI/weighted score。
+- [x] AC5：Huitun eligibility 复用 Task 7 SourceState/SourceIdentity/successful lineage projection，不凭 `PlatformAccount.source`。
+- [x] AC6：排序固定为 tier、observation NULLS FIRST、Influencer UUID、Account UUID；同一状态与 criteria 重复选择顺序一致。
+- [x] AC7：Identity snapshot 使用 closed schema，只冻结真实公开 locator 与 strict followers scalar；Unicode-whitespace-only locator 被排除。
+- [x] AC8：Snapshot、CSV、Audit 与错误均不保存或输出 Contact、Email、Phone、WeChat、raw row 或完整 Metrics JSON。
+- [x] AC9：同一 candidate statement 冻结 `baseline_last_observed_at` 与 Huitun SourceState `baseline_source_updated_at`。
+- [x] AC10：Queue header、Items 与 CREATED Audit 在一个 transaction 中创建；注入 Item/Audit failure 后全部回滚。
+- [x] AC11：同 Department 创建先按 department/account 稳定 advisory lock，锁后重选补位；partial unique 是最终 backstop。
+- [x] AC12：不同 Department 可对同一个 company account/source 各自建立 active Item。
+- [x] AC13：真实 PostgreSQL 16 的 2000-item Service Gate 通过，无逐候选查询或逐候选 flush。
+- [x] AC14：CSV 只从冻结 Item snapshot 导出固定真实字段，重复导出内容稳定且不读取 live identity/freshness。
+- [x] AC15：首字符或前导 whitespace 后 `= + - @ TAB CR` 全部加单引号，再使用标准 CSV quoting。
+- [x] AC16：Viewer 可按本部门读取，但不能 create/export/cancel；selected Operator 只做 actor，不提升 Session role。
+- [x] AC17：Export/Create/Cancel 强制 Session、selected Operator、CSRF、Service RBAC，并分别写最小白名单 Audit。
+- [x] AC18：Queue list/detail/items GET 不写 business Audit。
+- [x] AC19：非 super_admin 跨部门资源 safe 404，显式创建其他部门 403；super_admin 可指定 active target Department。
+- [x] AC20：Phase 1A–1C 与 Task 1–7 显式 PostgreSQL 回归通过；旧 Bulk migration head 期望已更新为 0005。
+- [x] AC21：`make test`、`make lint`、`make compose-validate` 与 Task 8 PG target 通过；全部既有 opt-in PG Gate 已实际运行。
+- [x] AC22：Alembic unique head/current 为 `0005_phase2_refresh_queue`，fresh/repeat/0004-realistic/downgrade/re-upgrade/check 均通过。
+- [x] AC23：本次未实现 Refresh Return fulfillment、Queue-linked Import API、Web、Browser Automation、灰豚登录或部署；Task 9 仍需独立授权。
+
 ### Freshness 与 Refresh Queue
 
 - [ ] 新 Bulk Draft 上传文件的 `source_acquired_at` 默认服务器接受时间，可在首次 Preview 前人工修改，之后冻结；普通 server-default 上传为 confirmation required=false，历史 SHA + server-default 的新 occurrence 为 true，显式时间或 PATCH 确认后为 false；不得从文件名、mtime 或未知来源字段推断。Legacy 单文件兼容路径保持 NULL/legacy_unknown/false。
-- [ ] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
-- [ ] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
-- [ ] Refresh Queue 由 Department 拥有，候选来自公司级 Influencer Library；Owner 或导入部门不改变公司级读取语义。
-- [ ] Queue quota 仅为创建参数，系统不宣称知道灰豚真实剩余额度；不创建 DailyQuotaPlan。
-- [ ] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline 且 `source_acquired_at_confirmation_required=false` 时可 fulfill；baseline 为空或 confirmation required=true 均 unresolved。
-- [ ] Queue 导出只包含数据库真实存在的 Identity；在灰豚批量定位能力完成真人验证前，不宣称导出 CSV 可被灰豚直接消费。
+- [x] Legacy 数据缺少可靠 acquisition time 时显示 unknown，或明确显示 `last_huitun_imported_at`；不得把 `committed_at` 冒充 observed time。
+- [x] Freshness 以 PlatformAccount + Source 为粒度，使用 Settings 中 `<=7 / 8–30 / 31–90 / >90` 天阈值；不创建 Policy 表。
+- [x] Refresh Queue 由 Department 拥有，候选来自公司级 Influencer Library；Owner 或导入部门不改变公司级读取语义。
+- [x] Queue quota 仅为创建参数，系统不宣称知道灰豚真实剩余额度；不创建 DailyQuotaPlan。
+- [x] `NO_CHANGE` 仅在非空 `source_acquired_at` 严格晚于非空 Queue baseline 且 `source_acquired_at_confirmation_required=false` 时可 fulfill；baseline 为空或 confirmation required=true 均 unresolved。
+- [x] Queue 导出只包含数据库真实存在的 Identity；在灰豚批量定位能力完成真人验证前，不宣称导出 CSV 可被灰豚直接消费。
 - [ ] 仍被 ImportJobFile lineage 引用的 StoredImportFile 不得自动物理删除；MVP 不实现 archive/delete lifecycle。
+
+### Task 9 — Refresh Return Reconciliation
+
+当前证据口径：Task 9 专用 PostgreSQL 16 Gate 为 5 passed；2000-item/1705-return mixed path 为 367 SQL、13.842815s、RSS high-water 322,420,736 bytes，最终为 800 fulfilled_changed、600 fulfilled_no_change、300 stale_return、300 pending。普通 Task 6 Confirm benchmark P95 仍为 6.711925s/55 SQL/RSS 346,669,056 bytes，5000 Confirm、5k/10k repository 与 Unified Preview opt-in Gates 已实际复跑。
+
+- [x] AC1：Bulk ImportJob 可选关联同 Department 的 open/exported Refresh Queue；未知/跨部门 safe 404，completed/cancelled 409。
+- [x] AC2：只有现有 Phase 1B Hard Matcher 已唯一确定 PlatformAccount 的 owner/effective business row，才按 account+source 关联 Item；Queue Identity/identity_snapshot 从 reconciliation 输入和查询投影中物理排除。
+- [x] AC3：Preview 返回 matched/outside/pending、Missing Item IDs、expected status、reason 与唯一 claimant evidence。
+- [x] AC4：Preview 只读 Queue；真实 PG Gate 证明所有 Item、fulfillment 与 Last Return 字段在 Confirm 前不变。
+- [x] AC5：可靠较新且有 effective changes 的 owner row 进入 fulfilled_changed，并写 fulfillment/Last Return lineage。
+- [x] AC6：可靠较新、baseline 非空且无 effective changes 的 owner row 进入 fulfilled_no_change。
+- [x] AC7：acquisition 小于或等于非空 baseline 进入 stale_return；baseline-null no-change、acquisition-null、confirmation-required 或其他后匹配确定性问题进入 unresolved，不伪装成功刷新。
+- [x] AC8：无法唯一确定账号的 ERROR/MANUAL_REVIEW、所有 SKIP/duplicate non-owner 与 Missing Return 保持 pending；unresolved 只用于已唯一 Hard Match 的 owner/effective row 之后的非身份问题。
+- [x] AC9：Merge、ImportRow committed lineage、Item status/lineage、Queue completion、Job/task/Audit 在同一 Confirm transaction；注入最终 commit failure 后全部回滚。
+- [x] AC10：completed token replay 不改 fulfillment、fulfilled_at、Last Return 或 Queue completion。
+- [x] AC11：两个 linked Job 并发回流同一 Item 时恰好一个完成，另一个 preview_stale；不存在双重 claimant。
+- [x] AC12：仅当所有 Item 都为 fulfilled_changed/fulfilled_no_change 才自动 completed；pending/stale_return/unresolved 均阻塞。
+- [x] AC13：fulfilled_no_change 的新 Confirm lineage自然推进 Task 7 Freshness，没有冗余 freshness 写入。
+- [x] AC14：stale_return 不推进 last observed；baseline observation 保持不变。
+- [x] AC15：无 refresh_queue_id 的普通 Bulk 不查询/写 Queue，不产生 refresh_return key，既有 context hash 与 Task 1–8 行为保持不变。
+- [x] AC16：Viewer Mutation 继续拒绝；selected Operator 不提权；Service、复合 FK 与 Confirm revalidation 共同保证 Department scope。
+- [x] AC17：真实 2000-item mixed Return Gate 覆盖 changed/no-change/stale/missing/error/manual/duplicate/outside，并通过 SQL/wall/RSS bounds。
+- [x] AC18：Phase 1A–1C 与 Task 1–8 全仓回归通过；Task 4/5/6/7/8 显式 PG Gates 已实际复跑。
+- [x] AC19：`make test`、`make lint`、`make compose-validate` 与 `make test-refresh-return-postgres` 全部通过。
+- [x] AC20：没有 Migration 变更；Alembic unique head/current/check 保持 `0005_phase2_refresh_queue`。
+- [x] AC21：未开始 Task 10、Web、Browser Automation、灰豚登录、部署或其他禁区。
 
 ### Migration、Worker 与性能
 
-- [ ] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias 与 acquisition confirmation Boolean/CHECK）；该未发布 Revision 直接完善，不另建 Migration；`0005_phase2_refresh_queue` 仍只承载 Refresh Queue Schema。
-- [ ] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
+- [x] `0004_phase2_bulk_import` 只承载 Bulk Import Schema（含 authoritative client-ID alias、acquisition confirmation Boolean/CHECK 与 durable `import_task_requests`）；Task 8 未修改 0004，`0005_phase2_refresh_queue` 只承载 Refresh Queue Schema。
+- [ ] `import_task_requests` 以唯一 token、kind/target CHECK、Job/File 复合 FK、持久 dispatch/run attempts、retry time、Worker lease 和 completed/terminal state 成为 task lifecycle 唯一事实源；Redis、Audit、`error_code` 与 Celery retry count 均不得替代。
+- [ ] PostgreSQL 16 task schema gate 覆盖 token unique、四类 active partial unique、terminal 历史保留、confirm revision/file_parse file、state/timestamp、非负 attempts、复合 FK、reconciliation indexes、无历史 backfill及有 durable task 时危险 downgrade 拒绝。
+- [x] `0003 → 0004 → 0005` 通过 fresh、repeat、真实数据副本、metadata 与 `alembic check`；任何无法无损投回 0003 的 Phase 2 Bulk/Screening 数据以及任何 Queue 证据都必须让危险 downgrade 安全拒绝。
 - [ ] `0004` alias Migration Gate 在 PostgreSQL 16 覆盖 fresh DB、0003 realistic data、repeat upgrade、safe downgrade→0003→0004、dangerous multi-file downgrade guard、`alembic check`、metadata drift、Legacy lineage 和 alias unique/composite FK；Legacy occurrence 保持 0 alias。
 - [ ] `0004` confirmation CHECK Gate 覆盖 Legacy NULL/legacy_unknown/false、普通 timestamp/server_default/false、历史 SHA timestamp/server_default/true、显式 timestamp/user_confirmed/false，并由数据库拒绝 NULL/server_default/true、timestamp/user_confirmed/true、NULL/legacy_unknown/true。
 - [ ] 当前七服务拓扑不变；Celery Worker concurrency=2，Heavy Preview/Confirm 同时最多 1 个。
