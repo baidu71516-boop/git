@@ -45,18 +45,16 @@ export function InfluencerPreviewWorkspace({
     () => new Map(details.map((detail) => [detail.id, detail])),
     [details],
   );
-  const [openId, setOpenId] = useState<string | undefined>(openInfluencerId);
+  const [openId, setOpenId] = useState<string | null>(openInfluencerId ?? null);
   const isLauncher = openInfluencerId !== undefined;
-  const activeOpenId = openId ?? openInfluencerId;
-
-  const openDetail = activeOpenId ? detailById.get(activeOpenId) : null;
+  const openDetail = openId ? detailById.get(openId) : null;
 
   const openDrawerFromList = (id: string) => {
     setOpenId(id);
   };
 
   const closeDrawer = () => {
-    setOpenId(undefined);
+    setOpenId(null);
     if (isLauncher) {
       void router.push(closeDrawerHref);
     }

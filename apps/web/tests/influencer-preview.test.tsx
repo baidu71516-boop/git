@@ -1,5 +1,6 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent } from "@testing-library/react";
 
 import DevInfluencerDetailDrawerPreviewPage from "../src/app/dev-ui-preview/influencers/drawer/[id]/page";
 import InfluencerVisualPreviewPage from "../src/app/dev-ui-preview/influencers/page";
@@ -153,6 +154,68 @@ describe("development influencer visual preview", () => {
     expect(screen.getByText("共 8 位达人")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("opens and closes preview drawer from local preview table interactions", async () => {
+    const rowByName = (name: string) => {
+      const nameButton = screen.getByRole("button", { name });
+      return nameButton.closest("tr");
+    };
+
+    render(<InfluencerPreviewWorkspace />);
+
+    const unknownNeedRefreshRow = rowByName("小岛日记");
+    const unknownNoRefreshRow = rowByName("橘子宇宙");
+
+    expect(unknownNeedRefreshRow).not.toBeNull();
+    expect(unknownNoRefreshRow).not.toBeNull();
+
+    const needRefreshButton = within(
+      unknownNeedRefreshRow as HTMLTableRowElement,
+    ).getByRole("button", { name: "查看" });
+
+    fireEvent.click(needRefreshButton);
+
+    expect(
+      await screen.findByText("小岛日记", { selector: "h4" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "平台与指标", level: 5 }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("未知").length).toBeGreaterThan(0);
+    const needRefreshFreshnessSection = screen
+      .getByRole("heading", { name: "平台与指标", level: 5 })
+      .closest("section");
+    expect(needRefreshFreshnessSection).not.toBeNull();
+    expect(
+      within(needRefreshFreshnessSection as HTMLElement).getByText(
+        "暂无可靠采集记录",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭详情抽屉" }));
+    expect(
+      screen.queryByRole("button", { name: "关闭详情抽屉" }),
+    ).not.toBeInTheDocument();
+
+    const noRefreshButton = within(
+      unknownNoRefreshRow as HTMLTableRowElement,
+    ).getByRole("button", { name: "查看" });
+
+    fireEvent.click(noRefreshButton);
+
+    expect(
+      await screen.findByText("橘子宇宙", { selector: "h4" }),
+    ).toBeInTheDocument();
+    const noRefreshFreshnessSection = screen
+      .getAllByRole("heading", { name: "平台与指标", level: 5 })[0]
+      .closest("section");
+    expect(noRefreshFreshnessSection).not.toBeNull();
+    expect(
+      within(noRefreshFreshnessSection as HTMLElement).getByText(
+        "暂无可更新数据",
+      ),
+    ).toBeInTheDocument();
+  }, 15000);
 
   it("keeps drawer detail preview route development-only and in-memory", async () => {
     vi.stubEnv("NODE_ENV", "production");
