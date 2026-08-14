@@ -2055,13 +2055,14 @@ body {
   height: 42px;
   padding: 10px 12px;
   background: #f8fafc;
-  color: #475467;
+  color: #344054;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
+  border-bottom-color: #edf1f6;
 }
 
 .refresh-queue-table .ant-table-tbody > tr > td {
-  padding: 12px;
+  padding: 11px 12px;
   border-bottom-color: #edf1f6;
   font-size: 13px;
   vertical-align: middle;
@@ -2091,7 +2092,7 @@ body {
 .refresh-queue-summary-band {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  background: #fbfcfe;
+  background: #f8fafc;
 }
 
 .refresh-queue-summary-band > div {
@@ -2107,13 +2108,13 @@ body {
 
 .refresh-queue-summary-band strong {
   color: var(--app-text);
-  font-size: 22px;
-  font-weight: 650;
+  font-size: 24px;
+  font-weight: 600;
 }
 
 .refresh-queue-distributions {
   display: grid;
-  gap: 14px;
+  gap: 12px;
   padding: 18px 20px 20px;
   border-top: 1px solid #edf1f6;
 }
@@ -2125,8 +2126,65 @@ body {
   gap: 12px;
 }
 
-.refresh-queue-distribution .ant-tag {
-  margin-bottom: 4px;
+.refresh-queue-distribution-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+}
+
+.refresh-queue-distribution-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #e5ebf1;
+  background: #f4f7fb;
+  color: #475467;
+  max-width: 100%;
+}
+
+.refresh-queue-distribution-item .ant-typography {
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.refresh-queue-muted-label {
+  color: #4b5f84;
+}
+
+.refresh-queue-create-hint {
+  margin-top: 10px;
+  display: grid;
+  gap: 2px;
+  padding-top: 10px;
+  border-top: 1px dashed #e8edf3;
+}
+
+.refresh-queue-create-note {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.refresh-account-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.refresh-account-meta {
+  color: var(--app-text-secondary);
+}
+
+.refresh-queue-meta-tag {
+  margin: 0;
+  padding: 1px 8px;
+  border-color: #d7deeb;
+  background: #f4f7ff;
+  color: #4b5f84;
+  font-size: 12px;
+  line-height: 1.2;
 }
 
 .refresh-queue-section-heading {
@@ -2139,12 +2197,6 @@ body {
 
 .refresh-queue-section-heading h4 {
   margin: 0 0 3px;
-}
-
-.refresh-account-cell {
-  display: grid;
-  gap: 5px;
-  min-width: 0;
 }
 
 .refresh-account-cell > .ant-typography {
@@ -2200,6 +2252,14 @@ body {
   .refresh-queue-distribution {
     grid-template-columns: 1fr;
     gap: 6px;
+  }
+
+  .refresh-queue-distribution-list {
+    width: 100%;
+  }
+
+  .refresh-queue-distribution-item {
+    max-width: 100%;
   }
 
   .refresh-queue-pagination {

@@ -249,7 +249,11 @@ describe("Refresh Queue list and create", () => {
     fireEvent.change(screen.getByLabelText("今日计划总上限"), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建名单" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "创建更新名单",
+      }),
+    );
 
     await waitFor(() =>
       expect(push).toHaveBeenCalledWith("/refresh-queues/queue-open"),
@@ -312,7 +316,11 @@ describe("Refresh Queue list and create", () => {
     fireEvent.change(screen.getByLabelText("今日计划总上限"), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建名单" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "创建更新名单",
+      }),
+    );
 
     expect(
       await screen.findByText(
@@ -358,13 +366,13 @@ describe("Refresh Queue detail", () => {
     expect(screen.getByText("实际选中")).toBeInTheDocument();
     expect(screen.getByText("涉及达人")).toBeInTheDocument();
     expect(await screen.findByText("冻住的账号名")).toBeInTheDocument();
-    expect(screen.getByText("frozen_handle")).toBeInTheDocument();
+    expect(screen.getByText(/frozen_handle/)).toBeInTheDocument();
     expect(
       screen.getByRole("columnheader", { name: "创建时数据时效" }),
     ).toBeInTheDocument();
     expect(screen.getAllByText("严重陈旧").length).toBeGreaterThan(0);
-    expect(screen.getByText("缺少粉丝数")).toBeInTheDocument();
-    expect(screen.getByText("待回流")).toBeInTheDocument();
+    expect(screen.getAllByText("缺少粉丝数").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("待回流").length).toBeGreaterThan(0);
     expect(screen.queryByText("上传回流文件")).not.toBeInTheDocument();
     expect(screen.queryByText("查看回流证据")).not.toBeInTheDocument();
     expect(screen.queryByText("回流处理")).not.toBeInTheDocument();

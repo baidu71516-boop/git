@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Form, InputNumber, Modal, Select } from "antd";
+import { Alert, Form, InputNumber, Modal, Select, Typography } from "antd";
 import { useState } from "react";
 
 import { isAmbiguousMutationError, mutationErrorMessage } from "../formatters";
@@ -14,6 +14,7 @@ import type {
 
 const ambiguousCreateMessage =
   "无法确认更新名单是否创建成功，请先刷新数据更新列表确认，避免重复创建。";
+const { Text } = Typography;
 
 export function CreateRefreshQueueModal({
   open,
@@ -67,8 +68,8 @@ export function CreateRefreshQueueModal({
       title="创建更新名单"
       open={open}
       width={560}
-      okText="创建名单"
-      cancelText="返回"
+      okText="创建更新名单"
+      cancelText="取消"
       confirmLoading={mutation.isPending}
       onOk={() => void submit()}
       onCancel={onClose}
@@ -168,6 +169,14 @@ export function CreateRefreshQueueModal({
           <InputNumber min={1} precision={0} className="full-width" />
         </Form.Item>
       </Form>
+      <div className="refresh-queue-create-hint">
+        <Text type="secondary" className="refresh-queue-create-note">
+          目标更新数量 ≤ 本次更新上限 ≤ 今日计划总上限。
+        </Text>
+        <Text type="secondary" className="refresh-queue-create-note">
+          单个更新名单最多 2000 条。
+        </Text>
+      </div>
     </Modal>
   );
 }

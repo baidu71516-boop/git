@@ -95,7 +95,11 @@ describe("development Refresh Queue visual preview", () => {
     fireEvent.change(screen.getByLabelText("今日计划总上限"), {
       target: { value: "30" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "创建名单" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "创建更新名单",
+      }),
+    );
 
     expect(
       await screen.findByText("已完成本地创建交互预览"),

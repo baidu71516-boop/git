@@ -1,4 +1,4 @@
-import { Tag, Typography } from "antd";
+import { Typography } from "antd";
 
 import {
   freshnessLabel,
@@ -42,16 +42,22 @@ function Distribution({
   values,
 }: {
   label: string;
-  values: { key: string; label: string; count: number }[];
+  values: {
+    key: string;
+    label: string;
+    count: number;
+    textClass?: string;
+  }[];
 }) {
   return (
     <div className="refresh-queue-distribution">
       <Text type="secondary">{label}</Text>
-      <div>
+      <div className="refresh-queue-distribution-list">
         {values.map((value) => (
-          <Tag key={value.key}>
-            {value.label} {value.count}
-          </Tag>
+          <span key={value.key} className="refresh-queue-distribution-item">
+            <Text className={value.textClass}>{value.label}</Text>
+            <Text type="secondary">{value.count}</Text>
+          </span>
         ))}
       </div>
     </div>
@@ -82,6 +88,7 @@ export function RefreshQueueSummary({ summary }: { summary: Summary }) {
             key: status,
             label: freshnessLabel(status),
             count: summary.freshness_breakdown[status] ?? 0,
+            textClass: `freshness-status freshness-status-${status}`,
           }))}
         />
         <Distribution
@@ -93,6 +100,7 @@ export function RefreshQueueSummary({ summary }: { summary: Summary }) {
               summary.priority_breakdown[
                 tier as keyof typeof summary.priority_breakdown
               ] ?? 0,
+            textClass: "refresh-queue-muted-label",
           }))}
         />
         <Distribution
@@ -101,6 +109,7 @@ export function RefreshQueueSummary({ summary }: { summary: Summary }) {
             key: status,
             label: itemStatusPresentation(status).label,
             count: summary.status_breakdown[status] ?? 0,
+            textClass: "refresh-queue-muted-label",
           }))}
         />
       </div>

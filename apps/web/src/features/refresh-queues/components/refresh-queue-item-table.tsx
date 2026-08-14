@@ -29,8 +29,9 @@ const columns: ColumnsType<RefreshQueueItem> = [
         <div className="refresh-account-cell">
           <Text strong>{snapshot.account_name ?? locator}</Text>
           <Space size={6} wrap>
-            <Tag>{platformLabel(snapshot.platform)}</Tag>
-            <Text type="secondary">{locator}</Text>
+            <Text type="secondary" className="refresh-queue-account-meta">
+              {platformLabel(snapshot.platform)} · {locator}
+            </Text>
           </Space>
         </div>
       );
@@ -53,7 +54,9 @@ const columns: ColumnsType<RefreshQueueItem> = [
     render: (reasons: RefreshQueueItem["priority_reasons"]) => (
       <Space size={[4, 4]} wrap>
         {reasons.map((reason) => (
-          <Tag key={reason}>{priorityReasonLabel(reason)}</Tag>
+          <Tag key={reason} color="default" className="refresh-queue-meta-tag">
+            {priorityReasonLabel(reason)}
+          </Tag>
         ))}
       </Space>
     ),
