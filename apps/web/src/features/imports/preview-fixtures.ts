@@ -17,6 +17,8 @@ export type BulkPreviewScenarioKey =
   | "no_job"
   | "no_files"
   | "mixed_files"
+  | "screening_rules_readonly"
+  | "screening_rules_conflict"
   | "failed"
   | "preview_stale"
   | "preview_ready"
@@ -764,6 +766,22 @@ export function createBulkPreviewScenarios(): BulkPreviewScenario[] {
       job: createJob(),
       collection,
       files: mixedFiles,
+      rows: [],
+    },
+    {
+      key: "screening_rules_conflict",
+      label: "筛选规则冲突",
+      job: createJob(),
+      collection,
+      files: [],
+      rows: [],
+    },
+    {
+      key: "screening_rules_readonly",
+      label: "筛选规则只读",
+      job: createJob(),
+      collection,
+      files: [],
       rows: [],
     },
     ...terminalStatuses.map(({ key, label, status }) => ({

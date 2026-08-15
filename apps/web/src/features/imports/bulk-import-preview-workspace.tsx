@@ -6,6 +6,7 @@ import { useMemo, useState } from "react";
 import { AppShell } from "@/components/app-shell";
 
 import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
+import { ScreeningRuleEditorModal } from "./components/screening-rule-editor-modal";
 import {
   createBulkPreviewScenarios,
   getBulkPreviewRowsPage,
@@ -25,11 +26,15 @@ export function BulkImportPreviewWorkspace() {
   const [offset, setOffset] = useState(0);
   const [selectedRow, setSelectedRow] = useState<ImportRowPublic | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [screeningRuleModalOpen, setScreeningRuleModalOpen] = useState(false);
+  const [screeningRuleConflict, setScreeningRuleConflict] = useState(false);
+  const [screeningRuleReloading, setScreeningRuleReloading] = useState(false);
   const scenario =
     scenarios.find((candidate) => candidate.key === scenarioKey) ??
-    scenarios[0];
+    scenarios[0]!;
 
-  if (!scenario) return null;
+  const isReadOnlyScenario = scenario.key === "screening_rules_readonly";
+  const isConflictScenario = scenario.key === "screening_rules_conflict";
 
   const rowsPage = getBulkPreviewRowsPage(
     scenario,
@@ -41,6 +46,7 @@ export function BulkImportPreviewWorkspace() {
   function changeScenario(value: BulkPreviewScenarioKey) {
     const nextScenario = scenarios.find((candidate) => candidate.key === value);
     setScenarioKey(value);
+    setScreeningRuleConflict(value === "screening_rules_conflict");
     if (!nextScenario?.job?.preview_summary) setCategory("all");
     setOffset(0);
     setSelectedRow(null);
@@ -51,6 +57,26 @@ export function BulkImportPreviewWorkspace() {
     setCategory(value);
     setOffset(0);
     setSelectedRow(null);
+  }
+
+  const canShowPreviewRuleHint =
+    Boolean(
+      scenario.job?.preview_revision && scenario.job.preview_revision > 0,
+    ) && !isConflictScenario;
+
+  function openScreeningRules() {
+    setScreeningRuleModalOpen(true);
+  }
+
+  function closeScreeningRules() {
+    setScreeningRuleModalOpen(false);
+  }
+
+  async function reloadLatestScreeningRules() {
+    setScreeningRuleReloading(true);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    setScreeningRuleConflict(false);
+    setScreeningRuleReloading(false);
   }
 
   return (
@@ -86,7 +112,7 @@ export function BulkImportPreviewWorkspace() {
             job={scenario.job}
             collection={scenario.collection}
             files={scenario.files}
-            readOnly={false}
+            readOnly={isReadOnlyScenario}
             uploadItems={[]}
             busyFileId={null}
             previewBusy={false}
@@ -116,6 +142,9 @@ export function BulkImportPreviewWorkspace() {
             onRequestPreview={noOperation}
             onRebuildPreview={noOperation}
             onRetryJob={noOperation}
+            onOpenScreeningRules={
+              scenario.collection ? openScreeningRules : undefined
+            }
             preview={{
               rowsPage,
               selectedRow,
@@ -140,6 +169,23 @@ export function BulkImportPreviewWorkspace() {
               onConfirm: () => setConfirmOpen(false),
             }}
           />
+          {scenario.collection ? (
+            <ScreeningRuleEditorModal
+              open={screeningRuleModalOpen}
+              collection={scenario.collection}
+              readOnly={isReadOnlyScenario}
+              previewReady={canShowPreviewRuleHint}
+              saving={false}
+              reloading={screeningRuleReloading}
+              conflict={screeningRuleConflict}
+              error={null}
+              onCancel={closeScreeningRules}
+              onSave={() => {
+                setScreeningRuleModalOpen(false);
+              }}
+              onReloadLatest={() => void reloadLatestScreeningRules()}
+            />
+          ) : null}
         </Space>
       </section>
     </AppShell>
