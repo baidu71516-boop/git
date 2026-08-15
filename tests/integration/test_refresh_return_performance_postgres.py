@@ -483,16 +483,20 @@ def test_2000_item_mixed_refresh_return_end_to_end_resource_gate() -> None:
                 assert duplicate_item.last_return_import_row_id == owner.id
                 assert duplicate.id not in {item.last_return_import_row_id for item in returned}
 
-                assert await session.scalar(select(func.count()).select_from(Influencer)) == 2_001
+                expected_account_count = QUEUE_ITEM_COUNT + EXTRA_OUTSIDE_QUEUE_ACCOUNTS
+                assert (
+                    await session.scalar(select(func.count()).select_from(Influencer))
+                    == expected_account_count
+                )
                 assert (
                     await session.scalar(
                         select(func.count()).select_from(InfluencerPlatformAccount)
                     )
-                    == 2_001
+                    == expected_account_count
                 )
                 assert (
                     await session.scalar(select(func.count()).select_from(InfluencerCurrentMetrics))
-                    == 2_001
+                    == expected_account_count
                 )
                 metrics = {
                     item.platform_account_id: item
@@ -513,7 +517,7 @@ def test_2000_item_mixed_refresh_return_end_to_end_resource_gate() -> None:
                     item.id: _snapshot_document(item)
                     for item in await session.scalars(select(InfluencerMetricSnapshot))
                 }
-                assert len(snapshots) == 2_001 + CHANGED_COUNT
+                assert len(snapshots) == expected_account_count + CHANGED_COUNT
                 assert {
                     item_id: snapshots[item_id] for item_id in baseline_snapshots
                 } == baseline_snapshots

@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 11 — Final PostgreSQL / Performance / Contract Release Gate
+
+#### Release hardening
+
+- 修复七服务栈的 P1 重启恢复缺陷：Nginx 通过 Docker embedded DNS 动态解析 API/Web upstream，不再在容器地址变化后持续代理旧 IP 并返回 502。真实 Redis 中断、API 重启、Redis 恢复与 reconciler replay 后，持久 Confirm 完成；API/Web 再次重启均由同一 Nginx 自动恢复。
+- 新增显式 Task 11 PG16 release gates：2,000 Influencer × 3 Accounts × 8 confirmed observations（48,000 lineage rows）的 list/filter/detail 固定为 6/6/7 SQL；新增 5,000 Freshness 与 5,000 Refresh candidate capacity 观测。
+- 让 Refresh Return 性能 fixture 的实体/快照断言由规模常量推导，支持同一真实路径在 500/1,000/2,000 三个规模下检查 SQL 增长，而不改变 2,000 默认业务门禁或生产语义。
+- 同步架构、API、计划与冻结 scope 的 Release Candidate 状态说明；没有新增 endpoint、Migration、平台或产品能力，也没有修改 Hard Matcher、Merge、Freshness 或 Queue fulfillment 语义。
+
+#### Final verification
+
+- PG16 Migration Gate 18 passed，覆盖 fresh `0001 → 0005`、realistic `0003 → 0005`、repeat、metadata、`alembic check` 与危险 downgrade guards；唯一 head/current 均为 `0005_phase2_refresh_queue`。
+- 2,000-row Bulk mixed Preview/Confirm 分别为 62/76 SQL、1.946773s/3.906778s、RSS high-water 190,267,392/309,870,592 bytes；正式 4×500 Confirm 五次测量 P95 为 4.419464s、55 SQL、348,667,904 bytes。
+- Freshness fanout list/filter/detail 为 0.051084s/0.838173s/0.041125s，RSS high-water 432,816,128 bytes；PG16 EXPLAIN ANALYZE 扫描 48,000 lineage rows 为 574.064ms，无 per-influencer/per-account query。
+- 2,000 Refresh Queue 选择为 1 SQL，创建为 16 SQL/4 DML/2 advisory locks，合计 0.775404s；2,000 Refresh Return 全链路为 369 SQL、7.858224s、RSS high-water 363,806,720 bytes。500/1,000/2,000 Return 为 212/268/369 SQL，增长来自有界 chunk/batch，未发现隐藏逐行 N+1。
+- 5,000/10,000 Preview 为 47/77 SQL、3.969097s/8.086253s、RSS high-water 302,628,864/624,295,936 bytes；5,000 Confirm 为 106 SQL、11.508431s、RSS high-water 676,364,288 bytes。并发矩阵、durable task/lease recovery、RBAC/security、OpenAPI/Web contract 与 production preview 404 均通过。
+- 显式 PG16 的最终 `make test`：Backend/Integration/Smoke 558 passed、8 skipped（7 个大型 opt-in 已独立实跑，真实附件因环境未提供而未执行），API 28、Worker 20、Web 184 passed。`make lint`、`make compose-validate`、Next production build、Nginx syntax 与 Alembic fresh/current/check 全部通过。
+
 ### Phase 2 Task 10B — Final Functional Integration
 
 #### Added

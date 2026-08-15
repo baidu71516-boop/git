@@ -4,7 +4,7 @@
 
 - Phase 1A–1C 的实际实现以 `packages/backend_core`、FastAPI/Worker 薄入口、`0001`–`0003_phase1b` migrations 和已通过测试为准。
 - Phase 2 的冻结目标以 `docs/PHASE_2_SCOPE.md` 为唯一详细设计；本文件只记录系统级架构边界。
-- 当前开发分支已经落地 Task 1–9；Task 9 复用现有 Hard Matcher、Unified Preview、Atomic Confirm 与 Merge，在同一事务核销 Queue Item；没有实现 Web 或 Task 10。
+- 当前 Release Candidate 已落地 Phase 2 Task 1–10；Task 9 复用现有 Hard Matcher、Unified Preview、Atomic Confirm 与 Merge，在同一事务核销 Queue Item，Task 10 Web 只消费冻结 API contract。Task 11 PostgreSQL / 性能 / contract release gate 已在本地完成；Task 12 与部署尚未开始。
 - 旧的 Browser Automation 方案已废弃。当前 Phase 2 不包含灰豚登录、页面自动化或自动采集器。
 - 唯一共享 Python 业务核心是 `packages/backend_core`。`apps/api` 只负责 HTTP，`apps/worker` 只负责异步任务入口；禁止 API 内 Service、根目录 `services/` 或第二套 Matcher/Merge。
 

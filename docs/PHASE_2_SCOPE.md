@@ -6,7 +6,7 @@
 
 本文是 Phase 2 的唯一权威实施与验收协议。旧的 Phase 2 Browser Automation 方案以及“Phase 2 = SOP + Campaign + AI”的排期均已人工废弃。本次设计冻结不代表代码、Schema、Migration、API、Worker 或 Web 已实现，也不授权自动开始 Task 1。
 
-实现状态补记（2026-08-13）：当前 `phase-2-bulk-import` 开发分支已推进至 Task 9 Refresh Return；Task 0 的冻结范围和任务顺序没有改变。Task 10 Web 与部署尚未开始，也未由 Task 9 获得实现授权。
+实现状态补记（2026-08-15）：当前 `phase-2-integration` Release Candidate 已完成 Task 10 Final Functional Integration 与 Task 11 本地 Release Gate；Task 0 的冻结范围和任务顺序没有改变。Task 12 与部署尚未开始，也未获得实现授权。
 
 若本文与旧版 Phase 2 描述冲突，以本文和已确认的 Phase 1A–1C 决策为准。Phase 1A–1C 的认证、权限、导入、去重、非破坏性合并、Contact 保护和不可变 Snapshot 语义不得被 Phase 2 改写。
 
@@ -1354,7 +1354,7 @@ MVP 最终交付：
 
 每个 Task 必须独立人工验收，不能自动进入下一 Task。
 
-当前实施检查点：Task 9 已关闭 Queue-linked Bulk、Preview reconciliation、Confirm 同事务 fulfillment、Queue completion、Freshness interaction 与 2000-item Return Gate；Web、后续通用性能收口与部署仍按上表等待各自独立人工授权。
+当前实施检查点：Task 10 已完成冻结 Web contract 与七服务本地集成；Task 11 已完成 PostgreSQL、性能、并发、恢复、安全和 contract 本地 Release Gate。Task 12、部署与任何新产品能力仍按上表等待独立人工授权。
 
 ---
 

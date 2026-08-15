@@ -5,8 +5,8 @@
 Base：`/api/v1`
 
 - Phase 1A–1C 接口已实现；以 Router、Schema 和测试为运行事实源。
-- 当前开发分支已实现 Phase 2 Task 1–9 的 Bulk Import、Structured Screening、Unified Preview、Atomic Confirm/Recovery、Freshness、Refresh Queue 与 Refresh Return；仍以 Router、Schema 和测试为运行事实源。
-- Task 10 及后续 Phase 2 接口仍为 **Phase 2 Planned**，不能据此宣称当前可调用。
+- 当前 Release Candidate 已实现 Phase 2 Task 1–10 的 Bulk Import、Structured Screening、Unified Preview、Atomic Confirm/Recovery、Freshness、Refresh Queue、Refresh Return 与冻结 Web contract；仍以 Router、Schema 和测试为运行事实源。
+- 已完成的 Task 11 没有新增产品接口；Task 12 及后续 Phase 2 工作仍为 **Phase 2 Planned**，不能据此宣称当前可调用。
 - Phase 2 详细语义以 `docs/PHASE_2_SCOPE.md` 为准。
 - 旧的 `/imports` 草案路径已废弃；正式导入资源前缀为 `/import-jobs`。
 
