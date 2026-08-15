@@ -59,7 +59,7 @@
 
 - [x] `docs/PHASE_2_SCOPE.md` 已冻结聚合边界、状态机、数据语义、API 计划、Migration 拆分、任务顺序与测试矩阵。
 - [x] 旧的 Browser Automation 方案已废弃；旧的 AI、Playbook、Campaign Phase 2 路线已延期，不属于当前 Phase 2。
-- [x] 唯一相关 UNKNOWN 只保留灰豚实际支持的批量重新定位方式；该项不阻塞 Task 1–7。
+- [x] 唯一相关 UNKNOWN 只保留灰豚实际支持的批量重新定位方式；该项不阻塞 Task 1–13。
 
 ### Bulk Batch 与统一 Preview
 
@@ -71,7 +71,8 @@
 - [ ] 幂等真值全部通过：A+X 首次创建；A+X 重放返回同 occurrence；A+Y 返回 409 且不改绑定；B+X 返回同 occurrence并持久化 B alias；之后 B+Y 稳定返回 409。
 - [ ] PostgreSQL 16 并发门禁全部通过：A+X/A+X 最终一个 occurrence/一个 alias；A+X/B+X 最终一个 occurrence/两个 aliases；A+X/A+Y 最终一个 A binding、一个成功和一个 deterministic 409；均不得出现 500、覆盖或分叉 alias。
 - [ ] `0004` 与 Legacy single-file 兼容桥同版本交付；现有 `POST /import-jobs` 在 `0004` head 仍能创建 occurrence、写入 Row file FK 并通过 Phase 1B 全回归，且不伪造 observed time 或 client-ID alias。
-- [ ] 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前可 replace、exclude、retry；存在 blocking file 时不能生成 Preview。
+- [ ] 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前可 exclude、retry、mapping correction；存在 blocking file 时不能生成 Preview。
+- [ ] 多平台能力遵循 platform-neutral architecture；Phase 2 当前仅启用 `xiaohongshu`；Douyin/Bilibili/TikTok/YouTube 及其他平台 Connector/多平台路线属于 Future scope 且不伪造其 identity。
 - [ ] 所有纳入文件形成一个统一 Preview Revision；文件内、跨文件和数据库三层硬身份去重共用 Phase 1B Matcher。
 - [ ] Email 仅标记疑似重复，绝不作为自动匹配或自动合并依据；身份冲突进入人工复核。
 - [ ] Preview 不写达人业务表；MVP 禁止自动 Confirm；Confirm 整批重新校验、单事务提交、支持幂等并拒绝 stale revision。

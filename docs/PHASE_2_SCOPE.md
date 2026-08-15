@@ -53,7 +53,7 @@ Phase 2 MVP 不包含：
 - AI semantic matching、AI 达人判断或 AI 排序。
 - Playbook、Campaign、邮件、Follow-up、Inbox、Outreach。
 - CRM 工作流、完整 Analytics 或需求池。
-- 抖音、快手、视频号或其他平台 Connector。
+- 抖音、快手、Bilibili、TikTok、YouTube、视频号或其他平台 Connector。
 - Influencer 通用 Mutation、Owner/Contact/Tag 批量维护。
 - Auto Confirm。
 - Freshness Policy 数据表。
@@ -62,6 +62,10 @@ Phase 2 MVP 不包含：
 - 达人库整体视觉重构。
 
 未来若存在正式官方 Connector，它也只能输出既有 Canonical Contract，并进入相同的 Preview → Confirm → Merge。
+
+Phase 2 的平台模型采用 platform-neutral architecture：平台字段与平台级身份仅作为通用维度参与规范约束；当前仅启用 `xiaohongshu`；Douyin、Bilibili、TikTok、YouTube、以及其他平台 Connector/enablement 仍属于未来 scope，不在本阶段实现。
+
+允许一个 `Influencer` 持有多个 `PlatformAccount`；当前测试环境中的候选/回流链路均可为同一 `xiaohongshu` source。
 
 ---
 
@@ -218,7 +222,7 @@ mapping_required → parsing      (mapping/retry)
 failed → parsing                (retry)
 ready → parsing                 (Draft mapping update)
 uploaded | ready | mapping_required | failed → excluded   (revision=0 only; parsing 中需等待任务结束)
-excluded → parsing              (Draft replace 恢复相同 SHA only)
+excluded → parsing              (Draft mapping correction 恢复后)
 ```
 
 文件 Parse 采用现有 Worker 异步执行。每个 ImportJobFile 保存 `parse_task_id`、`parse_attempts`、`parse_started_at`、`parse_completed_at`；Scheduler 根据持久状态恢复 broker dispatch 丢失，不依赖 Job 级单一 task id 跟踪多个文件。
@@ -273,15 +277,16 @@ Web 可以一次拖入多个文件，但 API 每个请求只流式上传一个�
 - 禁止复用历史 Preview 或历史 Plan Hash。
 - 若 SHA 在更早 Job 已存在，初次上传未显式提供 acquisition time 时，新 occurrence 使用服务器接受时间、origin=`server_default`、`source_acquired_at_confirmation_required=true`，并作为 blocking file；必须在 Preview 前通过显式 PATCH 确认/修正时间（即使数值不变），使 origin 变为 `user_confirmed` 且 confirmation required 变为 false。初次上传已显式提供合法 acquisition time 时直接记为 origin=`user_confirmed`、confirmation required=false；未复用历史 SHA 的普通 server-default 上传也为 false。该 occurrence-level Boolean 是待确认状态的唯一权威持久化事实源，禁止通过动态查询其他 Job、`error_code`、Redis、Audit JSON 或内存状态推导/保存该事实。两种确认路径都写 Audit，但 Audit 不是事实源。
 
-### 6.3 损坏、替换、排除和重试
+### 6.3 损坏、排除、重试与修正
 
 Preview 前允许：
 
-- replace：multipart 上传替代内容，保留旧 occurrence/Audit，排除旧文件并增加新的 position。若替代内容 SHA 与被 excluded 的旧 occurrence 相同，则只重新启用原 occurrence 并重新 Parse，不创建第二行。
 - exclude：不进入本批次 Preview，但保留上传事实。
 - retry：仅重试可重试的解析/基础设施阶段。
 - 更新 Mapping。
 - 修改 `source_acquired_at`。
+
+per-file replace 为 deferred / OUT OF SCOPE；当前保留 retry/exclude/mapping correction 路径。
 
 Preview 后以上操作全部禁止。
 
@@ -320,7 +325,7 @@ Preview 不写 Influencer、PlatformAccount、Contact、Metrics 或 Snapshot 业
 - originating collection_job_id + screening rule_hash
 - optional refresh_queue_id（只在 `0005` 部署后进入 manifest；`0004`/Task 2 阶段不接受该字段）
 
-所有上传、replace、exclude、Mapping 和 acquisition mutation 也必须锁定 Job，并在 `preview_revision=0` 时才可提交。Confirm 必须重新计算同一 manifest/hash；任何差异进入 `preview_stale`，不得使用半套文件继续。
+所有上传、exclude、Mapping 和 acquisition mutation 也必须锁定 Job，并在 `preview_revision=0` 时才可提交。`replace` 当前为 deferred / OUT OF SCOPE。Confirm 必须重新计算同一 manifest/hash；任何差异进入 `preview_stale`，不得使用半套文件继续。
 
 ---
 
@@ -1022,7 +1027,6 @@ Legacy `source_acquired_at` 必须保持 NULL 且 confirmation required=false，
 - `GET /import-jobs/{id}/files`
 - `PATCH /import-jobs/{id}/files/{file_id}`：仅 Draft 修改 source_acquired_at
 - `PUT /import-jobs/{id}/files/{file_id}/mapping`
-- `POST /import-jobs/{id}/files/{file_id}/replace`
 - `POST /import-jobs/{id}/files/{file_id}/exclude`
 - `POST /import-jobs/{id}/files/{file_id}/retry`
 - `POST /import-jobs/{id}/preview`
@@ -1033,13 +1037,15 @@ Legacy `source_acquired_at` 必须保持 NULL 且 confirmation required=false，
 
 现有单文件 `POST /import-jobs` 保留兼容。
 
+`POST /import-jobs/{id}/files/{file_id}/replace` 被明确标记为 deferred / OUT OF SCOPE，不在本冻结 API 范围，不新增替代 endpoint。
+
 `0004` 与单文件兼容桥必须同版本上线：该旧 endpoint 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`，Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
 `GET /import-jobs` 使用 `offset=0`、`limit=50`、最大 200，稳定排序 `created_at DESC, id DESC`。
 
 Rows 保留 Phase 1B 的 `offset/limit/action`，并 additive 增加 `category`；`action` 与 `category` 同传返回 422。Rows 使用第 9 节的 file-aware 稳定排序，不得静默混用两套分页或过滤协议。
 
-`PATCH source_acquired_at` 必须写专用 Audit。`replace` 是单文件 multipart；`POST /retry` 只执行第 5 节按 `failed_stage` 冻结的恢复转换。静态 `/bulk` 路由必须先于 `/{id}` 注册。
+`PATCH source_acquired_at` 必须写专用 Audit；`POST /retry` 只执行第 5 节按 `failed_stage` 冻结的恢复转换。静态 `/bulk` 路由必须先于 `/{id}` 注册。
 
 `POST /import-jobs/{id}/files` 的 `client_file_id` 由 `import_job_file_client_ids` 持久化；同 Job 内 alias 永久绑定 occurrence，且 alias ownership 由复合 FK 保证。API 按第 6.1 节完整真值表处理：不同 client ID 命中相同 SHA 时必须新增 alias，后续该 alias 上传不同 SHA 必须稳定返回 409。Legacy endpoint 不创建伪造 alias。
 
@@ -1223,7 +1229,7 @@ Preview/Confirm 唯一计划和写入边界：
 |---|---|
 | 2000 行中少量格式错误 | Preview Ready；Error 行保留，Confirm 只写有效计划 |
 | 文件 Schema 不同 | 每文件 Mapping；Blocking 未解决不得 Preview |
-| 文件损坏 | Job 保持 Draft；replace/exclude/retry |
+| 文件损坏 | Job 保持 Draft；exclude/retry |
 | 同 Batch 相同 SHA | 幂等返回已有 occurrence |
 | A+X 后 B+X | 返回同一 occurrence，并持久化 A/B 两个 aliases |
 | A+X 后 A+Y | 409 `IDEMPOTENCY_CONFLICT`，原 alias/occurrence 不变 |
@@ -1333,7 +1339,7 @@ MVP 最终交付：
 |---|---|---|---|---|---|
 | 0 Design Freeze | 本文及根文档同步 | Docs only | 无冲突、唯一 Phase 2 UNKNOWN、独立 commit | 无 | 高 |
 | 1 Bulk Domain | ImportJobFile、client-ID alias、acquisition confirmation Boolean/CHECK、Row FK、Draft/File status、Legacy single-file 兼容桥 | `0004`；无 Web | 历史 backfill、alias 复合 FK/unique、confirmation 合法/非法组合、fresh/repeat/check；Legacy 无伪造 alias 且 confirmation=false；`0004` head 的 Phase 1B 单文件回归 | 0 | 高 |
-| 2 Multi-file Upload | Draft、单文件上传、replace/exclude/retry | API/Service；文件 Worker 入口 | 完整 SHA/client-ID 真值表、A+X/A+X、A+X/B+X、A+X/A+Y 并发、断网、损坏、RBAC | 1 | 中 |
+| 2 Multi-file Upload | Draft、单文件上传、exclude/retry/mapping correction | API/Service；文件 Worker 入口 | 完整 SHA/client-ID 真值表、A+X/A+X、A+X/B+X、A+X/A+Y 并发、断网、损坏、RBAC | 1 | 中 |
 | 3 Parse/Normalize/Dedup | 每文件 Mapping、统一 Batch Context | Processor/Planner/Worker | 4×500、跨文件 hard duplicate、Email 边界 | 2 | 高 |
 | 4 Bulk Repository | 批量预取和写入 | Repository/Planner/Processor | SQL query-count、2k 性能 | 3 | 最高 |
 | 5 Unified Preview | Summary、分页、Change、Screening | API/Worker | 统计不变量、Stale、三态 Screening | 3–4 | 高 |
@@ -1401,7 +1407,7 @@ Gate 数据：
 1. ImportJob 是多文件 Batch aggregate。
 2. 不建 ImportBatch/BatchRow。
 3. 同 Job 相同 SHA 幂等复用 occurrence；跨 Job 重新 Preview。
-4. 坏文件/Mapping failure 保持 Draft，Preview 前可 replace/exclude/retry。
+4. 坏文件/Mapping failure 保持 Draft，Preview 前可 exclude/retry/mapping correction。per-file replace deferred / OUT OF SCOPE。
 5. MVP 单 originating CollectionJob。
 6. Structured screening only，无自由文本/AI 推断。
 7. 新增 per-file source_acquired_at，Preview 后冻结。
@@ -1418,6 +1424,7 @@ Gate 数据：
 18. client-ID alias 表是 Job 范围幂等的唯一权威事实源；一个 occurrence 可有多个 aliases，Legacy occurrence 不伪造 alias，直接完善尚未发布的 0004。
 19. `source_acquired_at_confirmation_required` 是历史 SHA acquisition 待确认状态的唯一 occurrence-level 持久化事实源；历史 SHA + server-default 为 true，普通首次上传、显式时间、PATCH 确认与 Legacy 均为 false，并由 0004 CHECK 约束 true 的合法组合。
 20. `import_task_requests` 是四类 Import task 的唯一 durable lifecycle/outbox 事实源；API 使用 DB-before-publish reservation，Worker 使用 generation/lease，Scheduler 使用 bounded `SKIP LOCKED` reconciliation，业务完成与 task completed 同事务。Redis、Celery metadata、Audit 和业务 `error_code` 都不是恢复真值。
+21. 平台模型保持 platform-neutral architecture；MVP 当前仅启用 `xiaohongshu`。Douyin、Bilibili、TikTok、YouTube 以及其它平台 Connector/enablement 仅在未来 scope，不在本任务范围，不伪造其他平台 identity。
 
 ---
 
@@ -1437,7 +1444,7 @@ Gate 数据：
 
 冻结影响：
 
-- 不阻塞 Task 1–7 的 Bulk Import、Screening 和 Freshness。
+- 不阻塞 Task 1–13 的 Bulk Import、Screening 和 Freshness。
 - 不阻塞系统创建 Queue 和导出数据库真实 Identity。
 - 阻塞“Refresh Queue CSV 可以被灰豚直接批量消费并完成定向刷新”这一外部能力的承诺与验收。
 - 未验证前不得虚构灰豚支持任何一种格式。

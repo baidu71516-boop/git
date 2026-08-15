@@ -77,6 +77,8 @@ V1 推荐 5 个阶段。
 - 保持人工 Confirm 与 Phase 1B Merge 唯一写入路径。
 - 建立可靠的 acquisition time、Freshness 与 Refresh Queue。
 - 刷新回流继续更新 CurrentMetrics 并保留不可变 Snapshot。
+- 平台采用 platform-neutral architecture；当前 Phase 2 仅启用 `xiaohongshu`。
+- Task 2 的文件修复流程仅含 Retry / Exclude / Mapping correction；per-file replace 已确认 deferred / OUT OF SCOPE，不新增替代 endpoint。
 
 实施顺序：
 

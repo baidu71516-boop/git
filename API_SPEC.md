@@ -118,7 +118,13 @@ Screening 结果只允许 `MATCH / NOT_MATCH / UNKNOWN`，只读取本 Batch own
 - `POST /import-jobs/{id}/retry`
 - `POST /import-jobs/{id}/cancel`
 
-冻结设计中的 `POST /import-jobs/{id}/files/{file_id}/replace` 当前尚未实现，不能按现有接口调用；当前可通过 exclude 旧 occurrence 后上传新 occurrence 完成显式替换流程。该状态说明不授权 Task 7 或其他新范围。
+`POST /import-jobs/{id}/files/{file_id}/replace` 在 Phase 2 MVP 中为 deferred/OUT OF SCOPE，不进入本次冻结实现边界。当前真实产品流程为：
+
+- `POST /import-jobs/{id}/files/{file_id}/exclude`
+- `POST /import-jobs/{id}/files/{file_id}/retry`
+- `PUT /import-jobs/{id}/files/{file_id}/mapping`
+
+（通过 `exclude` 后上传新 occurrence 的方式完成文件修复），不新增替代 endpoint。
 
 `0004` 与单文件兼容桥必须同版本上线：现有 `POST /import-jobs` 的新 Job 也创建 position=1 的 ImportJobFile，其 acquisition 为 NULL/origin `legacy_unknown`、`source_acquired_at_confirmation_required=false`，但不创建或伪造 client-ID alias；Parse/Mapping/Preview 同步 occurrence 且新 Row 写入 file FK。这是 Phase 1B 兼容路径，不得用它伪造 observed time；需要 Freshness observation 的新流程使用 Bulk Draft endpoint。
 
@@ -175,7 +181,7 @@ Batch File 状态：
 - failed
 - excluded
 
-`uploaded/parsing/mapping_required/failed` 都是 blocking；只有至少一个 included file 且所有 included files 都为 ready 才能 Preview，否则 Batch 保持 Draft 并返回稳定冲突错误。当前 API 支持用户在 Preview 前 exclude 或 retry；冻结设计中的原位 replace endpoint 尚未实现。第一次成功 Preview 后，文件集合、Mapping 与 `source_acquired_at` 永久冻结。
+`uploaded/parsing/mapping_required/failed` 都是 blocking；只有至少一个 included file 且所有 included files 都为 ready 才能 Preview，否则 Batch 保持 Draft 并返回稳定冲突错误。当前 API 支持用户在 Preview 前 exclude、retry 与 mapping correction。`POST /import-jobs/{id}/files/{file_id}/replace` 仍为 deferred/OUT OF SCOPE，不新增 endpoint。第一次成功 Preview 后，文件集合、Mapping 与 `source_acquired_at` 永久冻结。
 
 Job 级 `POST /retry` 只按持久化 `failed_stage` 恢复：Preview 失败回 `previewing`；已人工确认的 Confirm 失败回 `confirm_queued` 并重用同一 revision；未知 legacy stage 返回 409。
 

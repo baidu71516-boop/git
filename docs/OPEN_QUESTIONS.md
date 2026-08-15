@@ -4,13 +4,13 @@
 
 本文件只保留无法从现有文档、安全规则或保守工程原则推导的外部事实。工程实现细节不作为产品阻塞问题。
 
-Phase 1A–1C 已完成、部署并通过真实服务器 E2E。新的 Phase 2 Task 0 已冻结；下表只有 `PHASE2-UNKNOWN-001` 与当前 Phase 2 直接相关，且不阻塞 Task 1–7。
+Phase 1A–1C 已完成、部署并通过真实服务器 E2E。新的 Phase 2 Task 0 已冻结；下表只有 `PHASE2-UNKNOWN-001` 与当前 Phase 2 直接相关，且不阻塞 Task 1–13。
 
 ## OPEN
 
 | ID | 需要的外部信息 | 最晚确认阶段 | 当前影响 |
 |---|---|---|---|
-| PHASE2-UNKNOWN-001 | 尚未通过真实灰豚产品流程验证：灰豚实际支持使用 platform_user_id、profile_url、handle、nickname 或 external_source_id 中哪一种/哪些字段进行批量重新定位、导入或定向导出。验证前系统只导出数据库真实 Identity，不承诺 CSV 可被灰豚直接消费。 | 冻结“Refresh Queue CSV → 灰豚批量定向刷新”能力前 | 不阻塞 Task 1–7 的 Bulk Import 与 Freshness；阻塞该外部定向刷新能力的冻结与验收 |
+| PHASE2-UNKNOWN-001 | 尚未通过真实灰豚产品流程验证：灰豚实际支持使用 platform_user_id、profile_url、handle、nickname 或 external_source_id 中哪一种/哪些字段进行批量重新定位、导入或定向导出。验证前系统只导出数据库真实 Identity，不承诺 CSV 可被灰豚直接消费。 | 冻结“Refresh Queue CSV → 灰豚批量定向刷新”能力前 | 不阻塞 Task 1–13 的 Bulk Import 与 Freshness；阻塞该外部定向刷新能力的冻结与验收 |
 | OPEN-003 | 实际 AI Provider、模型和生产凭证注入信息 | 未来 AI 能力重新启动前 | 不阻塞当前 Phase 2 |
 | OPEN-004 | Pilot Mailbox 的 SMTP/IMAP 参数及服务端能力 | 未来邮件阶段前 | 不阻塞当前 Phase 2 |
 | OPEN-005 | 生产 HTTPS 证书的签发与续期方案 | 正式公网发布前 | 内部 SSH Tunnel 测试不依赖；不阻塞当前 Phase 2 |
@@ -52,7 +52,7 @@ Phase 1A–1C 已完成、部署并通过真实服务器 E2E。新的 Phase 2 Ta
 | RESOLVED-023 | 生产服务器与生产域名已购买；仅证书、备份目标和告警渠道继续保持 OPEN。 | Phase 5 |
 | RESOLVED-024 | 一个 ImportJob 就是一个多文件 Bulk Batch；通过 ImportJobFile 表达 occurrence，不新增 ImportBatch 或 BatchRow。 | Phase 2 |
 | RESOLVED-025 | 同 Job 相同 SHA 幂等返回已有 occurrence；跨 Job 可复用 Blob，但必须重新 Parse 与 Preview。 | Phase 2 |
-| RESOLVED-026 | 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前允许 replace/exclude/retry，仍有 blocking file 时禁止 Preview。 | Phase 2 |
+| RESOLVED-026 | 坏文件或 Mapping 失败时 Batch 保持 Draft；Preview 前允许 exclude/retry/mapping correction（per-file replace deferred / OUT OF SCOPE），仍有 blocking file 时禁止 Preview。 | Phase 2 |
 | RESOLVED-027 | MVP 一个 ImportJob 只绑定一个 originating CollectionJob，只计算该 Job 的 MATCH/NOT_MATCH/UNKNOWN；多 Collection 匹配延期。 | Phase 2 MVP |
 | RESOLVED-028 | Screening 使用 versioned structured rules；MVP 只用 platform、Source Tag exact、Followers 范围，不从 free text 或 AI 推断，无法判断即 UNKNOWN。 | Phase 2 MVP |
 | RESOLVED-029 | ImportJobFile.source_acquired_at 表示文件实际从来源取得的大致时间；新 Bulk Draft 上传默认服务器接受时间、Preview 前可修改、之后冻结，Legacy 单文件兼容路径不伪造。 | Phase 2 |
@@ -65,5 +65,5 @@ Phase 1A–1C 已完成、部署并通过真实服务器 E2E。新的 Phase 2 Ta
 | RESOLVED-036 | 当前服务器 Worker concurrency=2，Heavy Preview/Confirm 同时最多 1 个，不增加新服务。 | Phase 2 MVP |
 | RESOLVED-037 | 2000 行为 MVP 稳定性能发布 blocker；5000 行为 capacity observation；10000 行为 correctness/no-OOM soak，耗时不阻塞 MVP。 | Phase 2 MVP |
 | RESOLVED-038 | Same-time Metrics 与 Phase 1B Matcher/Merge/Snapshot 语义保持不变，Phase 2 不另建实现。 | Phase 2 |
-| RESOLVED-039 | 已确认保留 `PHASE2-UNKNOWN-001` 及其阻塞边界：不阻塞 Task 1–7，但阻塞“Queue CSV 可直接用于灰豚定向刷新”的承诺；灰豚实际批量定位能力本身仍未验证。 | Phase 2 Full |
+| RESOLVED-039 | 已确认保留 `PHASE2-UNKNOWN-001` 及其阻塞边界：不阻塞 Task 1–13，但阻塞“Queue CSV 可直接用于灰豚定向刷新”的承诺；灰豚实际批量定位能力本身仍未验证。 | Phase 2 Full |
 | RESOLVED-040 | UI-BACKLOG-001 可在 Phase 2 Web Task 实现人类可读粉丝数并保留精确 Tooltip；UI-BACKLOG-002 整体视觉重构继续延期。 | Phase 2 / Future |
