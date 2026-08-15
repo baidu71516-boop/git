@@ -434,6 +434,25 @@ body {
   min-width: 0;
 }
 
+.bulk-screening-rule-summary {
+  display: grid;
+  gap: 4px;
+  margin-top: 12px;
+}
+
+.bulk-screening-rule-summary .ant-btn-link {
+  height: auto;
+  padding: 0;
+}
+
+.screening-rule-range-separator {
+  text-align: center;
+}
+
+.screening-rule-range-field {
+  margin-bottom: 0;
+}
+
 .bulk-job-summary h4,
 .bulk-file-section-heading h5 {
   margin: 4px 0;

@@ -21,6 +21,7 @@ import {
   invalidateRefreshQueueCaches,
   useRefreshQueueDetail,
 } from "@/features/refresh-queues/queries";
+import { ApiClientError } from "@/lib/api/client";
 
 import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
 import type { BulkUploadItem } from "./components/bulk-file-uploader";
@@ -28,6 +29,7 @@ import {
   IMPORT_CANONICAL_FIELDS,
   ImportFieldMappingEditor,
 } from "./components/import-field-mapping-editor";
+import { ScreeningRuleEditorModal } from "./components/screening-rule-editor-modal";
 import {
   AMBIGUOUS_BULK_CREATE_MESSAGE,
   getBulkErrorMessage,
@@ -48,11 +50,13 @@ import {
   useRetryBulkImportJobMutation,
   useUpdateBulkImportFileMappingMutation,
   useUpdateBulkImportFileSourceAcquiredAtMutation,
+  useUpdateCollectionJobScreeningRulesMutation,
   useUploadBulkImportFileMutation,
 } from "./queries";
 import type {
   CollectionJobCreateInput,
   CollectionJobPublic,
+  CollectionJobScreeningRulesUpdatePayload,
   ImportJobFilePublic,
   ImportJobPublic,
   ImportRowCategory,
@@ -151,6 +155,10 @@ export function BulkImportWorkspace({
   const readOnly = role === "viewer";
   const [collectionForm] = Form.useForm<CollectionFormValues>();
   const [collectionModalOpen, setCollectionModalOpen] = useState(false);
+  const [screeningModalOpen, setScreeningModalOpen] = useState(false);
+  const [screeningConflict, setScreeningConflict] = useState(false);
+  const [screeningError, setScreeningError] = useState<string | null>(null);
+  const [screeningReloading, setScreeningReloading] = useState(false);
   const [pendingCollection, setPendingCollection] =
     useState<CollectionJobPublic | null>(null);
   const [creationError, setCreationError] = useState<string | null>(null);
@@ -238,6 +246,8 @@ export function BulkImportWorkspace({
   );
 
   const createCollectionMutation = useCreateCollectionJobMutation();
+  const updateScreeningRulesMutation =
+    useUpdateCollectionJobScreeningRulesMutation();
   const createBulkJobMutation = useCreateBulkImportJobMutation();
   const uploadMutation = useUploadBulkImportFileMutation();
   const updateTimeMutation = useUpdateBulkImportFileSourceAcquiredAtMutation();
@@ -299,6 +309,58 @@ export function BulkImportWorkspace({
       setAmbiguousBulkCreate(false);
     }
     setCollectionModalOpen(true);
+  }
+
+  function openScreeningRules() {
+    if (!collectionQuery.data) return;
+    setScreeningConflict(false);
+    setScreeningError(null);
+    setScreeningModalOpen(true);
+  }
+
+  async function saveScreeningRules(
+    payload: CollectionJobScreeningRulesUpdatePayload,
+  ) {
+    if (!jobId || !collectionQuery.data || readOnly) return;
+    setScreeningConflict(false);
+    setScreeningError(null);
+    try {
+      await updateScreeningRulesMutation.mutateAsync({
+        collectionJobId: collectionQuery.data.id,
+        importJobId: jobId,
+        payload,
+      });
+      setScreeningModalOpen(false);
+      setNotice("筛选规则已保存。");
+    } catch (caught) {
+      if (
+        caught instanceof ApiClientError &&
+        caught.status === 409 &&
+        caught.code === "SCREENING_RULES_REVISION_CONFLICT"
+      ) {
+        setScreeningConflict(true);
+        return;
+      }
+      setScreeningError(
+        getBulkErrorMessage(caught, "筛选规则保存失败，请检查后重试。"),
+      );
+    }
+  }
+
+  async function reloadLatestScreeningRules() {
+    setScreeningReloading(true);
+    setScreeningError(null);
+    try {
+      const result = await collectionQuery.refetch();
+      if (result.isError) throw result.error;
+      setScreeningConflict(false);
+    } catch (caught) {
+      setScreeningError(
+        getBulkErrorMessage(caught, "最新筛选规则加载失败，请重试。"),
+      );
+    } finally {
+      setScreeningReloading(false);
+    }
   }
 
   async function submitCollection(values: CollectionFormValues) {
@@ -767,6 +829,7 @@ export function BulkImportWorkspace({
             : null
         }
         onNewCollection={openNewCollection}
+        onOpenScreeningRules={openScreeningRules}
         onSelectFiles={selectFiles}
         onRetryUpload={retryUpload}
         onEditAcquisitionTime={openAcquisitionTime}
@@ -823,6 +886,26 @@ export function BulkImportWorkspace({
             : null
         }
       />
+
+      {validBulkJob && recoveredJob && collectionQuery.data ? (
+        <ScreeningRuleEditorModal
+          open={screeningModalOpen}
+          collection={collectionQuery.data}
+          readOnly={readOnly}
+          previewReady={recoveredJob.status === "preview_ready"}
+          saving={updateScreeningRulesMutation.isPending}
+          reloading={screeningReloading}
+          conflict={screeningConflict}
+          error={screeningError}
+          onCancel={() => {
+            if (!updateScreeningRulesMutation.isPending) {
+              setScreeningModalOpen(false);
+            }
+          }}
+          onSave={(payload) => void saveScreeningRules(payload)}
+          onReloadLatest={() => void reloadLatestScreeningRules()}
+        />
+      ) : null}
 
       <Modal
         title={pendingCollection ? "继续创建批量采集任务" : "新建采集任务"}

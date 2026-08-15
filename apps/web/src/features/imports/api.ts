@@ -15,6 +15,7 @@ import type {
   RequestBulkPreviewInput,
   UpdateBulkImportFileMappingInput,
   UpdateBulkImportFileSourceAcquiredAtInput,
+  UpdateCollectionJobScreeningRulesInput,
   UploadBulkImportFileInput,
 } from "./types";
 
@@ -26,6 +27,8 @@ export const bulkImportApiPaths = {
   collectionJobs: "/collection-jobs",
   collectionJob: (collectionJobId: string) =>
     `/collection-jobs/${encoded(collectionJobId)}`,
+  collectionJobScreeningRules: (collectionJobId: string) =>
+    `/collection-jobs/${encoded(collectionJobId)}/screening-rules`,
   createBulkJob: "/import-jobs/bulk",
   importJob: (importJobId: string) => `/import-jobs/${encoded(importJobId)}`,
   files: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/files`,
@@ -84,6 +87,17 @@ export async function createCollectionJob(
     { method: "POST", body: jsonBody(payload) },
   );
   return requireData(response.data, "采集任务创建");
+}
+
+export async function updateCollectionJobScreeningRules({
+  collectionJobId,
+  payload,
+}: UpdateCollectionJobScreeningRulesInput): Promise<CollectionJobPublic> {
+  const response = await apiRequest<CollectionJobPublic>(
+    bulkImportApiPaths.collectionJobScreeningRules(collectionJobId),
+    { method: "PUT", body: jsonBody(payload) },
+  );
+  return requireData(response.data, "筛选规则更新");
 }
 
 export async function createBulkImportJob(

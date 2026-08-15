@@ -269,6 +269,19 @@ export type CollectionJobCreateInput = {
   notes?: string | null;
 };
 
+export type CollectionJobScreeningRulesUpdatePayload = {
+  screening_rules: ScreeningRulesV1;
+  follower_min: number | null;
+  follower_max: number | null;
+  expected_revision: number;
+};
+
+export type UpdateCollectionJobScreeningRulesInput = {
+  collectionJobId: string;
+  importJobId: string;
+  payload: CollectionJobScreeningRulesUpdatePayload;
+};
+
 export type CollectionJobPublic = {
   id: string;
   name: string;
