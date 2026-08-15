@@ -184,6 +184,13 @@ class ImportJobPublic(BaseModel):
     updated_at: datetime
 
 
+class ImportJobListPage(BaseModel):
+    items: list[ImportJobPublic]
+    total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1, le=200)
+
+
 class ImportJobFilePublic(BaseModel):
     id: UUID
     import_job_id: UUID

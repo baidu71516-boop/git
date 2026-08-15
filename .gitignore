@@ -20,3 +20,5 @@ build/
 data/imports/*
 !data/imports/.gitkeep
 infrastructure/migrations/versions/__pycache__/
+/.playwright-cli/
+/output/playwright/

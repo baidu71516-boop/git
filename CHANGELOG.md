@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Phase 2 Task 10B — Final Functional Integration
+
+#### Added
+
+- 正常合入最终 UI，并在不回退 Task 6–9 权威 DTO/API 的前提下完成 Web DTO、Query、Presenter 与真实 Backend contract 对齐。
+- 补齐冻结 API 中缺失的 `GET /api/v1/import-jobs`：复用现有 Service/Repository，提供 Department/RBAC scope、稳定 `created_at/id` 倒序分页、typed envelope、严格参数校验与无 business Audit 的 GET 行为。
+- 新增独立 Task 10B E2E Compose 配置及 synthetic fixture 工具；固定独立 project、PostgreSQL/Redis/Storage volumes 与 loopback 宿主端口，不读取或修改开发 `.env`。
+
+#### Integration and Verification
+
+- 在真实 PostgreSQL 16、Redis、API、Celery Worker/Beat、Next.js production runtime 与 Nginx 上完成 Normal Bulk、Freshness、Refresh Queue CSV、Queue-linked Refresh Return、Confirm、Queue fulfillment 与 Freshness re-query 闭环。
+- 真实回流结果为 `fulfilled_changed=1`、`fulfilled_no_change=1`、`stale_return=1`、`pending=2`；队列外行保持 unresolved，错误行不核销 Queue，过期回流不错误刷新 Freshness。
+- Browser E2E 覆盖 Viewer read-only、Contact `***` masking、Department isolation、URL/query/back/direct-detail/refresh、production preview 404，以及长昵称、多标签、两个 PlatformAccount、null owner/contact、unknown/stale/very-stale、中文“万”、manual review 与 error。
+- 没有新增 Migration、没有前端重算 Freshness/Screening/Merge/Refresh Return/Queue completion/Confirm idempotency，也没有实现仍待产品裁决的 per-file replace。
+
 ### Phase 2 Task 9 — Refresh Return Reconciliation
 
 #### Added

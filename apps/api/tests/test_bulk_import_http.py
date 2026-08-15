@@ -1916,6 +1916,75 @@ def test_bulk_file_upload_rejects_invalid_media_and_oversized_file() -> None:
     asyncio.run(scenario())
 
 
+def test_import_job_collection_get_is_scoped_stably_paginated_and_audit_free() -> None:
+    async def scenario() -> None:
+        async with bulk_http_harness() as harness:
+            collection_id = await create_collection(harness.client, name="List primary")
+            first = await create_bulk(harness.client, collection_id)
+            second = await create_bulk(harness.client, collection_id)
+            assert first.status_code == 201, first.text
+            assert second.status_code == 201, second.text
+            primary_ids = [first.json()["data"]["id"], second.json()["data"]["id"]]
+
+            set_context(harness, "cross_department")
+            other_collection_id = await create_collection(harness.client, name="List other")
+            other = await create_bulk(harness.client, other_collection_id)
+            assert other.status_code == 201, other.text
+            other_id = other.json()["data"]["id"]
+
+            jobs = list((await harness.session.scalars(select(ImportJob))).all())
+            tied_created_at = datetime(2026, 8, 15, 8, 0, tzinfo=UTC)
+            for job in jobs:
+                job.created_at = tied_created_at
+            await harness.session.commit()
+
+            audits_before = int(
+                await harness.session.scalar(select(func.count()).select_from(AuditLog)) or 0
+            )
+            set_context(harness, "viewer")
+            first_page = await harness.client.get("/api/v1/import-jobs?offset=0&limit=1")
+            assert first_page.status_code == 200, first_page.text
+            first_data = assert_success_envelope(first_page)["data"]
+            assert [item["id"] for item in first_data["items"]] == [max(primary_ids)]
+            assert first_data["total"] == 2
+            assert first_data["offset"] == 0
+            assert first_data["limit"] == 1
+
+            second_page = await harness.client.get("/api/v1/import-jobs?offset=1&limit=1")
+            assert second_page.status_code == 200, second_page.text
+            second_data = assert_success_envelope(second_page)["data"]
+            assert [item["id"] for item in second_data["items"]] == [min(primary_ids)]
+            assert second_data["total"] == 2
+
+            set_context(harness, "super_admin")
+            admin_page = await harness.client.get("/api/v1/import-jobs?limit=200")
+            assert admin_page.status_code == 200, admin_page.text
+            admin_data = assert_success_envelope(admin_page)["data"]
+            assert admin_data["total"] == 3
+            assert {item["id"] for item in admin_data["items"]} == {
+                *primary_ids,
+                other_id,
+            }
+
+            for suffix in (
+                "?offset=0&offset=1",
+                "?limit=50&limit=100",
+                "?page=1",
+                "?offset=-1",
+                "?limit=0",
+                "?limit=201",
+            ):
+                invalid = await harness.client.get(f"/api/v1/import-jobs{suffix}")
+                assert invalid.status_code == 422, invalid.text
+
+            audits_after = int(
+                await harness.session.scalar(select(func.count()).select_from(AuditLog)) or 0
+            )
+            assert audits_after == audits_before
+
+    asyncio.run(scenario())
+
+
 def _resolve_openapi_schema(
     document: dict[str, Any],
     schema: dict[str, Any],
@@ -1968,6 +2037,7 @@ def _schema_property_names(
 def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
     document = app.openapi()
     paths = document["paths"]
+    list_jobs = paths["/api/v1/import-jobs"]["get"]
     bulk_create = paths["/api/v1/import-jobs/bulk"]["post"]
     upload = paths["/api/v1/import-jobs/{import_job_id}/files"]["post"]
     list_files = paths["/api/v1/import-jobs/{import_job_id}/files"]["get"]
@@ -1985,6 +2055,19 @@ def test_bulk_openapi_has_typed_envelopes_for_file_endpoints() -> None:
     preview = paths["/api/v1/import-jobs/{import_job_id}/preview"]["post"]
     retry_preview = paths["/api/v1/import-jobs/{import_job_id}/retry"]["post"]
     rows = paths["/api/v1/import-jobs/{import_job_id}/rows"]["get"]
+
+    list_jobs_envelope = _response_schema(document, list_jobs, 200)
+    list_jobs_data = _resolve_openapi_schema(
+        document,
+        list_jobs_envelope["properties"]["data"],
+    )
+    assert {"items", "total", "offset", "limit"} <= set(list_jobs_data["properties"])
+    list_jobs_items = _resolve_openapi_schema(
+        document,
+        list_jobs_data["properties"]["items"]["items"],
+    )
+    assert {"id", "department_id", "status", "created_at"} <= set(list_jobs_items["properties"])
+    assert {"200", "401", "422"} <= set(list_jobs["responses"])
 
     bulk_envelope = _response_schema(document, bulk_create, 201)
     bulk_data = _resolve_openapi_schema(document, bulk_envelope["properties"]["data"])

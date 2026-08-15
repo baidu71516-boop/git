@@ -75,12 +75,25 @@ class ImportRepository:
             statement = statement.with_for_update(nowait=nowait)
         return cast(ImportJob | None, await self.session.scalar(statement))
 
-    async def list_import_jobs(self, department_id: UUID | None) -> list[ImportJob]:
+    async def list_import_jobs(
+        self,
+        department_id: UUID | None,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[ImportJob], int]:
         statement = select(ImportJob)
+        count_statement = select(func.count()).select_from(ImportJob)
         if department_id is not None:
             statement = statement.where(ImportJob.department_id == department_id)
-        result = await self.session.scalars(statement.order_by(ImportJob.created_at.desc()))
-        return list(result)
+            count_statement = count_statement.where(ImportJob.department_id == department_id)
+        total = int(await self.session.scalar(count_statement) or 0)
+        result = await self.session.scalars(
+            statement.order_by(ImportJob.created_at.desc(), ImportJob.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        return list(result), total
 
     async def mark_collection_previews_stale(self, collection_job_id: UUID) -> int:
         result = cast(

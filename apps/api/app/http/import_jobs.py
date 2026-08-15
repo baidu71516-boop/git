@@ -15,6 +15,7 @@ from backend_core.imports.schemas import (
     ImportDispatchResult,
     ImportJobFilePublic,
     ImportJobFileUploadResult,
+    ImportJobListPage,
     ImportJobPublic,
     ImportMappingUpdate,
     ImportPreviewInput,
@@ -43,6 +44,7 @@ from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 router = APIRouter(prefix="/api/v1/import-jobs", tags=["import-jobs"])
 logger = logging.getLogger(__name__)
 IMPORT_ROWS_QUERY_PARAMETERS = frozenset({"offset", "limit", "action", "category"})
+IMPORT_JOB_LIST_QUERY_PARAMETERS = frozenset({"offset", "limit"})
 
 
 def _error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
@@ -158,6 +160,37 @@ def validate_import_rows_query(request: Request) -> None:
         )
 
 
+def validate_import_job_list_query(request: Request) -> None:
+    """Reject unknown or repeated collection-list pagination parameters."""
+
+    unexpected = sorted(set(request.query_params) - IMPORT_JOB_LIST_QUERY_PARAMETERS)
+    if unexpected:
+        name = unexpected[0]
+        raise RequestValidationError(
+            [
+                {
+                    "type": "extra_forbidden",
+                    "loc": ("query", name),
+                    "msg": "Extra inputs are not permitted",
+                    "input": request.query_params.get(name),
+                }
+            ]
+        )
+    for name in IMPORT_JOB_LIST_QUERY_PARAMETERS:
+        if len(request.query_params.getlist(name)) > 1:
+            raise RequestValidationError(
+                [
+                    {
+                        "type": "value_error",
+                        "loc": ("query", name),
+                        "msg": "Value error, query parameter must not be repeated",
+                        "input": None,
+                        "ctx": {"error": ValueError("query parameter must not be repeated")},
+                    }
+                ]
+            )
+
+
 def _log_dispatch_failure(
     *,
     import_job_id: UUID,
@@ -243,6 +276,33 @@ async def create_bulk_import_job(
         refresh_queue_id=payload.refresh_queue_id,
     )
     return envelope(request, data=ImportJobPublic.model_validate(job))
+
+
+@router.get(
+    "",
+    response_model=SuccessEnvelope[ImportJobListPage],
+    responses=_error_responses(401, 422),
+    dependencies=[Depends(validate_import_job_list_query)],
+)
+async def list_import_jobs(
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[ImportService, Depends(get_import_service)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict[str, Any]:
+    jobs, total = await service.list_import_jobs(
+        context,
+        offset=offset,
+        limit=limit,
+    )
+    page = ImportJobListPage(
+        items=[ImportJobPublic.model_validate(job) for job in jobs],
+        total=total,
+        offset=offset,
+        limit=limit,
+    )
+    return envelope(request, data=page)
 
 
 @router.post(

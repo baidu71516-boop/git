@@ -1388,9 +1388,19 @@ class ImportService:
         await self.session.commit()
         return record
 
-    async def list_import_jobs(self, context: AuthContext) -> list[ImportJob]:
+    async def list_import_jobs(
+        self,
+        context: AuthContext,
+        *,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[ImportJob], int]:
         department_id = None if context.role == Role.SUPER_ADMIN else context.department.id
-        return await self.repository.list_import_jobs(department_id)
+        return await self.repository.list_import_jobs(
+            department_id,
+            offset=offset,
+            limit=limit,
+        )
 
     async def get_import_job(self, context: AuthContext, import_job_id: UUID) -> ImportJob:
         job = await self.repository.get_import_job(import_job_id)

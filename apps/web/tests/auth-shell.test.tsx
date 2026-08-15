@@ -175,6 +175,43 @@ describe("AuthShell", () => {
     ).toBe(true);
   });
 
+  it("lets a Viewer without an Operator read imports while keeping mutations disabled", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "只读部",
+              status: "active",
+            },
+            operator: null,
+            role: "viewer",
+            expires_at: "2026-08-12T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/collection-jobs")) {
+          return response([]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("imports");
+
+    expect(
+      await screen.findByText("只读角色不能上传或确认导入。"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /新建采集任务/ })).toBeDisabled();
+    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/operators"),
+      ),
+    ).toBe(false);
+  });
+
   it("keeps Operator selection mandatory for Refresh Queue mutations", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")

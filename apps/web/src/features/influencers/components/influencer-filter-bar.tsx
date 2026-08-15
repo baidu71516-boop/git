@@ -248,9 +248,7 @@ export function InfluencerFilterBar({
                 onChange={(value: string | undefined) =>
                   onChange({
                     requires_refresh:
-                      value === "true" || value === "false"
-                        ? value
-                        : undefined,
+                      value === "true" || value === "false" ? value : undefined,
                   })
                 }
                 options={refreshNeedOptions}
