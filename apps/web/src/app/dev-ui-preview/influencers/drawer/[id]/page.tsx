@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import { DevInfluencerDetailDrawerPreview } from "@/features/influencers/influencer-detail-drawer-preview";
+import { InfluencerPreviewWorkspace } from "@/features/influencers/influencer-preview-workspace";
 import { getInfluencerPreviewDetailById } from "@/features/influencers/preview-fixtures";
 
 export default async function DevInfluencerDetailDrawerPreviewPage({
@@ -20,9 +20,9 @@ export default async function DevInfluencerDetailDrawerPreviewPage({
   }
 
   return (
-    <DevInfluencerDetailDrawerPreview
-      detail={detail}
-      backHref="/dev-ui-preview/influencers/drawer"
+    <InfluencerPreviewWorkspace
+      openInfluencerId={id}
+      closeDrawerHref="/dev-ui-preview/influencers"
     />
   );
 }

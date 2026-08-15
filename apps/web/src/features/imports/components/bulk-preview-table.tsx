@@ -14,6 +14,7 @@ import {
   getPreviewCategoryLabel,
   presentPreviewRow,
 } from "../preview-presenters";
+import { presentRefreshReturnEvidence } from "../refresh-return-presenters";
 import type {
   ImportJobFilePublic,
   ImportRowCategory,
@@ -53,6 +54,24 @@ function screeningTagColor(tone: string): string | undefined {
   return undefined;
 }
 
+function refreshReturnTagColor(presentation: {
+  tone: string;
+  badgeTone?: string;
+}): string | undefined {
+  if (presentation.badgeTone === "expected-change") return "blue";
+  if (presentation.badgeTone === "expected-no-change") return "success";
+  if (
+    presentation.badgeTone === "stale" ||
+    presentation.badgeTone === "unresolved"
+  )
+    return "warning";
+  return undefined;
+}
+
+function refreshReturnTagClass(presentation: { badgeTone?: string }): string {
+  return presentation.badgeTone ? `is-${presentation.badgeTone}` : "is-neutral";
+}
+
 function categoryCount(
   summary: UnifiedPreviewSummary | null,
   category: ImportRowCategory,
@@ -81,6 +100,7 @@ export type BulkPreviewTableProps = {
   category: ImportRowCategory;
   loading: boolean;
   error: string | null;
+  refreshReturn?: boolean;
   onCategoryChange: (category: ImportRowCategory) => void;
   onOffsetChange: (offset: number) => void;
   onSelectRow: (row: ImportRowPublic) => void;
@@ -97,6 +117,7 @@ export function BulkPreviewTable({
   category,
   loading,
   error,
+  refreshReturn = false,
   onCategoryChange,
   onOffsetChange,
   onSelectRow,
@@ -208,6 +229,31 @@ export function BulkPreviewTable({
     },
   ];
 
+  if (refreshReturn) {
+    columns.splice(3, 0, {
+      title: "回流预览",
+      key: "refresh-return",
+      width: 156,
+      render: (_, row) => {
+        const presentation = presentRefreshReturnEvidence(
+          row.merge_plan?.refresh_return,
+        );
+        return presentation ? (
+          <Tag
+            className={`bulk-preview-refresh-return-badge ${refreshReturnTagClass(
+              presentation,
+            )}`}
+            color={refreshReturnTagColor(presentation)}
+          >
+            {presentation.label}
+          </Tag>
+        ) : (
+          <Text type="secondary">—</Text>
+        );
+      },
+    });
+  }
+
   const categoryOptions = categories.map((value) => {
     const count = categoryCount(summary, value);
     return {
@@ -281,7 +327,7 @@ export function BulkPreviewTable({
         loading={loading}
         pagination={false}
         locale={{ emptyText }}
-        scroll={{ x: 1040 }}
+        scroll={{ x: refreshReturn ? 1200 : 1040 }}
         onRow={(row) => ({
           onClick: () => onSelectRow(row),
           className: "bulk-preview-table-row",

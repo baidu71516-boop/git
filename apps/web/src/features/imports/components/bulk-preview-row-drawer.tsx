@@ -1,6 +1,11 @@
 import { Drawer, Tag, Typography } from "antd";
 
+import { formatBulkDateTime } from "../formatters";
 import { presentPreviewRow } from "../preview-presenters";
+import {
+  presentRefreshReturnEvidence,
+  refreshReturnReasonLabel,
+} from "../refresh-return-presenters";
 import type { ImportJobFilePublic, ImportRowPublic } from "../types";
 
 const { Text, Title } = Typography;
@@ -8,8 +13,24 @@ const { Text, Title } = Typography;
 function tagColor(tone: string): string | undefined {
   if (tone === "success") return "success";
   if (tone === "warning") return "warning";
-  if (tone === "danger") return "error";
-  if (tone === "processing") return "processing";
+  return undefined;
+}
+
+function refreshReturnTagClass(presentation: { badgeTone?: string }): string {
+  return presentation.badgeTone ? `is-${presentation.badgeTone}` : "is-neutral";
+}
+
+function refreshReturnTagColor(presentation: {
+  tone: string;
+  badgeTone?: string;
+}): string | undefined {
+  if (presentation.badgeTone === "expected-change") return "blue";
+  if (presentation.badgeTone === "expected-no-change") return "success";
+  if (
+    presentation.badgeTone === "stale" ||
+    presentation.badgeTone === "unresolved"
+  )
+    return "warning";
   return undefined;
 }
 
@@ -50,6 +71,7 @@ export type BulkPreviewRowDrawerProps = {
   open: boolean;
   row: ImportRowPublic | null;
   files: readonly ImportJobFilePublic[];
+  refreshReturn?: boolean;
   onClose: () => void;
 };
 
@@ -57,6 +79,7 @@ export function BulkPreviewRowDrawer({
   open,
   row,
   files,
+  refreshReturn = false,
   onClose,
 }: BulkPreviewRowDrawerProps) {
   if (!row) return null;
@@ -69,12 +92,14 @@ export function BulkPreviewRowDrawer({
   const changeBuckets = presented.changeSummary.filter(
     (bucket) => bucket.items.length > 0,
   );
+  const refreshEvidence = refreshReturn ? row.merge_plan?.refresh_return : null;
+  const refreshPresentation = presentRefreshReturnEvidence(refreshEvidence);
 
   return (
     <Drawer
       rootClassName="bulk-preview-row-drawer"
       open={open}
-      width={740}
+      size={740}
       title={
         <div className="bulk-preview-drawer-title">
           <div className="bulk-preview-drawer-title-name">
@@ -210,6 +235,55 @@ export function BulkPreviewRowDrawer({
                 </section>
               ))}
             </div>
+          </section>
+        ) : null}
+
+        {refreshEvidence && refreshPresentation ? (
+          <section className="bulk-preview-drawer-section">
+            <SectionTitle title="更新回流" />
+            <dl className="bulk-preview-detail-list">
+              <div>
+                <dt>回流预览结果</dt>
+                <dd>
+                  <Tag
+                    className={`bulk-preview-refresh-return-tag ${refreshReturnTagClass(
+                      refreshPresentation,
+                    )}`}
+                    color={refreshReturnTagColor(refreshPresentation)}
+                  >
+                    {refreshPresentation.label}
+                  </Tag>
+                </dd>
+              </div>
+              <div>
+                <dt>回流判断原因</dt>
+                <dd>
+                  <Text
+                    type="secondary"
+                    className="bulk-preview-refresh-return-reason"
+                  >
+                    {refreshReturnReasonLabel(refreshEvidence.reason)}
+                  </Text>
+                </dd>
+              </div>
+              {file?.source_acquired_at ? (
+                <div>
+                  <dt>数据取得时间</dt>
+                  <dd>{formatBulkDateTime(file.source_acquired_at)}</dd>
+                </div>
+              ) : null}
+              <div>
+                <dt>是否为本次有效回流行</dt>
+                <dd>
+                  <Text className="bulk-preview-refresh-return-reason">
+                    {refreshEvidence.is_last_return_claimant ? "是" : "否"}
+                  </Text>
+                </dd>
+              </div>
+            </dl>
+            {refreshPresentation.explanation ? (
+              <Text type="secondary">{refreshPresentation.explanation}</Text>
+            ) : null}
           </section>
         ) : null}
 

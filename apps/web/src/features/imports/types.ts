@@ -58,6 +58,8 @@ export type RefreshReturnReason =
 export type RefreshReturnRowOutcome =
   "pending" | "outside_queue" | "expected_fulfillment" | "terminal_item";
 
+export type RefreshReturnExpectedStatus = RefreshQueueItemStatus;
+
 export type PreviewRowLocator = {
   import_job_file_id: string;
   file_position: number;
@@ -69,7 +71,7 @@ export type RefreshReturnRowEvidence = {
   locator: PreviewRowLocator;
   outcome: RefreshReturnRowOutcome;
   queue_item_id: string | null;
-  expected_status: RefreshQueueItemStatus | null;
+  expected_status: RefreshReturnExpectedStatus | null;
   reason: RefreshReturnReason;
   is_last_return_claimant: boolean;
 };

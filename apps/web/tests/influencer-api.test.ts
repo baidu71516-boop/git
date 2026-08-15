@@ -34,12 +34,19 @@ describe("influencer list API", () => {
       ...query,
       q: `  ${query.q}  `,
       ignored: "must-not-be-sent",
-    } as typeof query & { ignored: string });
+      sort: "freshness_status",
+      freshness_sort: "desc",
+    } as typeof query & {
+      ignored: string;
+      sort: string;
+      freshness_sort: string;
+    });
     const url = new URL(path, "https://example.invalid");
 
     expect(url.pathname).toBe("/influencers");
     expect(Object.fromEntries(url.searchParams)).toEqual(query);
     expect(path).not.toContain("ignored");
+    expect(path).not.toContain("sort");
     expect(influencerListQueryKey(query)).toEqual([
       "influencers",
       "list",

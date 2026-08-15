@@ -1,7 +1,8 @@
 "use client";
 
 import { Card, Space } from "antd";
-import { useMemo } from "react";
+import { useRouter } from "next/navigation";
+import { useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { PageHeader } from "@/components/ui/page-header";
@@ -11,14 +12,24 @@ import { InfluencerPagination } from "./components/influencer-pagination";
 import { InfluencerTable } from "./components/influencer-table";
 import {
   createInfluencerPreviewItems,
+  createInfluencerPreviewDetailItems,
   influencerPreviewCrmStages,
   influencerPreviewOwners,
 } from "./preview-fixtures";
+import { DevInfluencerDetailDrawer } from "./influencer-detail-drawer-preview";
 
 const noOperation = () => undefined;
 
-export function InfluencerPreviewWorkspace() {
+export function InfluencerPreviewWorkspace({
+  openInfluencerId,
+  closeDrawerHref = "/dev-ui-preview/influencers",
+}: {
+  openInfluencerId?: string;
+  closeDrawerHref?: string;
+}) {
+  const router = useRouter();
   const items = useMemo(() => createInfluencerPreviewItems(), []);
+  const details = useMemo(() => createInfluencerPreviewDetailItems(), []);
   const tags = useMemo(
     () =>
       Array.from(
@@ -30,6 +41,24 @@ export function InfluencerPreviewWorkspace() {
       ),
     [items],
   );
+  const detailById = useMemo(
+    () => new Map(details.map((detail) => [detail.id, detail])),
+    [details],
+  );
+  const [openId, setOpenId] = useState<string | null>(openInfluencerId ?? null);
+  const isLauncher = openInfluencerId !== undefined;
+  const openDetail = openId ? detailById.get(openId) : null;
+
+  const openDrawerFromList = (id: string) => {
+    setOpenId(id);
+  };
+
+  const closeDrawer = () => {
+    setOpenId(null);
+    if (isLauncher) {
+      void router.push(closeDrawerHref);
+    }
+  };
 
   return (
     <AppShell
@@ -64,7 +93,11 @@ export function InfluencerPreviewWorkspace() {
 
         <Card variant="borderless" className="influencer-list-card">
           <Space orientation="vertical" size="middle" className="full-width">
-            <InfluencerTable items={items} />
+            <InfluencerTable
+              items={items}
+              detailHrefPrefix="/dev-ui-preview/influencers/drawer"
+              onOpenDetail={openDrawerFromList}
+            />
             <InfluencerPagination
               page={1}
               pageSize={50}
@@ -73,6 +106,13 @@ export function InfluencerPreviewWorkspace() {
             />
           </Space>
         </Card>
+        {openDetail ? (
+          <DevInfluencerDetailDrawer
+            detail={openDetail}
+            open
+            onClose={closeDrawer}
+          />
+        ) : null}
       </section>
     </AppShell>
   );

@@ -155,6 +155,8 @@ export type InfluencerDetail = {
   avatar_url?: string | null;
   status: "active";
   crm_stage: string;
+  freshness_status: FreshnessStatus;
+  requires_refresh: boolean;
   owner: OwnerSummary | null;
   created_at: string;
   updated_at: string;
@@ -163,8 +165,6 @@ export type InfluencerDetail = {
   source_states: SourceStateDetail[];
   source_identities: SourceIdentityDetail[];
   current_metrics: CurrentMetricsDetail[];
-  freshness_status: FreshnessStatus;
-  requires_refresh: boolean;
 };
 
 export type MetricSnapshotItem = {

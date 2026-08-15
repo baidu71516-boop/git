@@ -14,6 +14,11 @@ import type {
   ImportRowCategory,
   ScreeningResult,
 } from "@/features/imports/types";
+import {
+  presentRefreshReturnEvidence,
+  refreshReturnReasonLabel,
+} from "@/features/imports/refresh-return-presenters";
+import type { RefreshReturnReason } from "@/features/imports/types";
 
 function rowInput(
   overrides: Partial<PreviewRowPresentationInput> = {},
@@ -82,6 +87,89 @@ describe("unified Preview presentation mappings", () => {
       expect(getPreviewCategoryLabel(value)).toBe(label);
     }
     expect(getPreviewCategoryLabel("constructor")).toBe("全部");
+  });
+});
+
+describe("refresh return presentation mappings", () => {
+  it("maps every closed Backend reason without exposing raw enums", () => {
+    const expected: Array<[RefreshReturnReason, string]> = [
+      ["ROW_NOT_OWNER_EFFECTIVE", "非本次有效数据行"],
+      ["ROW_NOT_UNIQUELY_MATCHED", "未唯一匹配账号"],
+      ["ROW_ACTION_STAYS_PENDING", "本行不会推进回流状态"],
+      ["QUEUE_ITEM_NOT_FOUND", "未找到对应名单条目"],
+      ["QUEUE_ITEM_TERMINAL", "名单条目已有最终结果"],
+      ["MISSING_RETURN", "缺少回流数据"],
+      ["MULTIPLE_OWNER_ROWS", "多行同时指向同一名单条目"],
+      ["ACTION_CHANGE_SUMMARY_MISMATCH", "处理结果与变更摘要不一致"],
+      ["ACTION_NOT_FULFILLABLE", "当前处理结果无法核销回流"],
+      ["ACQUISITION_CONFIRMATION_REQUIRED", "数据取得时间待确认"],
+      ["ACQUISITION_MISSING", "缺少数据取得时间"],
+      ["ACQUISITION_NOT_NEWER_THAN_BASELINE", "回流数据时间不晚于名单基准"],
+      ["NO_CHANGE_BASELINE_MISSING", "缺少可比较的历史基准"],
+      ["EFFECTIVE_CHANGES", "检测到有效变更"],
+      ["RELIABLE_NO_CHANGE", "已确认无有效变更"],
+    ];
+
+    for (const [reason, label] of expected) {
+      expect(refreshReturnReasonLabel(reason)).toBe(label);
+    }
+  });
+
+  it("keeps Preview evidence distinct from final Queue status wording", () => {
+    const base = {
+      locator: {
+        import_job_file_id: "file-1",
+        file_position: 1,
+        row_number: 2,
+        import_row_id: "row-1",
+      },
+      queue_item_id: "item-1",
+      reason: "EFFECTIVE_CHANGES" as const,
+      is_last_return_claimant: true,
+    };
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "expected_fulfillment",
+        expected_status: "fulfilled_changed",
+      })?.label,
+    ).toBe("预计有变更");
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "expected_fulfillment",
+        expected_status: "fulfilled_no_change",
+      })?.label,
+    ).toBe("预计无变更");
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "expected_fulfillment",
+        expected_status: "stale_return",
+      })?.label,
+    ).toBe("回流数据已过期");
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "expected_fulfillment",
+        expected_status: "unresolved",
+      })?.label,
+    ).toBe("需要进一步确认");
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "outside_queue",
+        queue_item_id: null,
+        expected_status: null,
+      })?.label,
+    ).toBe("不属于当前更新名单");
+    expect(
+      presentRefreshReturnEvidence({
+        ...base,
+        outcome: "terminal_item",
+        expected_status: "fulfilled_changed",
+      })?.label,
+    ).toBe("已有最终回流结果");
   });
 });
 

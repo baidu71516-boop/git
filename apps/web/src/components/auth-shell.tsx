@@ -19,6 +19,8 @@ import { useCallback, useEffect, useState } from "react";
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
 import { DataCollectionWorkspace } from "@/features/imports/data-collection-workspace";
+import { RefreshQueueDetail } from "@/features/refresh-queues/refresh-queue-detail";
+import { RefreshQueueList } from "@/features/refresh-queues/refresh-queue-list";
 import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
@@ -60,14 +62,26 @@ const roleLabels: Record<Role, string> = {
   viewer: "只读成员",
 };
 
-type AuthWorkspace = "imports" | "influencers";
+type AuthWorkspace = "imports" | "influencers" | "refresh-queues";
+
+function workspaceRequiresOperator(
+  workspace: AuthWorkspace,
+  role: Role,
+): boolean {
+  return (
+    workspace === "imports" ||
+    (workspace === "refresh-queues" && role !== "viewer")
+  );
+}
 
 export function AuthShell({
   workspace = "imports",
   influencerId,
+  refreshQueueId,
 }: {
   workspace?: AuthWorkspace;
   influencerId?: string;
+  refreshQueueId?: string;
 }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -75,7 +89,9 @@ export function AuthShell({
   const [operators, setOperators] = useState<Operator[]>([]);
   const [auth, setAuth] = useState<AuthMe | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const requiresOperator = workspace === "imports";
+  const requiresOperator = auth
+    ? workspaceRequiresOperator(workspace, auth.role)
+    : false;
 
   const loadDepartments = useCallback(async () => {
     const response = await apiRequest<Department[]>("/departments");
@@ -92,8 +108,18 @@ export function AuthShell({
       try {
         const response = await apiRequest<AuthMe>("/auth/me");
         setAuth(response.data);
-        if (requiresOperator && !response.data?.operator) {
+        if (
+          response.data &&
+          workspaceRequiresOperator(workspace, response.data.role) &&
+          !response.data.operator
+        ) {
           await loadOperators();
+        }
+        if (
+          workspace === "refresh-queues" &&
+          response.data?.role === "super_admin"
+        ) {
+          await loadDepartments();
         }
       } catch (caught) {
         if (!(caught instanceof ApiClientError) || caught.status !== 401) {
@@ -105,7 +131,7 @@ export function AuthShell({
       }
     }
     void initialize();
-  }, [loadDepartments, loadOperators, requiresOperator]);
+  }, [loadDepartments, loadOperators, workspace]);
 
   async function handleLogin(values: LoginValues) {
     setSubmitting(true);
@@ -117,8 +143,18 @@ export function AuthShell({
       });
       const meResponse = await apiRequest<AuthMe>("/auth/me");
       setAuth(meResponse.data);
-      if (requiresOperator && !meResponse.data?.operator) {
+      if (
+        meResponse.data &&
+        workspaceRequiresOperator(workspace, meResponse.data.role) &&
+        !meResponse.data.operator
+      ) {
         await loadOperators();
+      }
+      if (
+        workspace === "refresh-queues" &&
+        meResponse.data?.role === "super_admin"
+      ) {
+        await loadDepartments();
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "登录失败");
@@ -223,7 +259,15 @@ export function AuthShell({
   }
 
   const title =
-    workspace === "imports" ? "数据采集" : influencerId ? "达人详情" : "达人库";
+    workspace === "imports"
+      ? "数据采集"
+      : workspace === "refresh-queues"
+        ? refreshQueueId
+          ? "数据更新名单"
+          : "数据更新"
+        : influencerId
+          ? "达人详情"
+          : "达人库";
 
   return (
     <AppShell
@@ -246,6 +290,20 @@ export function AuthShell({
         ) : (
           <InfluencerWorkspace />
         )
+      ) : workspace === "refresh-queues" ? (
+        auth.role === "viewer" || auth.operator ? (
+          refreshQueueId ? (
+            <RefreshQueueDetail queueId={refreshQueueId} role={auth.role} />
+          ) : (
+            <RefreshQueueList
+              role={auth.role}
+              departments={departments.filter(
+                (department) => department.status === "active",
+              )}
+              currentDepartmentId={auth.department.id}
+            />
+          )
+        ) : null
       ) : auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />
       ) : null}

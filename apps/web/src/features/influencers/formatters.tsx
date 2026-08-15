@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
 
-import type { CurrentMetricsSummary, JsonValue } from "./types";
+import type {
+  CurrentMetricsSummary,
+  FreshnessStatus,
+  JsonValue,
+} from "./types";
 
 const integerFormatter = new Intl.NumberFormat("zh-CN", {
   maximumFractionDigits: 0,
@@ -73,6 +77,17 @@ const crmStagePresentation: Record<string, { label: string; color?: string }> =
     已结束: { label: "已结束" },
   };
 
+const freshnessPresentation: Record<
+  FreshnessStatus,
+  { label: string; tone: FreshnessStatus }
+> = {
+  fresh: { label: "新鲜", tone: "fresh" },
+  aging: { label: "较旧", tone: "aging" },
+  stale: { label: "陈旧", tone: "stale" },
+  very_stale: { label: "严重陈旧", tone: "very_stale" },
+  unknown: { label: "未知", tone: "unknown" },
+};
+
 const shanghaiDateTime = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -123,6 +138,32 @@ export function crmStageDisplay(value: string | null | undefined): {
 } {
   if (!value) return { label: "未设置" };
   return crmStagePresentation[value] ?? { label: value };
+}
+
+export function freshnessDisplay(value: FreshnessStatus | null): {
+  label: string;
+  tone: FreshnessStatus;
+} {
+  if (value === null) return { label: "未知", tone: "unknown" };
+  return freshnessPresentation[value];
+}
+
+export function freshnessExplanation(
+  value: FreshnessStatus | null,
+  requiresRefresh: boolean,
+): string | null {
+  if (value !== "unknown") return null;
+  return requiresRefresh
+    ? "暂无可靠采集记录，建议加入数据更新名单。"
+    : "暂无可参与当前灰豚更新流程的数据。";
+}
+
+export function freshnessSupportText(
+  value: FreshnessStatus | null,
+  requiresRefresh: boolean,
+): string | null {
+  if (value !== "unknown") return null;
+  return requiresRefresh ? "暂无可靠采集记录" : "暂无可更新数据";
 }
 
 export function latestMetricsTimestamp(

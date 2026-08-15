@@ -4,6 +4,7 @@ import type {
   CurrentMetricsDetail,
   InfluencerDetail,
   InfluencerListItem,
+  FreshnessStatus,
   OwnerSummary,
   SourceIdentityDetail,
   SourceStateDetail,
@@ -62,10 +63,11 @@ function previewDetailMetric(
   platformAccountId: string,
   followers: number | null,
   sourceUpdatedAt: string | null,
+  source = "huitun",
 ): CurrentMetricsDetail {
   return {
     platform_account_id: platformAccountId,
-    source: "huitun",
+    source,
     source_updated_at: sourceUpdatedAt,
     metrics: {
       followers_count: followers,
@@ -120,6 +122,11 @@ type PreviewItemInput = {
   contacts?: Array<"email" | "phone">;
   owner?: OwnerSummary | null;
   metricsUpdatedAt?: string | null;
+  freshnessStatus?: FreshnessStatus;
+  requiresRefresh?: boolean;
+  freshnessAgeDays?: number | null;
+  observedAt?: string | null;
+  importedAt?: string | null;
 };
 
 type PreviewDetailInput = {
@@ -133,12 +140,20 @@ type PreviewDetailInput = {
   accountCount?: number;
   updatedAt?: string | null;
   metricsUpdatedAt?: string | null;
+  freshnessStatus?: FreshnessStatus;
+  requiresRefresh?: boolean;
+  freshnessAgeDays?: number | null;
+  observedAt?: string | null;
+  importedAt?: string | null;
 };
 
 function previewItem(input: PreviewItemInput): InfluencerListItem {
   const suffix = String(input.row).padStart(3, "0");
   const influencerId = `00000000-0000-0000-0000-000000000${suffix}`;
   const accountId = `00000000-0000-0000-0000-000000001${suffix}`;
+  const hasEligibleHuitunAccount = !(
+    input.freshnessStatus === "unknown" && input.requiresRefresh === false
+  );
   return {
     id: influencerId,
     display_name: input.name,
@@ -153,20 +168,20 @@ function previewItem(input: PreviewItemInput): InfluencerListItem {
         account_name: `${input.name}账号`,
         account_handle: `ui-preview-${input.row}`,
         profile_url: null,
-        source: "huitun",
+        source: hasEligibleHuitunAccount ? "huitun" : "generic",
         is_active: true,
         source_tags: input.tags,
-        last_huitun_observed_at: null,
-        last_huitun_imported_at: null,
-        freshness_status: "unknown",
-        freshness_age_days: null,
-        requires_refresh: true,
+        last_huitun_observed_at: input.observedAt ?? null,
+        last_huitun_imported_at: input.importedAt ?? null,
+        freshness_status: input.freshnessStatus ?? "unknown",
+        freshness_age_days: input.freshnessAgeDays ?? null,
+        requires_refresh: input.requiresRefresh ?? false,
       },
     ],
     current_metrics: [
       {
         platform_account_id: accountId,
-        source: "huitun",
+        source: hasEligibleHuitunAccount ? "huitun" : "generic",
         source_updated_at: input.metricsUpdatedAt ?? null,
         followers_count: input.followers,
       },
@@ -175,8 +190,8 @@ function previewItem(input: PreviewItemInput): InfluencerListItem {
       previewContact(input.row, type),
     ),
     possible_duplicate_contact: false,
-    freshness_status: "unknown",
-    requires_refresh: true,
+    freshness_status: input.freshnessStatus ?? "unknown",
+    requires_refresh: input.requiresRefresh ?? false,
     created_at: "2026-08-01T00:00:00.000Z",
     updated_at: "2026-08-01T00:00:00.000Z",
   };
@@ -189,6 +204,9 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     String(index + 1).padStart(3, "0"),
   );
   const platforms = ["xiaohongshu", "douyin", "kuaishou"];
+  const hasEligibleHuitunAccount = !(
+    input.freshnessStatus === "unknown" && input.requiresRefresh === false
+  );
 
   const platformAccounts = accountIds.map((index, idx) => ({
     id: `00000000-0000-0000-0000-000000001${suffix}${index}`,
@@ -197,14 +215,14 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     account_name: `${input.name}账号${idx + 1}`,
     account_handle: `handle-${input.row}-${index}`,
     profile_url: null,
-    source: "huitun",
+    source: hasEligibleHuitunAccount ? "huitun" : "generic",
     is_active: idx === 0,
     source_tags: input.tags,
-    last_huitun_observed_at: null,
-    last_huitun_imported_at: null,
-    freshness_status: idx === 0 ? ("unknown" as const) : null,
-    freshness_age_days: null,
-    requires_refresh: idx === 0,
+    last_huitun_observed_at: input.observedAt ?? null,
+    last_huitun_imported_at: input.importedAt ?? null,
+    freshness_status: input.freshnessStatus ?? "unknown",
+    freshness_age_days: input.freshnessAgeDays ?? null,
+    requires_refresh: input.requiresRefresh ?? false,
     bio: null,
     gender: null,
     region_raw: null,
@@ -223,6 +241,7 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
           ? Math.floor((input.followers ?? 0) * 0.5)
           : null,
       input.metricsUpdatedAt ?? null,
+      hasEligibleHuitunAccount ? "huitun" : "generic",
     ),
   );
 
@@ -232,17 +251,21 @@ function createPreviewDetail(input: PreviewDetailInput): InfluencerDetail {
     status: "active",
     crm_stage: input.stage ?? "",
     owner: input.owner ?? null,
+    freshness_status: input.freshnessStatus ?? "unknown",
+    requires_refresh: input.requiresRefresh ?? false,
     created_at: "2026-08-01T08:00:00.000Z",
     updated_at: input.updatedAt ?? "2026-08-01T08:00:00.000Z",
     platform_accounts: platformAccounts,
     contacts:
       input.contacts?.map((type) => previewDetailContact(input.row, type)) ??
       [],
-    source_states: previewSourceStates(input.row),
-    source_identities: previewSourceIdentities(input.row),
+    source_states: hasEligibleHuitunAccount
+      ? previewSourceStates(input.row)
+      : [],
+    source_identities: hasEligibleHuitunAccount
+      ? previewSourceIdentities(input.row)
+      : [],
     current_metrics: metrics,
-    freshness_status: "unknown",
-    requires_refresh: true,
   };
 }
 
@@ -258,6 +281,10 @@ export function createInfluencerPreviewItems(
       contacts: [],
       owner: activeOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 0),
+      freshnessStatus: "fresh",
+      freshnessAgeDays: 0,
+      observedAt: timestampDaysAgo(now, 0),
+      importedAt: timestampDaysAgo(now, 0),
     }),
     previewItem({
       row: 2,
@@ -267,6 +294,10 @@ export function createInfluencerPreviewItems(
       crmStage: "待开发",
       contacts: ["email"],
       metricsUpdatedAt: timestampDaysAgo(now, 1),
+      freshnessStatus: "aging",
+      freshnessAgeDays: 12,
+      observedAt: timestampDaysAgo(now, 12),
+      importedAt: timestampDaysAgo(now, 1),
     }),
     previewItem({
       row: 3,
@@ -277,6 +308,11 @@ export function createInfluencerPreviewItems(
       contacts: ["phone"],
       owner: secondOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 3),
+      freshnessStatus: "stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 45,
+      observedAt: timestampDaysAgo(now, 45),
+      importedAt: timestampDaysAgo(now, 3),
     }),
     previewItem({
       row: 4,
@@ -287,6 +323,11 @@ export function createInfluencerPreviewItems(
       contacts: ["email", "phone"],
       owner: activeOwner,
       metricsUpdatedAt: "2026-05-18T06:30:00.000Z",
+      freshnessStatus: "very_stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 95,
+      observedAt: "2026-05-10T06:30:00.000Z",
+      importedAt: "2026-05-18T06:30:00.000Z",
     }),
     previewItem({
       row: 5,
@@ -296,6 +337,8 @@ export function createInfluencerPreviewItems(
       crmStage: "已回复",
       contacts: [],
       metricsUpdatedAt: null,
+      freshnessStatus: "unknown",
+      requiresRefresh: true,
     }),
     previewItem({
       row: 6,
@@ -305,6 +348,8 @@ export function createInfluencerPreviewItems(
       contacts: ["email"],
       owner: secondOwner,
       metricsUpdatedAt: null,
+      freshnessStatus: "unknown",
+      requiresRefresh: false,
     }),
     previewItem({
       row: 7,
@@ -315,6 +360,10 @@ export function createInfluencerPreviewItems(
       contacts: ["phone"],
       owner: activeOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 5),
+      freshnessStatus: "fresh",
+      freshnessAgeDays: 5,
+      observedAt: timestampDaysAgo(now, 5),
+      importedAt: timestampDaysAgo(now, 5),
     }),
     previewItem({
       row: 8,
@@ -324,6 +373,11 @@ export function createInfluencerPreviewItems(
       crmStage: "潜在合作",
       contacts: ["email", "phone"],
       metricsUpdatedAt: "2026-06-20T11:20:00.000Z",
+      freshnessStatus: "stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 54,
+      observedAt: "2026-06-20T11:20:00.000Z",
+      importedAt: "2026-06-20T11:20:00.000Z",
     }),
   ];
 }
@@ -339,6 +393,10 @@ export function createInfluencerPreviewDetailItems(
       tags: [],
       owner: activeOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 0),
+      freshnessStatus: "fresh",
+      freshnessAgeDays: 0,
+      observedAt: timestampDaysAgo(now, 0),
+      importedAt: timestampDaysAgo(now, 0),
     }),
     createPreviewDetail({
       row: 2,
@@ -349,6 +407,10 @@ export function createInfluencerPreviewDetailItems(
       contacts: ["email"],
       owner: activeOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 1),
+      freshnessStatus: "aging",
+      freshnessAgeDays: 12,
+      observedAt: timestampDaysAgo(now, 12),
+      importedAt: timestampDaysAgo(now, 1),
     }),
     createPreviewDetail({
       row: 3,
@@ -360,6 +422,11 @@ export function createInfluencerPreviewDetailItems(
       owner: secondOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 3),
       accountCount: 2,
+      freshnessStatus: "stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 45,
+      observedAt: timestampDaysAgo(now, 45),
+      importedAt: timestampDaysAgo(now, 3),
     }),
     createPreviewDetail({
       row: 4,
@@ -371,6 +438,11 @@ export function createInfluencerPreviewDetailItems(
       owner: activeOwner,
       metricsUpdatedAt: null,
       updatedAt: "2026-05-18T06:30:00.000Z",
+      freshnessStatus: "very_stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 95,
+      observedAt: "2026-05-10T06:30:00.000Z",
+      importedAt: "2026-05-18T06:30:00.000Z",
     }),
     createPreviewDetail({
       row: 5,
@@ -379,6 +451,8 @@ export function createInfluencerPreviewDetailItems(
       tags: ["旅行"],
       owner: null,
       metricsUpdatedAt: null,
+      freshnessStatus: "unknown",
+      requiresRefresh: true,
     }),
     createPreviewDetail({
       row: 6,
@@ -389,6 +463,8 @@ export function createInfluencerPreviewDetailItems(
       contacts: ["email"],
       owner: secondOwner,
       metricsUpdatedAt: null,
+      freshnessStatus: "unknown",
+      requiresRefresh: false,
     }),
     createPreviewDetail({
       row: 7,
@@ -399,6 +475,10 @@ export function createInfluencerPreviewDetailItems(
       contacts: ["phone"],
       owner: activeOwner,
       metricsUpdatedAt: timestampDaysAgo(now, 5),
+      freshnessStatus: "fresh",
+      freshnessAgeDays: 5,
+      observedAt: timestampDaysAgo(now, 5),
+      importedAt: timestampDaysAgo(now, 5),
     }),
     createPreviewDetail({
       row: 8,
@@ -410,6 +490,11 @@ export function createInfluencerPreviewDetailItems(
       owner: activeOwner,
       metricsUpdatedAt: "2026-06-20T11:20:00.000Z",
       accountCount: 3,
+      freshnessStatus: "stale",
+      requiresRefresh: true,
+      freshnessAgeDays: 54,
+      observedAt: "2026-06-20T11:20:00.000Z",
+      importedAt: "2026-06-20T11:20:00.000Z",
     }),
   ];
 }

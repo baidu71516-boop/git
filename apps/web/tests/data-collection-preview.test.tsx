@@ -172,4 +172,57 @@ describe("development data collection visual preview", () => {
     ).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   }, 20_000);
+
+  it("covers refresh return Preview, stale/unresolved Drawer, Confirm, and completed result in memory", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    render(<BulkImportPreviewWorkspace />);
+    fireEvent.click(screen.getByText("更新回流预览"));
+
+    expect(screen.getByLabelText("更新名单回流")).toBeInTheDocument();
+    expect(screen.getAllByText("更新回流预览").length).toBeGreaterThan(1);
+    expect(
+      screen.getByRole("columnheader", { name: "回流预览" }),
+    ).toBeInTheDocument();
+    expect(
+      within(previewRow("夏日防晒小美")).getByText("回流数据已过期"),
+    ).toBeInTheDocument();
+    expect(
+      within(previewRow("身份冲突达人")).getByText("需要进一步确认"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(previewRow("夏日防晒小美")).getByRole("button", {
+        name: "查看",
+      }),
+    );
+    const drawer = await screen.findByRole("dialog", {
+      name: /夏日防晒小美/,
+    });
+    expect(within(drawer).getByText("更新回流")).toBeInTheDocument();
+    expect(
+      within(drawer).getByText(/本次数据可以继续参与正常导入/),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: "关闭预览数据详情" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+    const confirm = await screen.findByRole("dialog", {
+      name: "确认导入这批数据？",
+    });
+    expect(
+      within(confirm).getByText(/不会阻止其他有效数据导入/),
+    ).toBeInTheDocument();
+    fireEvent.click(within(confirm).getByRole("button", { name: /取\s*消/ }));
+
+    fireEvent.click(screen.getByText("更新回流完成"));
+    expect(await screen.findByText("更新名单回流结果")).toBeInTheDocument();
+    expect(screen.getByText("已回流 · 有变更")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "查看更新名单" }),
+    ).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalled();
+  }, 20_000);
 });

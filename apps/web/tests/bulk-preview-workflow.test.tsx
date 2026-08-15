@@ -24,6 +24,7 @@ import type {
   ScreeningResult,
   UnifiedPreviewSummary,
 } from "@/features/imports/types";
+import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 
 const collection: CollectionJobPublic = {
   id: "collection-1",
@@ -146,6 +147,65 @@ function makeSummary(
 }
 
 const summary = makeSummary();
+
+const refreshReturnSummary = {
+  schema_version: 1 as const,
+  row_count: 75,
+  queue_item_count: 6,
+  matched_row_count: 70,
+  outside_queue_row_count: 2,
+  pending_row_count: 3,
+  queue_items_with_return_count: 5,
+  queue_items_without_return_count: 1,
+  expected_fulfilled_changed_count: 1,
+  expected_fulfilled_no_change_count: 1,
+  expected_stale_return_count: 1,
+  expected_unresolved_count: 1,
+  unchanged_terminal_item_count: 1,
+  conflict_item_count: 1,
+  missing_queue_item_ids: ["queue-item-missing"],
+};
+
+function makeRefreshQueueDetail(
+  status: "exported" | "completed" = "exported",
+): RefreshQueueDetail {
+  return {
+    queue: {
+      id: "queue-1",
+      department_id: "department-1",
+      created_by_operator_id: "operator-1",
+      status,
+      as_of: "2026-08-01T00:00:00Z",
+      requested_limit: 6,
+      today_total_limit: 10,
+      refresh_limit: 6,
+      policy_version: 1,
+      criteria_snapshot: {},
+      created_at: "2026-08-14T00:00:00Z",
+      updated_at: "2026-08-14T03:00:00Z",
+      exported_at: "2026-08-14T01:00:00Z",
+      completed_at: status === "completed" ? "2026-08-14T03:00:00Z" : null,
+      cancelled_at: null,
+    },
+    summary: {
+      requested: 6,
+      selected: 6,
+      unique_influencers: 6,
+      freshness_breakdown: { stale: 6 },
+      priority_breakdown: { "3": 6 },
+      status_breakdown:
+        status === "completed"
+          ? { fulfilled_changed: 3, fulfilled_no_change: 3 }
+          : {
+              fulfilled_changed: 1,
+              fulfilled_no_change: 1,
+              stale_return: 1,
+              unresolved: 1,
+              pending: 2,
+            },
+    },
+  };
+}
 
 function makeJob(overrides: Partial<ImportJobPublic> = {}): ImportJobPublic {
   return {
@@ -404,10 +464,12 @@ type MutationRouter = (
 function installBulkApi({
   getJob = () => makeJob(),
   getRows = () => page(),
+  getRefreshQueue,
   mutation,
 }: {
   getJob?: () => ImportJobPublic;
   getRows?: (params: URLSearchParams) => ImportRowsPage;
+  getRefreshQueue?: () => RefreshQueueDetail;
   mutation?: MutationRouter;
 }) {
   return vi
@@ -440,6 +502,13 @@ function installBulkApi({
         url.pathname === "/api/v1/import-jobs/job-1/rows"
       ) {
         return success(getRows(url.searchParams));
+      }
+      if (
+        method === "GET" &&
+        url.pathname === "/api/v1/refresh-queues/queue-1" &&
+        getRefreshQueue
+      ) {
+        return success(getRefreshQueue());
       }
       throw new Error(`Unexpected request: ${method} ${rawUrl}`);
     });
@@ -530,6 +599,7 @@ describe("Bulk unified preview review", () => {
 
     expect(await screen.findByText("白桃汽水")).toBeInTheDocument();
     expect(screen.getByText("核心结果")).toBeInTheDocument();
+    expect(screen.queryByText("更新回流预览")).not.toBeInTheDocument();
     expect(screen.getAllByText("筛选结果").length).toBeGreaterThan(0);
     const firstRequest = rowsRequests(fetchSpy)[0];
     expect(firstRequest?.searchParams.toString()).toBe(
@@ -632,6 +702,145 @@ describe("Bulk unified preview review", () => {
       screen.queryByRole("button", { name: "确认导入" }),
     ).not.toBeInTheDocument();
     expect(mutationRequests(fetchSpy, "/confirm")).toHaveLength(0);
+  });
+
+  it("presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking", async () => {
+    const staleRow = makeRow({
+      merge_plan: {
+        ...makeRow().merge_plan,
+        refresh_return: {
+          locator: {
+            import_job_file_id: file.id,
+            file_position: 1,
+            row_number: 28,
+            import_row_id: "row-update",
+          },
+          outcome: "expected_fulfillment",
+          queue_item_id: "queue-item-1",
+          expected_status: "stale_return",
+          reason: "ACQUISITION_NOT_NEWER_THAN_BASELINE",
+          is_last_return_claimant: true,
+        },
+      },
+    });
+    const unresolvedRow = actionRow(
+      "row-6",
+      "身份冲突",
+      "manual_review",
+      "MATCH",
+    );
+    unresolvedRow.merge_plan = {
+      ...unresolvedRow.merge_plan,
+      refresh_return: {
+        locator: {
+          import_job_file_id: file.id,
+          file_position: 1,
+          row_number: unresolvedRow.row_number,
+          import_row_id: unresolvedRow.id,
+        },
+        outcome: "expected_fulfillment",
+        queue_item_id: "queue-item-2",
+        expected_status: "unresolved",
+        reason: "MULTIPLE_OWNER_ROWS",
+        is_last_return_claimant: true,
+      },
+    };
+    installBulkApi({
+      getJob: () =>
+        makeJob({
+          refresh_queue_id: "queue-1",
+          preview_summary: makeSummary({
+            refresh_return: refreshReturnSummary,
+          }),
+        }),
+      getRows: () => page([staleRow, unresolvedRow]),
+      getRefreshQueue: () => makeRefreshQueueDetail(),
+    });
+
+    renderBulk();
+
+    expect(await screen.findByText("更新名单回流")).toBeInTheDocument();
+    expect(await screen.findByText("更新回流预览")).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "回流预览" }),
+    ).toBeInTheDocument();
+    expect(
+      within(previewTableRow("白桃汽水")).getByText("回流数据已过期"),
+    ).toBeInTheDocument();
+    expect(
+      within(previewTableRow("身份冲突")).getByText("需要进一步确认"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(previewTableRow("白桃汽水")).getByRole("button", {
+        name: "查看",
+      }),
+    );
+    const drawer = await screen.findByRole("dialog", { name: /白桃汽水/ });
+    expect(within(drawer).getByText("更新回流")).toBeInTheDocument();
+    expect(
+      within(drawer).getByText("回流数据时间不晚于名单基准"),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByText(/本次数据可以继续参与正常导入/),
+    ).toBeInTheDocument();
+    expect(
+      within(drawer).getByText("是否为本次有效回流行"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: "关闭预览数据详情" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+    const modal = await screen.findByRole("dialog", {
+      name: "确认导入这批数据？",
+    });
+    expect(within(modal).getByText("更新回流预览")).toBeInTheDocument();
+    expect(
+      within(modal).getByText(/不会阻止其他有效数据导入/),
+    ).toBeInTheDocument();
+    expect(
+      within(modal).getByRole("button", { name: "确认导入" }),
+    ).toBeEnabled();
+  });
+
+  it("shows final return counts only from the refetched Queue detail", async () => {
+    installBulkApi({
+      getJob: () =>
+        makeJob({
+          refresh_queue_id: "queue-1",
+          status: "completed",
+          completed_at: "2026-08-14T03:00:00Z",
+          preview_summary: makeSummary({
+            refresh_return: refreshReturnSummary,
+          }),
+          result: {
+            import_job_id: "job-1",
+            preview_revision: 4,
+            created_rows: 20,
+            updated_rows: 10,
+            no_change_rows: 40,
+            skipped_rows: 2,
+            error_rows: 1,
+            manual_review_rows: 2,
+          },
+        }),
+      getRefreshQueue: () => makeRefreshQueueDetail("completed"),
+    });
+
+    renderBulk();
+
+    expect(await screen.findByText("更新名单回流结果")).toBeInTheDocument();
+    const result = screen.getByLabelText("更新名单回流结果");
+    expect(within(result).getByText("已回流 · 有变更")).toBeInTheDocument();
+    expect(within(result).getAllByText("3")).toHaveLength(2);
+    expect(screen.getByRole("link", { name: "查看更新名单" })).toHaveAttribute(
+      "href",
+      "/refresh-queues/queue-1",
+    );
+    expect(
+      screen.getByRole("link", { name: "查看达人库" }),
+    ).toBeInTheDocument();
   });
 });
 
