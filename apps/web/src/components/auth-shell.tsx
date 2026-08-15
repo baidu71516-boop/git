@@ -69,7 +69,7 @@ function workspaceRequiresOperator(
   role: Role,
 ): boolean {
   return (
-    workspace === "imports" ||
+    (workspace === "imports" && role !== "viewer") ||
     (workspace === "refresh-queues" && role !== "viewer")
   );
 }
@@ -304,7 +304,7 @@ export function AuthShell({
             />
           )
         ) : null
-      ) : auth.operator ? (
+      ) : auth.role === "viewer" || auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />
       ) : null}
 
