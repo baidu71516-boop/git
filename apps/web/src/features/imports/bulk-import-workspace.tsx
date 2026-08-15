@@ -324,6 +324,9 @@ export function BulkImportWorkspace({
     if (!jobId || !collectionQuery.data || readOnly) return;
     setScreeningConflict(false);
     setScreeningError(null);
+    const hasActivePreview =
+      recoveredJob?.preview_revision !== undefined &&
+      recoveredJob.preview_revision > 0;
     try {
       await updateScreeningRulesMutation.mutateAsync({
         collectionJobId: collectionQuery.data.id,
@@ -331,7 +334,11 @@ export function BulkImportWorkspace({
         payload,
       });
       setScreeningModalOpen(false);
-      setNotice("筛选规则已保存。");
+      setNotice(
+        hasActivePreview
+          ? "筛选规则已更新，请重新生成数据预览。"
+          : "筛选规则已更新",
+      );
     } catch (caught) {
       if (
         caught instanceof ApiClientError &&
@@ -892,7 +899,7 @@ export function BulkImportWorkspace({
           open={screeningModalOpen}
           collection={collectionQuery.data}
           readOnly={readOnly}
-          previewReady={recoveredJob.status === "preview_ready"}
+          previewReady={recoveredJob.preview_revision > 0}
           saving={updateScreeningRulesMutation.isPending}
           reloading={screeningReloading}
           conflict={screeningConflict}

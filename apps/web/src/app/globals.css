@@ -428,6 +428,7 @@ body {
   justify-content: space-between;
   gap: 24px;
   padding: 18px 20px;
+  flex-wrap: wrap;
 }
 
 .bulk-job-summary-copy {
@@ -443,6 +444,41 @@ body {
 .bulk-screening-rule-summary .ant-btn-link {
   height: auto;
   padding: 0;
+}
+
+.bulk-screening-rule-summary-header {
+  margin-bottom: -2px;
+}
+
+.bulk-screening-rule-summary-line {
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.screening-rule-preview-hint {
+  color: #ad5700;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: inline-block;
+  align-self: flex-start;
+  line-height: 1.4;
+}
+
+.screening-rule-readonly-summary .ant-descriptions-item-label {
+  width: 80px;
+  color: #6b7a90;
+}
+
+.screening-rule-readonly-summary .ant-descriptions-item-content {
+  color: #1f2d3d;
+}
+
+.screening-rule-readonly-summary .ant-descriptions-item-label,
+.screening-rule-readonly-summary .ant-descriptions-item-content {
+  padding-bottom: 6px;
 }
 
 .screening-rule-range-separator {

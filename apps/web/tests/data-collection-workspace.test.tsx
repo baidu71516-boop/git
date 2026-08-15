@@ -529,13 +529,15 @@ describe("DataCollectionWorkspace", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "查看筛选规则",
     });
-    expect(screen.getByText("筛选规则摘要")).toBeInTheDocument();
-    expect(screen.getByText(/平台：小红书/)).toBeInTheDocument();
-    expect(screen.getByText(/来源标签：未设置/)).toBeInTheDocument();
-    expect(screen.getByText(/粉丝范围：不限/)).toBeInTheDocument();
-    expect(screen.getByText(/规则版本：1/)).toBeInTheDocument();
-    expect(within(dialog).getByLabelText("小红书")).toBeChecked();
-    expect(within(dialog).getByLabelText("来源标签")).toBeDisabled();
+    expect(screen.getByText("筛选规则")).toBeInTheDocument();
+    expect(screen.getByText("平台")).toBeInTheDocument();
+    expect(screen.getByText("小红书")).toBeInTheDocument();
+    expect(screen.getByText("来源标签")).toBeInTheDocument();
+    expect(screen.getByText("未设置")).toBeInTheDocument();
+    expect(screen.getByText("粉丝范围")).toBeInTheDocument();
+    expect(screen.getByText("不限")).toBeInTheDocument();
+    expect(screen.getByText("规则版本")).toBeInTheDocument();
+    expect(within(dialog).getByText("1")).toBeInTheDocument();
     expect(
       within(dialog).queryByRole("button", { name: "保存筛选规则" }),
     ).not.toBeInTheDocument();
@@ -595,10 +597,7 @@ describe("DataCollectionWorkspace", () => {
     expect(
       within(dialog).getByText("保存后，当前数据预览将失效，需要重新生成。"),
     ).toBeInTheDocument();
-    fireEvent.change(within(dialog).getByLabelText("来源标签"), {
-      target: { value: "美妆\n护肤" },
-    });
-    fireEvent.change(within(dialog).getByPlaceholderText("最低粉丝（不限）"), {
+    fireEvent.change(within(dialog).getAllByRole("spinbutton")[0], {
       target: { value: "10000" },
     });
     fireEvent.click(
@@ -616,14 +615,16 @@ describe("DataCollectionWorkspace", () => {
         screening_rules: {
           schema_version: 1,
           platforms: ["xiaohongshu"],
-          source_tags_exact_any: ["美妆", "护肤"],
+          source_tags_exact_any: [],
         },
         follower_min: 10_000,
         follower_max: null,
         expected_revision: 1,
       });
     });
-    expect(await screen.findByText("筛选规则已保存。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("筛选规则已更新，请重新生成数据预览。"),
+    ).toBeInTheDocument();
     expect(await screen.findByText("数据预览需要重新生成")).toBeInTheDocument();
 
     const requestPaths = fetchSpy.mock.calls.map(([input]) => String(input));
@@ -694,9 +695,13 @@ describe("DataCollectionWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "重新加载最新规则" }));
     await waitFor(() => expect(collectionReads).toBeGreaterThan(1));
     await waitFor(() =>
-      expect(screen.getByLabelText("来源标签")).toHaveValue("护肤"),
+      expect(
+        within(screen.getByRole("dialog")).queryByText("未设置"),
+      ).not.toBeInTheDocument(),
     );
-    expect(screen.getByDisplayValue("3")).toBeDisabled();
+    expect(
+      within(screen.getByRole("dialog")).getByText("3"),
+    ).toBeInTheDocument();
     expect(
       fetchSpy.mock.calls.filter(([, init]) => init?.method === "PUT"),
     ).toHaveLength(1);
