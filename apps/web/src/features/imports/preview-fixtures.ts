@@ -17,6 +17,7 @@ export type BulkPreviewScenarioKey =
   | "no_job"
   | "no_files"
   | "mixed_files"
+  | "screening_rules_editable"
   | "screening_rules_readonly"
   | "screening_rules_conflict"
   | "failed"
@@ -766,6 +767,14 @@ export function createBulkPreviewScenarios(): BulkPreviewScenario[] {
       job: createJob(),
       collection,
       files: mixedFiles,
+      rows: [],
+    },
+    {
+      key: "screening_rules_editable",
+      label: "筛选规则可编辑",
+      job: createJob(),
+      collection,
+      files: [],
       rows: [],
     },
     {
