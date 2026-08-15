@@ -35,6 +35,17 @@ function previewRow(name: string): HTMLElement {
   return row as HTMLElement;
 }
 
+function selectPreviewScenario(label: string) {
+  const combobox = screen.getByRole("combobox");
+  fireEvent.mouseDown(combobox);
+  fireEvent.change(combobox, { target: { value: label } });
+  const option = screen
+    .getAllByText(label)
+    .find((element) => element.closest(".ant-select-item-option"));
+  expect(option).toBeDefined();
+  fireEvent.click(option as HTMLElement);
+}
+
 describe("development data collection visual preview", () => {
   it("returns notFound outside development", () => {
     vi.stubEnv("NODE_ENV", "production");
@@ -55,7 +66,7 @@ describe("development data collection visual preview", () => {
     expect(screen.getByText("共 51 条")).toBeInTheDocument();
     expect(screen.getByText("符合条件 46")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("多文件处理中"));
+    selectPreviewScenario("多文件处理中");
     expect(screen.getByText("灰豚_美妆达人_第一批.csv")).toBeInTheDocument();
     expect(screen.getByText("需要字段映射")).toBeInTheDocument();
     expect(screen.getByText("处理失败")).toBeInTheDocument();
@@ -140,7 +151,7 @@ describe("development data collection visual preview", () => {
     render(<BulkImportPreviewWorkspace />);
     fireEvent.click(screen.getByRole("radio", { name: /^错误/ }));
 
-    fireEvent.click(screen.getByText("数据预览需重建"));
+    selectPreviewScenario("数据预览需重建");
     expect(screen.getByText("数据预览需要重新生成")).toBeInTheDocument();
     expect(
       screen.getByLabelText("已过期的数据预览，只读参考"),
@@ -149,20 +160,20 @@ describe("development data collection visual preview", () => {
       screen.queryByRole("button", { name: "确认导入" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("任务失败"));
+    selectPreviewScenario("任务失败");
     expect(screen.getByText("任务处理失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /重\s*试/ })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("确认任务排队中"));
+    selectPreviewScenario("确认任务排队中");
     expect(screen.getByText("正在准备导入")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "确认导入" }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("导入中"));
+    selectPreviewScenario("导入中");
     expect(screen.getByText("正在导入")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("导入完成"));
+    selectPreviewScenario("导入完成");
     const resultSection = document.querySelector(
       ".bulk-preview-completed-result",
     );
@@ -178,7 +189,7 @@ describe("development data collection visual preview", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
 
     render(<BulkImportPreviewWorkspace />);
-    fireEvent.click(screen.getByText("更新回流预览"));
+    selectPreviewScenario("更新回流预览");
 
     expect(screen.getByLabelText("更新名单回流")).toBeInTheDocument();
     expect(screen.getAllByText("更新回流预览").length).toBeGreaterThan(1);
@@ -217,7 +228,7 @@ describe("development data collection visual preview", () => {
     ).toBeInTheDocument();
     fireEvent.click(within(confirm).getByRole("button", { name: /取\s*消/ }));
 
-    fireEvent.click(screen.getByText("更新回流完成"));
+    selectPreviewScenario("更新回流完成");
     expect(await screen.findByText("更新名单回流结果")).toBeInTheDocument();
     expect(screen.getByText("已回流 · 有变更")).toBeInTheDocument();
     expect(

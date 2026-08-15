@@ -2,6 +2,7 @@
 
 import {
   DatabaseOutlined,
+  HistoryOutlined,
   LogoutOutlined,
   MenuOutlined,
   SyncOutlined,
@@ -42,6 +43,11 @@ const navGroups = [
         label: "数据采集",
         href: "/",
         icon: <DatabaseOutlined aria-hidden="true" />,
+      },
+      {
+        label: "导入记录",
+        href: "/import-jobs",
+        icon: <HistoryOutlined aria-hidden="true" />,
       },
       {
         label: "数据更新",

@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from "react";
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
 import { DataCollectionWorkspace } from "@/features/imports/data-collection-workspace";
+import { ImportJobHistory } from "@/features/imports/import-job-history";
 import { RefreshQueueDetail } from "@/features/refresh-queues/refresh-queue-detail";
 import { RefreshQueueList } from "@/features/refresh-queues/refresh-queue-list";
 import { AppShell } from "@/components/app-shell";
@@ -62,7 +63,8 @@ const roleLabels: Record<Role, string> = {
   viewer: "只读成员",
 };
 
-type AuthWorkspace = "imports" | "influencers" | "refresh-queues";
+type AuthWorkspace =
+  "imports" | "import-jobs" | "influencers" | "refresh-queues";
 
 function workspaceRequiresOperator(
   workspace: AuthWorkspace,
@@ -261,13 +263,15 @@ export function AuthShell({
   const title =
     workspace === "imports"
       ? "数据采集"
-      : workspace === "refresh-queues"
-        ? refreshQueueId
-          ? "数据更新名单"
-          : "数据更新"
-        : influencerId
-          ? "达人详情"
-          : "达人库";
+      : workspace === "import-jobs"
+        ? "导入记录"
+        : workspace === "refresh-queues"
+          ? refreshQueueId
+            ? "数据更新名单"
+            : "数据更新"
+          : influencerId
+            ? "达人详情"
+            : "达人库";
 
   return (
     <AppShell
@@ -290,6 +294,8 @@ export function AuthShell({
         ) : (
           <InfluencerWorkspace />
         )
+      ) : workspace === "import-jobs" ? (
+        <ImportJobHistory />
       ) : workspace === "refresh-queues" ? (
         auth.role === "viewer" || auth.operator ? (
           refreshQueueId ? (

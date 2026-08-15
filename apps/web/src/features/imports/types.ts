@@ -340,6 +340,13 @@ export type ImportJobPublic = {
   updated_at: string;
 };
 
+export type ImportJobListPage = {
+  items: ImportJobPublic[];
+  total: number;
+  offset: number;
+  limit: number;
+};
+
 export type ImportJobFilePublic = {
   id: string;
   import_job_id: string;

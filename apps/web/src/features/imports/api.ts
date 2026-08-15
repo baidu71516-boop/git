@@ -9,6 +9,7 @@ import type {
   ImportDispatchResult,
   ImportJobFilePublic,
   ImportJobFileUploadResult,
+  ImportJobListPage,
   ImportJobPublic,
   ImportRowsPage,
   ListBulkImportRowsInput,
@@ -117,6 +118,20 @@ export async function getImportJob(
     bulkImportApiPaths.importJob(importJobId),
   );
   return requireData(response.data, "批量文件处理任务");
+}
+
+export async function listImportJobs(
+  offset: number,
+  limit: number,
+): Promise<ImportJobListPage> {
+  const query = new URLSearchParams({
+    offset: String(offset),
+    limit: String(limit),
+  });
+  const response = await apiRequest<ImportJobListPage>(
+    `/import-jobs?${query.toString()}`,
+  );
+  return requireData(response.data, "导入记录列表");
 }
 
 export async function listBulkImportFiles(

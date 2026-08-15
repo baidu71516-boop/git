@@ -33,7 +33,7 @@ function response(data: unknown) {
 }
 
 function renderAuthenticatedShell(
-  workspace: "imports" | "influencers" | "refresh-queues",
+  workspace: "imports" | "import-jobs" | "influencers" | "refresh-queues",
   influencerId?: string,
 ) {
   const queryClient = new QueryClient({
@@ -211,6 +211,63 @@ describe("AuthShell", () => {
       ),
     ).toBe(false);
   });
+
+  it.each(["viewer", "operator", "manager", "super_admin"] as const)(
+    "lets an authenticated %s without an Operator read Import Job history in Backend scope",
+    async (role) => {
+      const fetchMock = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/auth/me")) {
+            return response({
+              department: {
+                id: "department-1",
+                name: "数据部",
+                status: "active",
+              },
+              operator: null,
+              role,
+              expires_at: "2026-08-12T00:00:00Z",
+            });
+          }
+          if (url.endsWith("/import-jobs?offset=0&limit=50")) {
+            return response({ items: [], total: 0, offset: 0, limit: 50 });
+          }
+          throw new Error(
+            `Unexpected request: ${url} ${init?.method ?? "GET"}`,
+          );
+        });
+
+      renderAuthenticatedShell("import-jobs");
+
+      expect(await screen.findByText("暂无导入记录")).toBeInTheDocument();
+      expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
+      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      expect(screen.getByRole("link", { name: /导入记录/ })).toHaveAttribute(
+        "href",
+        "/import-jobs",
+      );
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).endsWith("/operators"),
+        ),
+      ).toBe(false);
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).endsWith("/departments"),
+        ),
+      ).toBe(false);
+      expect(
+        fetchMock.mock.calls.every(
+          ([input]) => String(input).includes("department_id=") === false,
+        ),
+      ).toBe(true);
+      expect(fetchMock.mock.calls.every(([, init]) => !init?.method)).toBe(
+        true,
+      );
+    },
+  );
 
   it("keeps Operator selection mandatory for Refresh Queue mutations", async () => {
     const fetchMock = vi
