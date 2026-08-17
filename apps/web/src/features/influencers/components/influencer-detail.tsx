@@ -206,7 +206,7 @@ function PlatformMetricGrid({
           `${account.id}-requires-refresh`,
         )}
         {rowItem(
-          "指标更新时间",
+          metric?.source === "huitun" ? "灰豚来源更新时间" : "来源数据更新时间",
           metric?.source_updated_at
             ? formatMetricsTimestamp(metric.source_updated_at)
             : "—",

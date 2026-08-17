@@ -15,6 +15,8 @@ export const INFLUENCER_QUERY_PARAMETERS = [
   "followers_max",
   "owner_operator_id",
   "crm_stage",
+  "contact_filter",
+  "notes_60d_filter",
   "freshness_status",
   "requires_refresh",
   "last_huitun_observed_before",

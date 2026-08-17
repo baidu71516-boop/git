@@ -22,6 +22,8 @@ describe("influencer list API", () => {
       followers_max: "10000",
       owner_operator_id: "00000000-0000-0000-0000-000000000001",
       crm_stage: "高意向",
+      contact_filter: "has_email",
+      notes_60d_filter: "zero",
       freshness_status: "stale",
       requires_refresh: "true",
       last_huitun_observed_before: "2026-08-14T00:00:00+08:00",

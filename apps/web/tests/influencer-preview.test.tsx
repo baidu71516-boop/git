@@ -171,7 +171,7 @@ describe("development influencer visual preview", () => {
 
     const needRefreshButton = within(
       unknownNeedRefreshRow as HTMLTableRowElement,
-    ).getByRole("button", { name: "查看" });
+    ).getByRole("button", { name: "详情" });
 
     fireEvent.click(needRefreshButton);
 
@@ -199,7 +199,7 @@ describe("development influencer visual preview", () => {
 
     const noRefreshButton = within(
       unknownNoRefreshRow as HTMLTableRowElement,
-    ).getByRole("button", { name: "查看" });
+    ).getByRole("button", { name: "详情" });
 
     fireEvent.click(noRefreshButton);
 

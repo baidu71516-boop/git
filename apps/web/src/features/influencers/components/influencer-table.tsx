@@ -1,6 +1,6 @@
 "use client";
 
-import { Table, Tag, Typography } from "antd";
+import { Space, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
 import type { ReactNode } from "react";
@@ -213,7 +213,7 @@ function buildColumns(
         ),
     },
     {
-      title: "指标更新时间",
+      title: "来源数据更新时间",
       key: "metrics_updated_at",
       width: 140,
       render: (_, item) => {
@@ -232,14 +232,31 @@ function buildColumns(
     {
       title: "操作",
       key: "actions",
-      width: 70,
+      width: 130,
       fixed: "right",
       render: (_, item) => {
-        return renderLinkOrButton({
-          id: item.id,
-          className: "influencer-view-link",
-          children: "查看",
-        });
+        const profileUrl = item.platform_accounts.find(
+          (account) => account.is_active && account.profile_url,
+        )?.profile_url;
+        return (
+          <Space size="small">
+            {renderLinkOrButton({
+              id: item.id,
+              className: "influencer-view-link",
+              children: "详情",
+            })}
+            {profileUrl ? (
+              <a
+                className="influencer-view-link"
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                主页 ↗
+              </a>
+            ) : null}
+          </Space>
+        );
       },
     },
   ];
@@ -303,7 +320,7 @@ export function InfluencerTable({
       columns={columns}
       dataSource={items}
       pagination={false}
-      scroll={{ x: 1212 }}
+      scroll={{ x: 1272 }}
       onRow={() => ({ className: "influencer-row" })}
     />
   );

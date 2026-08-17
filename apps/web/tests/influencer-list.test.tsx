@@ -253,10 +253,44 @@ describe("InfluencerWorkspace", () => {
       "href",
       "/influencers/00000000-0000-0000-0000-000000000101",
     );
-    expect(within(row).getByRole("link", { name: "查看" })).toHaveAttribute(
+    expect(within(row).getByRole("link", { name: "详情" })).toHaveAttribute(
       "href",
       "/influencers/00000000-0000-0000-0000-000000000101",
     );
+    expect(within(row).getByRole("link", { name: "主页 ↗" })).toHaveAttribute(
+      "href",
+      "https://example.invalid/a",
+    );
+    expect(within(row).getByRole("link", { name: "主页 ↗" })).toHaveAttribute(
+      "target",
+      "_blank",
+    );
+    expect(within(row).getByRole("link", { name: "主页 ↗" })).toHaveAttribute(
+      "rel",
+      "noopener noreferrer",
+    );
+  });
+
+  it("does not render a homepage link when no active account has a profile URL", async () => {
+    const withoutProfile = {
+      ...listData,
+      items: [
+        {
+          ...listData.items[0],
+          platform_accounts: listData.items[0].platform_accounts.map(
+            (account) => ({
+              ...account,
+              profile_url: null,
+            }),
+          ),
+        },
+      ],
+    };
+    mockApi(withoutProfile);
+    renderWorkspace();
+
+    const row = await screen.findByRole("row", { name: /零粉多账号达人/ });
+    expect(within(row).queryByRole("link", { name: "主页 ↗" })).toBeNull();
   });
 
   it("restores URL filters and resets the page for search and filters", async () => {
@@ -284,6 +318,42 @@ describe("InfluencerWorkspace", () => {
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
     expect(navigation.replace).toHaveBeenLastCalledWith(
       expect.not.stringContaining("q="),
+    );
+  });
+
+  it("syncs contact and notes filters to the URL and resets pagination", async () => {
+    navigation.search =
+      "contact_filter=has_contact&notes_60d_filter=zero&page=3&page_size=50";
+    mockApi();
+    renderWorkspace();
+    await screen.findByRole("link", { name: "零粉多账号达人" });
+
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "联系方式筛选" }));
+    await screen.findByRole("option", { name: "有邮箱" });
+    const emailOption = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+    ).find((item) => item.textContent === "有邮箱");
+    expect(emailOption).toBeDefined();
+    fireEvent.click(emailOption as HTMLElement);
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenLastCalledWith(
+        "/influencers?contact_filter=has_email&notes_60d_filter=zero&page_size=50",
+      ),
+    );
+
+    fireEvent.mouseDown(
+      screen.getByRole("combobox", { name: "近60天笔记筛选" }),
+    );
+    await screen.findByRole("option", { name: "1-2篇" });
+    const oneToTwoOption = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+    ).find((item) => item.textContent === "1-2篇");
+    expect(oneToTwoOption).toBeDefined();
+    fireEvent.click(oneToTwoOption as HTMLElement);
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenLastCalledWith(
+        "/influencers?contact_filter=has_contact&notes_60d_filter=one_to_two&page_size=50",
+      ),
     );
   });
 

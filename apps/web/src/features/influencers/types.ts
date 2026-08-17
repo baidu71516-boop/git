@@ -77,6 +77,9 @@ export type InfluencerListQueryParams = {
   followers_max?: string;
   owner_operator_id?: string;
   crm_stage?: string;
+  contact_filter?: "has_contact" | "has_email" | "no_contact";
+  notes_60d_filter?:
+    "zero" | "one_to_two" | "three_to_nine" | "ten_or_more" | "missing";
   freshness_status?: FreshnessStatus;
   requires_refresh?: "true" | "false";
   last_huitun_observed_before?: string;

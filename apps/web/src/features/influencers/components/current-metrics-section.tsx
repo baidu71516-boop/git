@@ -37,7 +37,7 @@ export function CurrentMetricsSection({
               title={`${accountName(accounts, metric.platform_account_id)} · ${metric.source}`}
             >
               <Descriptions column={1} size="small">
-                <Descriptions.Item label="来源更新时间">
+                <Descriptions.Item label="来源数据更新时间">
                   {formatShanghaiDate(metric.source_updated_at)}
                 </Descriptions.Item>
                 {Object.entries(metric.metrics).map(([key, value]) => (

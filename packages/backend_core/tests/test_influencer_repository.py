@@ -28,11 +28,13 @@ from backend_core.imports.models import (
     StoredImportFile,
 )
 from backend_core.influencers.enums import (
+    ContactFilter,
     ContactType,
     ContactValidationStatus,
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes60dFilter,
     Platform,
 )
 from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
@@ -331,16 +333,20 @@ async def add_metrics(
     account: InfluencerPlatformAccount,
     *,
     followers: object,
+    notes_60d: object | None = None,
     source: DataSource = DataSource.HUITUN,
     import_job_id: UUID | None = None,
     import_row_id: UUID | None = None,
 ) -> InfluencerCurrentMetrics:
+    values = {"followers_count": followers}
+    if notes_60d is not None:
+        values["notes_60d"] = notes_60d
     metrics = InfluencerCurrentMetrics(
         influencer_id=influencer.id,
         platform_account_id=account.id,
         source=source,
         source_updated_at=NOW,
-        metrics={"followers_count": followers},
+        metrics=values,
         metrics_hash=uuid4().hex * 2,
         last_import_job_id=import_job_id or uuid4(),
         last_import_row_id=import_row_id or uuid4(),
@@ -1135,7 +1141,7 @@ def test_freshness_filtered_pagination_has_stable_created_at_id_order() -> None:
     asyncio.run(scenario())
 
 
-def test_list_with_fifty_freshness_records_has_fixed_query_count() -> None:
+def test_combined_contact_and_notes_filters_have_fixed_query_count() -> None:
     async def scenario() -> None:
         statements: list[str] = []
         async with database_session(statements=statements) as session:
@@ -1162,14 +1168,25 @@ def test_list_with_fifty_freshness_records_has_fixed_query_count() -> None:
                     influencer,
                     account,
                     followers=index,
+                    notes_60d=0,
                     import_job_id=row.import_job_id,
                     import_row_id=row.id,
+                )
+                await add_contact(
+                    session,
+                    influencer,
+                    value=f"{index}@example.test",
+                    account=account,
                 )
             await session.commit()
             statements.clear()
 
             records, total = await InfluencerRepository(session).list_influencers(
-                InfluencerListQuery(page_size=50),
+                InfluencerListQuery(
+                    contact_filter=ContactFilter.HAS_EMAIL,
+                    notes_60d_filter=Notes60dFilter.ZERO,
+                    page_size=50,
+                ),
                 as_of=NOW,
                 policy=FreshnessPolicy(),
             )
@@ -1177,6 +1194,131 @@ def test_list_with_fifty_freshness_records_has_fixed_query_count() -> None:
             assert total == len(records) == 50
             assert all(len(record.huitun_freshness) == 1 for record in records)
             assert len(statements) == 6
+
+    asyncio.run(scenario())
+
+
+def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            fixtures: dict[str, Influencer] = {}
+            for index, (name, notes) in enumerate(
+                (
+                    ("zero", 0),
+                    ("one", 1),
+                    ("two", 2),
+                    ("three", 3),
+                    ("nine", 9),
+                    ("ten", 10),
+                    ("missing", None),
+                ),
+                start=1,
+            ):
+                influencer = await add_influencer(
+                    session,
+                    name=name,
+                    influencer_id=UUID(int=index),
+                    created_at=NOW,
+                )
+                account = await add_account(
+                    session,
+                    influencer,
+                    name=f"{name}-account",
+                    tags=["科技3C"] if name == "zero" else None,
+                )
+                await add_metrics(
+                    session,
+                    influencer,
+                    account,
+                    followers=100_000 if name == "zero" else 10,
+                    notes_60d=notes,
+                )
+                fixtures[name] = influencer
+
+            await add_contact(
+                session,
+                fixtures["zero"],
+                value="zero@example.test",
+            )
+            await add_contact(
+                session,
+                fixtures["one"],
+                value="one@example.test",
+                contact_type=ContactType.PHONE,
+            )
+            await add_contact(
+                session,
+                fixtures["two"],
+                value="former@example.test",
+                current=False,
+            )
+            inactive_account = await add_account(
+                session,
+                fixtures["missing"],
+                name="inactive-notes",
+                active=False,
+            )
+            await add_metrics(
+                session,
+                fixtures["missing"],
+                inactive_account,
+                followers=100,
+                notes_60d=10,
+            )
+
+            repository = InfluencerRepository(session)
+
+            async def names(query: InfluencerListQuery) -> tuple[set[str], int]:
+                records, total = await repository.list_influencers(query)
+                return {record.influencer.display_name for record in records}, total
+
+            for filter_value, expected in (
+                (Notes60dFilter.ZERO, {"zero"}),
+                (Notes60dFilter.ONE_TO_TWO, {"one", "two"}),
+                (Notes60dFilter.THREE_TO_NINE, {"three", "nine"}),
+                (Notes60dFilter.TEN_OR_MORE, {"ten"}),
+                (Notes60dFilter.MISSING, {"missing"}),
+            ):
+                filtered, total = await names(InfluencerListQuery(notes_60d_filter=filter_value))
+                assert filtered == expected
+                assert total == len(expected)
+
+            has_contact, has_contact_total = await names(
+                InfluencerListQuery(contact_filter=ContactFilter.HAS_CONTACT)
+            )
+            has_email, has_email_total = await names(
+                InfluencerListQuery(contact_filter=ContactFilter.HAS_EMAIL)
+            )
+            no_contact, no_contact_total = await names(
+                InfluencerListQuery(contact_filter=ContactFilter.NO_CONTACT)
+            )
+            assert has_contact == {"zero", "one"}
+            assert has_contact_total == 2
+            assert has_email == {"zero"}
+            assert has_email_total == 1
+            assert no_contact == {"two", "three", "nine", "ten", "missing"}
+            assert no_contact_total == 5
+
+            combined, total = await names(
+                InfluencerListQuery(
+                    tag="科技3C",
+                    followers_min=100_000,
+                    followers_max=100_000,
+                    contact_filter=ContactFilter.HAS_EMAIL,
+                    notes_60d_filter=Notes60dFilter.ZERO,
+                )
+            )
+            assert combined == {"zero"}
+            assert total == 1
+
+            first_page, first_total = await repository.list_influencers(
+                InfluencerListQuery(contact_filter=ContactFilter.NO_CONTACT, page=1, page_size=2)
+            )
+            second_page, second_total = await repository.list_influencers(
+                InfluencerListQuery(contact_filter=ContactFilter.NO_CONTACT, page=2, page_size=2)
+            )
+            assert first_total == second_total == 5
+            assert set(ids(first_page)).isdisjoint(ids(second_page))
 
     asyncio.run(scenario())
 

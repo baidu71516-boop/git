@@ -37,6 +37,22 @@ const refreshNeedOptions: Array<{ value: string; label: string }> = [
   { value: "false", label: "暂不需要" },
 ];
 
+const contactFilterOptions = [
+  { value: "all", label: "全部" },
+  { value: "has_contact", label: "有联系方式" },
+  { value: "has_email", label: "有邮箱" },
+  { value: "no_contact", label: "无联系方式" },
+];
+
+const notes60dFilterOptions = [
+  { value: "all", label: "全部" },
+  { value: "zero", label: "0篇" },
+  { value: "one_to_two", label: "1-2篇" },
+  { value: "three_to_nine", label: "3-9篇" },
+  { value: "ten_or_more", label: "10篇以上" },
+  { value: "missing", label: "无数据" },
+];
+
 type InfluencerFilterBarProps = {
   query: InfluencerListQueryParams;
   options: InfluencerFilterOptions | undefined;
@@ -223,7 +239,7 @@ export function InfluencerFilterBar({
               </div>
             </div>
           </Col>
-          <Col xs={24} sm={8} lg={8}>
+          <Col xs={24} sm={12} lg={4}>
             <Select
               aria-label="数据时效筛选"
               className="full-width"
@@ -236,7 +252,7 @@ export function InfluencerFilterBar({
               options={freshnessOptions}
             />
           </Col>
-          <Col xs={24} sm={8} lg={8}>
+          <Col xs={24} sm={12} lg={4}>
             <div className="influencer-filter-with-label">
               <span className="influencer-filter-inline-label">更新需求</span>
               <Select
@@ -252,6 +268,52 @@ export function InfluencerFilterBar({
                   })
                 }
                 options={refreshNeedOptions}
+              />
+            </div>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <div className="influencer-filter-with-label">
+              <span className="influencer-filter-inline-label">联系方式</span>
+              <Select
+                aria-label="联系方式筛选"
+                className="full-width"
+                placeholder="全部"
+                value={query.contact_filter ?? "all"}
+                onChange={(value: string | undefined) =>
+                  onChange({
+                    contact_filter:
+                      value === "has_contact" ||
+                      value === "has_email" ||
+                      value === "no_contact"
+                        ? value
+                        : undefined,
+                  })
+                }
+                options={contactFilterOptions}
+              />
+            </div>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <div className="influencer-filter-with-label">
+              <span className="influencer-filter-inline-label">近60天笔记</span>
+              <Select
+                aria-label="近60天笔记筛选"
+                className="full-width"
+                placeholder="全部"
+                value={query.notes_60d_filter ?? "all"}
+                onChange={(value: string | undefined) =>
+                  onChange({
+                    notes_60d_filter:
+                      value === "zero" ||
+                      value === "one_to_two" ||
+                      value === "three_to_nine" ||
+                      value === "ten_or_more" ||
+                      value === "missing"
+                        ? value
+                        : undefined,
+                  })
+                }
+                options={notes60dFilterOptions}
               />
             </div>
           </Col>

@@ -370,8 +370,11 @@ describe("InfluencerDetailWorkspace", () => {
       within(platformMetrics as HTMLElement).getAllByText("是否需要更新"),
     ).toHaveLength(2);
     expect(
-      within(platformMetrics as HTMLElement).getAllByText("指标更新时间"),
-    ).toHaveLength(2);
+      within(platformMetrics as HTMLElement).getAllByText("灰豚来源更新时间"),
+    ).toHaveLength(1);
+    expect(
+      within(platformMetrics as HTMLElement).getAllByText("来源数据更新时间"),
+    ).toHaveLength(1);
     const genericAccount = within(platformMetrics as HTMLElement)
       .getByText("小红书 · 账号乙")
       .closest(".detail-platform-item");
@@ -385,6 +388,7 @@ describe("InfluencerDetailWorkspace", () => {
     expect(screen.queryByText("AI Score")).not.toBeInTheDocument();
     expect(screen.queryByText(/¥|RMB|人民币/)).not.toBeInTheDocument();
     expect(screen.queryByText("notes_count")).not.toBeInTheDocument();
+    expect(screen.queryByText("最后发帖时间")).not.toBeInTheDocument();
 
     expect(
       screen.getByText("历史快照记录的是当次输入，不等于当前合并指标。"),

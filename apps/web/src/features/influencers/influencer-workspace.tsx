@@ -102,6 +102,8 @@ export function InfluencerWorkspace() {
     query.followers_max ||
     query.owner_operator_id ||
     query.crm_stage ||
+    query.contact_filter ||
+    query.notes_60d_filter ||
     query.freshness_status ||
     query.requires_refresh ||
     query.last_huitun_observed_before ||
