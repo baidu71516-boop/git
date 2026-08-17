@@ -211,7 +211,12 @@ async def _seed_influencer_graph(session: AsyncSession) -> UUID:
                 platform_account_id=account.id,
                 source=DataSource.HUITUN,
                 source_updated_at=NOW,
-                metrics={"followers_count": 100, "notes_60d": 0, "huitun_score": "88.5"},
+                metrics={
+                    "followers_count": 100,
+                    "notes_7d": 0,
+                    "notes_60d": 0,
+                    "huitun_score": "88.5",
+                },
                 metrics_hash=uuid4().hex * 2,
                 last_import_job_id=import_job_id,
                 last_import_row_id=import_row_id,
@@ -355,6 +360,11 @@ def test_registered_endpoints_auth_csrf_contact_and_envelope() -> None:
                 )
                 assert notes_zero.status_code == 200
                 assert notes_zero.json()["data"]["total"] == 1
+                notes_7d_zero = await client.get(
+                    "/api/v1/influencers", params={"notes_7d_filter": "zero"}
+                )
+                assert notes_7d_zero.status_code == 200
+                assert notes_7d_zero.json()["data"]["total"] == 1
 
                 options = await client.get("/api/v1/influencers/filter-options")
                 assert options.status_code == 200
@@ -434,6 +444,10 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"contact_filter": "has_contact"},
                     {"contact_filter": "has_email"},
                     {"contact_filter": "no_contact"},
+                    {"notes_7d_filter": "zero"},
+                    {"notes_7d_filter": "one_to_two"},
+                    {"notes_7d_filter": "three_plus"},
+                    {"notes_7d_filter": "missing"},
                     {"notes_60d_filter": "zero"},
                     {"notes_60d_filter": "one_to_two"},
                     {"notes_60d_filter": "three_to_nine"},
@@ -464,6 +478,7 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"owner_operator_id": "not-a-uuid"},
                     {"crm_stage": "不存在阶段"},
                     {"contact_filter": "email"},
+                    {"notes_7d_filter": "0"},
                     {"notes_60d_filter": "0"},
                     {"freshness_status": "not-a-status"},
                     {"requires_refresh": "1"},
@@ -489,6 +504,7 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     "owner_operator_id": (str(uuid4()), str(uuid4())),
                     "crm_stage": (CRMStage.TO_DEVELOP.value, CRMStage.HIGH_INTENT.value),
                     "contact_filter": ("has_contact", "no_contact"),
+                    "notes_7d_filter": ("zero", "missing"),
                     "notes_60d_filter": ("zero", "missing"),
                     "freshness_status": (
                         FreshnessStatus.FRESH.value,
@@ -647,6 +663,7 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
         "owner_operator_id",
         "crm_stage",
         "contact_filter",
+        "notes_7d_filter",
         "notes_60d_filter",
         "freshness_status",
         "requires_refresh",

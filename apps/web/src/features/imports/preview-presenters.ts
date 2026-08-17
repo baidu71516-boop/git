@@ -149,6 +149,7 @@ const fieldLabels: Readonly<Record<string, string>> = {
   notes_count: "笔记总数",
   likes_collects_total: "赞藏总数",
   commercial_notes_count: "商业笔记总数",
+  notes_7d: "近 7 天笔记数",
   notes_60d: "近 60 天笔记数",
   viral_rate_60d: "近 60 天爆文率",
   avg_likes_60d: "近 60 天平均点赞",

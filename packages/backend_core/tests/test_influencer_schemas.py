@@ -10,6 +10,7 @@ from backend_core.influencers.enums import (
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes7dFilter,
     Notes60dFilter,
     Platform,
 )
@@ -48,6 +49,7 @@ def test_list_query_defaults_and_exact_field_set() -> None:
         "owner_operator_id",
         "crm_stage",
         "contact_filter",
+        "notes_7d_filter",
         "notes_60d_filter",
         "freshness_status",
         "requires_refresh",
@@ -125,12 +127,21 @@ def test_list_query_uses_real_uuid_and_crm_stage_enum() -> None:
 
 def test_list_query_accepts_only_closed_contact_and_notes_filters() -> None:
     query = InfluencerListQuery.model_validate(
-        {"contact_filter": "has_email", "notes_60d_filter": "three_to_nine"}
+        {
+            "contact_filter": "has_email",
+            "notes_7d_filter": "three_plus",
+            "notes_60d_filter": "three_to_nine",
+        }
     )
 
     assert query.contact_filter is ContactFilter.HAS_EMAIL
+    assert query.notes_7d_filter is Notes7dFilter.THREE_PLUS
     assert query.notes_60d_filter is Notes60dFilter.THREE_TO_NINE
-    for name, invalid in (("contact_filter", "email"), ("notes_60d_filter", "7d")):
+    for name, invalid in (
+        ("contact_filter", "email"),
+        ("notes_7d_filter", "7d"),
+        ("notes_60d_filter", "7d"),
+    ):
         with pytest.raises(ValidationError):
             InfluencerListQuery.model_validate({name: invalid})
 

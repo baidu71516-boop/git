@@ -25,6 +25,7 @@ export const IMPORT_CANONICAL_FIELDS = [
   "notes_count",
   "likes_collects_total",
   "commercial_notes_count",
+  "notes_7d",
   "notes_60d",
   "viral_rate_60d",
   "avg_likes_60d",

@@ -16,6 +16,7 @@ export const INFLUENCER_QUERY_PARAMETERS = [
   "owner_operator_id",
   "crm_stage",
   "contact_filter",
+  "notes_7d_filter",
   "notes_60d_filter",
   "freshness_status",
   "requires_refresh",

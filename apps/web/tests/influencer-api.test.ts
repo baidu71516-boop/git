@@ -23,6 +23,7 @@ describe("influencer list API", () => {
       owner_operator_id: "00000000-0000-0000-0000-000000000001",
       crm_stage: "高意向",
       contact_filter: "has_email",
+      notes_7d_filter: "zero",
       notes_60d_filter: "zero",
       freshness_status: "stale",
       requires_refresh: "true",

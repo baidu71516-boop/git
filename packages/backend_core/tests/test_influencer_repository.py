@@ -34,6 +34,7 @@ from backend_core.influencers.enums import (
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes7dFilter,
     Notes60dFilter,
     Platform,
 )
@@ -333,12 +334,15 @@ async def add_metrics(
     account: InfluencerPlatformAccount,
     *,
     followers: object,
+    notes_7d: object | None = None,
     notes_60d: object | None = None,
     source: DataSource = DataSource.HUITUN,
     import_job_id: UUID | None = None,
     import_row_id: UUID | None = None,
 ) -> InfluencerCurrentMetrics:
     values = {"followers_count": followers}
+    if notes_7d is not None:
+        values["notes_7d"] = notes_7d
     if notes_60d is not None:
         values["notes_60d"] = notes_60d
     metrics = InfluencerCurrentMetrics(
@@ -1168,6 +1172,7 @@ def test_combined_contact_and_notes_filters_have_fixed_query_count() -> None:
                     influencer,
                     account,
                     followers=index,
+                    notes_7d=0,
                     notes_60d=0,
                     import_job_id=row.import_job_id,
                     import_row_id=row.id,
@@ -1184,6 +1189,7 @@ def test_combined_contact_and_notes_filters_have_fixed_query_count() -> None:
             records, total = await InfluencerRepository(session).list_influencers(
                 InfluencerListQuery(
                     contact_filter=ContactFilter.HAS_EMAIL,
+                    notes_7d_filter=Notes7dFilter.ZERO,
                     notes_60d_filter=Notes60dFilter.ZERO,
                     page_size=50,
                 ),
@@ -1198,19 +1204,19 @@ def test_combined_contact_and_notes_filters_have_fixed_query_count() -> None:
     asyncio.run(scenario())
 
 
-def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages() -> None:
+def test_contact_and_activity_filters_use_current_active_data_with_stable_pages() -> None:
     async def scenario() -> None:
         async with database_session() as session:
             fixtures: dict[str, Influencer] = {}
-            for index, (name, notes) in enumerate(
+            for index, (name, notes_7d, notes_60d) in enumerate(
                 (
-                    ("zero", 0),
-                    ("one", 1),
-                    ("two", 2),
-                    ("three", 3),
-                    ("nine", 9),
-                    ("ten", 10),
-                    ("missing", None),
+                    ("zero", 0, 0),
+                    ("one", 1, 1),
+                    ("two", 2, 2),
+                    ("three", 3, 3),
+                    ("nine", 9, 9),
+                    ("ten", 10, 10),
+                    ("missing", None, None),
                 ),
                 start=1,
             ):
@@ -1231,7 +1237,8 @@ def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages
                     influencer,
                     account,
                     followers=100_000 if name == "zero" else 10,
-                    notes_60d=notes,
+                    notes_7d=notes_7d,
+                    notes_60d=notes_60d,
                 )
                 fixtures[name] = influencer
 
@@ -1263,6 +1270,7 @@ def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages
                 fixtures["missing"],
                 inactive_account,
                 followers=100,
+                notes_7d=10,
                 notes_60d=10,
             )
 
@@ -1280,6 +1288,16 @@ def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages
                 (Notes60dFilter.MISSING, {"missing"}),
             ):
                 filtered, total = await names(InfluencerListQuery(notes_60d_filter=filter_value))
+                assert filtered == expected
+                assert total == len(expected)
+
+            for filter_value, expected in (
+                (Notes7dFilter.ZERO, {"zero"}),
+                (Notes7dFilter.ONE_TO_TWO, {"one", "two"}),
+                (Notes7dFilter.THREE_PLUS, {"three", "nine", "ten"}),
+                (Notes7dFilter.MISSING, {"missing"}),
+            ):
+                filtered, total = await names(InfluencerListQuery(notes_7d_filter=filter_value))
                 assert filtered == expected
                 assert total == len(expected)
 
@@ -1305,6 +1323,7 @@ def test_contact_and_notes_60d_filters_use_current_active_data_with_stable_pages
                     followers_min=100_000,
                     followers_max=100_000,
                     contact_filter=ContactFilter.HAS_EMAIL,
+                    notes_7d_filter=Notes7dFilter.ZERO,
                     notes_60d_filter=Notes60dFilter.ZERO,
                 )
             )

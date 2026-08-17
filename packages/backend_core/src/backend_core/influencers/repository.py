@@ -40,6 +40,7 @@ from backend_core.influencers.enums import (
     ContactType,
     DataSource,
     InfluencerStatus,
+    Notes7dFilter,
     Notes60dFilter,
 )
 from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
@@ -278,6 +279,26 @@ def notes_60d_expression(dialect_name: str) -> ColumnElement[Any]:
     )
 
 
+def notes_7d_expression(dialect_name: str) -> ColumnElement[Any]:
+    """Return the shared strict non-coercing current notes_7d projection."""
+
+    if dialect_name == "postgresql":
+        json_value = cast(InfluencerCurrentMetrics.metrics, JSONB)["notes_7d"]
+        text_value = json_value.as_string()
+        valid_integer = and_(
+            func.jsonb_typeof(json_value) == "number",
+            text_value.op("~")(r"^(0|[1-9][0-9]*)$"),
+        )
+        return case((valid_integer, cast(text_value, Numeric())), else_=None)
+    return case(
+        (
+            func.json_type(InfluencerCurrentMetrics.metrics, "$.notes_7d") == "integer",
+            func.json_extract(InfluencerCurrentMetrics.metrics, "$.notes_7d"),
+        ),
+        else_=None,
+    )
+
+
 def _visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
     """Backward-compatible private alias for the original Task 7 helper."""
 
@@ -496,6 +517,39 @@ class InfluencerRepository:
             ~has_matching_metric if notes_filter is Notes60dFilter.MISSING else has_matching_metric
         )
 
+    def _notes_7d_criterion(self, notes_filter: Notes7dFilter) -> ColumnElement[bool]:
+        value = notes_7d_expression(self._dialect_name)
+        conditions: list[ColumnElement[bool]] = [
+            InfluencerCurrentMetrics.influencer_id == Influencer.id,
+            InfluencerPlatformAccount.is_active.is_(True),
+        ]
+        valid_value = value.is_not(None)
+        if notes_filter is Notes7dFilter.ZERO:
+            conditions.append(value == 0)
+        elif notes_filter is Notes7dFilter.ONE_TO_TWO:
+            conditions.extend((value >= 1, value <= 2))
+        elif notes_filter is Notes7dFilter.THREE_PLUS:
+            conditions.append(value >= 3)
+        else:
+            conditions.append(valid_value)
+
+        has_matching_metric = exists(
+            select(1)
+            .select_from(InfluencerCurrentMetrics)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == InfluencerCurrentMetrics.platform_account_id,
+                    InfluencerPlatformAccount.influencer_id
+                    == InfluencerCurrentMetrics.influencer_id,
+                ),
+            )
+            .where(*conditions)
+        )
+        return (
+            ~has_matching_metric if notes_filter is Notes7dFilter.MISSING else has_matching_metric
+        )
+
     def _list_criteria(
         self,
         query: InfluencerListQuery,
@@ -516,6 +570,8 @@ class InfluencerRepository:
             criteria.append(Influencer.crm_stage == query.crm_stage)
         if query.contact_filter is not None:
             criteria.append(self._contact_criterion(query.contact_filter))
+        if query.notes_7d_filter is not None:
+            criteria.append(self._notes_7d_criterion(query.notes_7d_filter))
         if query.notes_60d_filter is not None:
             criteria.append(self._notes_60d_criterion(query.notes_60d_filter))
         if (
@@ -905,6 +961,7 @@ __all__ = [
     "eligible_huitun_freshness",
     "freshness_status_expression",
     "followers_count_expression",
+    "notes_7d_expression",
     "notes_60d_expression",
     "huitun_confirmed_lineage",
     "visible_influencer_criteria",

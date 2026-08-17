@@ -26,6 +26,7 @@ from backend_core.influencers.enums import (
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes7dFilter,
     Notes60dFilter,
     Platform,
 )
@@ -109,6 +110,7 @@ class InfluencerListQuery(QueryContract):
     owner_operator_id: UUID | None = None
     crm_stage: CRMStage | None = None
     contact_filter: ContactFilter | None = None
+    notes_7d_filter: Notes7dFilter | None = None
     notes_60d_filter: Notes60dFilter | None = None
     freshness_status: FreshnessStatus | None = None
     requires_refresh: QueryBoolean | None = None

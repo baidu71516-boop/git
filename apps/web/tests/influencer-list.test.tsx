@@ -321,7 +321,7 @@ describe("InfluencerWorkspace", () => {
     );
   });
 
-  it("syncs contact and notes filters to the URL and resets pagination", async () => {
+  it("syncs contact and 60-day activity filters to the URL and resets pagination", async () => {
     navigation.search =
       "contact_filter=has_contact&notes_60d_filter=zero&page=3&page_size=50";
     mockApi();
@@ -355,6 +355,15 @@ describe("InfluencerWorkspace", () => {
         "/influencers?contact_filter=has_contact&notes_60d_filter=one_to_two&page_size=50",
       ),
     );
+  });
+
+  it("renders the 7-day activity filter", async () => {
+    mockApi();
+    renderWorkspace();
+
+    expect(
+      await screen.findByRole("combobox", { name: "近7天笔记筛选" }),
+    ).toBeInTheDocument();
   });
 
   it("validates follower ranges locally and supports clearing filters", async () => {

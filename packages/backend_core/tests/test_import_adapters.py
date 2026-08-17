@@ -48,15 +48,56 @@ def huitun_row(**overrides: str) -> RawTabularRecord:
 
 def test_huitun_mapping_is_complete_centralized_and_shared_by_file_types() -> None:
     headers = list(HUITUN_FIELD_MAPPING)
-    assert len(headers) == 37
+    assert len(headers) == 38
     assert HUITUN_FIELD_MAPPING["达人官方地址"] == "profile_url"
     assert HUITUN_FIELD_MAPPING["灰豚指数"] == "huitun_score"
     assert HUITUN_FIELD_MAPPING["小红书号"] == "account_handle"
     assert HUITUN_FIELD_MAPPING["联系邮箱"] == "email"
+    assert HUITUN_FIELD_MAPPING["近7天笔记数"] == "notes_7d"
 
     csv_mapping = HuitunCsvAdapter().mapping_for_headers(headers)
     excel_mapping = HuitunExcelAdapter().mapping_for_headers(headers)
     assert csv_mapping == excel_mapping == dict(HUITUN_FIELD_MAPPING)
+
+
+@pytest.mark.parametrize("raw_value, expected", [("0", 0), ("1", 1), ("2", 2), ("3", 3)])
+def test_huitun_adapter_maps_notes_7d_as_a_nonnegative_integer(
+    raw_value: str, expected: int
+) -> None:
+    raw = huitun_row(**{"近7天笔记数": raw_value})
+    adapter = HuitunCsvAdapter()
+    adapter.mapping_for_headers(list(raw.values))
+
+    adapted = adapter.adapt(raw)
+
+    assert adapted.is_valid
+    assert adapted.record.metrics["notes_7d"] == expected
+
+
+def test_huitun_adapter_keeps_missing_notes_7d_missing() -> None:
+    raw = huitun_row(**{"近7天笔记数": "--"})
+    adapter = HuitunCsvAdapter()
+    adapter.mapping_for_headers(list(raw.values))
+
+    adapted = adapter.adapt(raw)
+
+    assert adapted.is_valid
+    assert "notes_7d" not in adapted.record.metrics
+
+
+def test_huitun_adapter_rejects_negative_notes_7d() -> None:
+    raw = huitun_row(**{"近7天笔记数": "-1"})
+    adapter = HuitunCsvAdapter()
+    adapter.mapping_for_headers(list(raw.values))
+
+    adapted = adapter.adapt(raw)
+
+    assert adapted.is_valid
+    assert "notes_7d" not in adapted.record.metrics
+    assert any(
+        warning.code == "INVALID_INTEGER" and warning.field == "notes_7d"
+        for warning in adapted.warnings
+    )
 
 
 def test_mapping_requires_profile_or_another_stable_identity_not_handle_or_email() -> None:

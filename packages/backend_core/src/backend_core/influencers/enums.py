@@ -58,3 +58,10 @@ class Notes60dFilter(StrEnum):
     THREE_TO_NINE = "three_to_nine"
     TEN_OR_MORE = "ten_or_more"
     MISSING = "missing"
+
+
+class Notes7dFilter(StrEnum):
+    ZERO = "zero"
+    ONE_TO_TWO = "one_to_two"
+    THREE_PLUS = "three_plus"
+    MISSING = "missing"

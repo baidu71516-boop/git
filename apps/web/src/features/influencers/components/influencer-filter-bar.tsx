@@ -53,6 +53,14 @@ const notes60dFilterOptions = [
   { value: "missing", label: "无数据" },
 ];
 
+const notes7dFilterOptions = [
+  { value: "all", label: "全部" },
+  { value: "zero", label: "0篇" },
+  { value: "one_to_two", label: "1-2篇" },
+  { value: "three_plus", label: "3篇以上" },
+  { value: "missing", label: "无数据" },
+];
+
 type InfluencerFilterBarProps = {
   query: InfluencerListQueryParams;
   options: InfluencerFilterOptions | undefined;
@@ -203,7 +211,7 @@ export function InfluencerFilterBar({
         </Row>
 
         <Row gutter={[12, 12]} className="follower-filter-row">
-          <Col xs={24} lg={8}>
+          <Col xs={24} lg={6}>
             <div className="influencer-follower-filter-group">
               <span className="influencer-follower-filter-label">粉丝区间</span>
               <div className="influencer-follower-filter-compact">
@@ -239,7 +247,7 @@ export function InfluencerFilterBar({
               </div>
             </div>
           </Col>
-          <Col xs={24} sm={12} lg={4}>
+          <Col xs={24} sm={12} lg={3}>
             <Select
               aria-label="数据时效筛选"
               className="full-width"
@@ -252,7 +260,7 @@ export function InfluencerFilterBar({
               options={freshnessOptions}
             />
           </Col>
-          <Col xs={24} sm={12} lg={4}>
+          <Col xs={24} sm={12} lg={3}>
             <div className="influencer-filter-with-label">
               <span className="influencer-filter-inline-label">更新需求</span>
               <Select
@@ -314,6 +322,29 @@ export function InfluencerFilterBar({
                   })
                 }
                 options={notes60dFilterOptions}
+              />
+            </div>
+          </Col>
+          <Col xs={24} sm={12} lg={4}>
+            <div className="influencer-filter-with-label">
+              <span className="influencer-filter-inline-label">近7天笔记</span>
+              <Select
+                aria-label="近7天笔记筛选"
+                className="full-width"
+                placeholder="全部"
+                value={query.notes_7d_filter ?? "all"}
+                onChange={(value: string | undefined) =>
+                  onChange({
+                    notes_7d_filter:
+                      value === "zero" ||
+                      value === "one_to_two" ||
+                      value === "three_plus" ||
+                      value === "missing"
+                        ? value
+                        : undefined,
+                  })
+                }
+                options={notes7dFilterOptions}
               />
             </div>
           </Col>

@@ -103,6 +103,7 @@ export function InfluencerWorkspace() {
     query.owner_operator_id ||
     query.crm_stage ||
     query.contact_filter ||
+    query.notes_7d_filter ||
     query.notes_60d_filter ||
     query.freshness_status ||
     query.requires_refresh ||
