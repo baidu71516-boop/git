@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 
 from app.http.admin import router as admin_router
 from app.http.auth import router as auth_router
+from app.http.candidate_pools import router as candidate_pools_router
 from app.http.collection_jobs import router as collection_jobs_router
 from app.http.departments import router as departments_router
 from app.http.errors import register_exception_handlers
@@ -24,6 +25,7 @@ from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
 from app.http.operators import router as operators_router
 from app.http.refresh_queues import router as refresh_queues_router
+from app.http.targeting_tasks import TargetingTaskDispatcher
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -46,6 +48,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # filesystem. The adapter creates and secures the root on the first upload.
     app.state.import_storage = LocalStorageAdapter(settings.import_data_dir, initialize_root=False)
     app.state.import_task_dispatcher = ImportTaskDispatcher(celery_client)
+    app.state.targeting_task_dispatcher = TargetingTaskDispatcher(celery_client)
     try:
         yield
     finally:
@@ -67,6 +70,7 @@ app.include_router(auth_router)
 app.include_router(operators_router)
 app.include_router(admin_router)
 app.include_router(collection_jobs_router)
+app.include_router(candidate_pools_router)
 app.include_router(import_jobs_router)
 app.include_router(influencers_router)
 app.include_router(refresh_queues_router)
