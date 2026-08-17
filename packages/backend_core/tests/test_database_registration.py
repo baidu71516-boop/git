@@ -40,6 +40,11 @@ database = Database("sqlite+aiosqlite://")
 configure_mappers()
 expected = {{
     "audit_logs",
+    "candidate_pool_members",
+    "candidate_pool_runs",
+    "candidate_pools",
+    "campaign_members",
+    "campaigns",
     "departments",
     "import_job_file_client_ids",
     "import_job_files",
@@ -48,10 +53,16 @@ expected = {{
     "import_task_requests",
     "influencer_contacts",
     "influencers",
+    "message_template_versions",
+    "message_templates",
     "operators",
+    "outreach_events",
+    "outreach_targets",
+    "outreach_tasks",
     "refresh_queue_items",
     "refresh_queues",
     "stored_import_files",
+    "targeting_policies",
 }}
 missing = expected.difference(Base.metadata.tables)
 assert not missing, sorted(missing)

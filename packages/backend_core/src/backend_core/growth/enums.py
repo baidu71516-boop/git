@@ -1,0 +1,45 @@
+"""Closed persistence enums for Phase 3A growth aggregates."""
+
+from enum import StrEnum
+
+
+class CandidatePoolKind(StrEnum):
+    POTENTIAL_SELLER = "POTENTIAL_SELLER"
+    POTENTIAL_BUYER = "POTENTIAL_BUYER"
+
+
+class CandidatePoolStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    ARCHIVED = "ARCHIVED"
+
+
+class CandidatePoolRunStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class CandidateResult(StrEnum):
+    MATCH = "MATCH"
+    UNKNOWN = "UNKNOWN"
+
+
+class CampaignStatus(StrEnum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    CLOSED = "CLOSED"
+
+
+class CampaignReviewMode(StrEnum):
+    ALL = "ALL"
+    FIRST_N = "FIRST_N"
+    SAMPLE = "SAMPLE"
+    AUTO = "AUTO"
+
+
+class DuplicateHistoryPolicy(StrEnum):
+    ALLOW_WITH_WARNING = "ALLOW_WITH_WARNING"
+    REQUIRE_CONFIRMATION = "REQUIRE_CONFIRMATION"
+    BLOCK_WITHIN_WINDOW = "BLOCK_WITHIN_WINDOW"
