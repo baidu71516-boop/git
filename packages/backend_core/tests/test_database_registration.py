@@ -59,6 +59,7 @@ expected = {{
     "outreach_events",
     "outreach_targets",
     "outreach_tasks",
+    "phase3a_idempotency_records",
     "refresh_queue_items",
     "refresh_queues",
     "stored_import_files",

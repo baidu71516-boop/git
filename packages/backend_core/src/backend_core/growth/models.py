@@ -11,9 +11,11 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -28,11 +30,125 @@ from backend_core.growth.enums import (
     CandidatePoolStatus,
     CandidateResult,
     DuplicateHistoryPolicy,
+    Phase3AOperationScope,
 )
 
 
 def enum_values(enum_type: type[Any]) -> list[str]:
     return [item.value for item in enum_type]
+
+
+PHASE3A_BULK_ADD_RESULT_PAYLOAD_KEYS = (
+    "campaign_id",
+    "source_pool_run_id",
+    "requested_count",
+    "added_count",
+    "restored_count",
+    "already_active_count",
+    "active_count_after",
+)
+_PHASE3A_BULK_ADD_RESULT_PAYLOAD_KEYS_SQL = ", ".join(
+    f"'{key}'" for key in PHASE3A_BULK_ADD_RESULT_PAYLOAD_KEYS
+)
+_PHASE3A_UUID_PATTERN = (
+    "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-" "[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
+)
+
+
+def _phase3a_bulk_add_result_payload_constraint() -> str:
+    """Return the fixed, redacted bulk-add replay shape for schema version 1."""
+
+    return (
+        "operation_scope <> 'CAMPAIGN_MEMBER_BULK_ADD'::phase3a_operation_scope OR "
+        "result_schema_version <> 1 OR "
+        "(result_payload ?& ARRAY["
+        f"{_PHASE3A_BULK_ADD_RESULT_PAYLOAD_KEYS_SQL}]::text[] AND (result_payload - ARRAY["
+        f"{_PHASE3A_BULK_ADD_RESULT_PAYLOAD_KEYS_SQL}]::text[]) = '{{}}'::jsonb AND "
+        "jsonb_typeof(result_payload -> 'campaign_id') = 'string' AND "
+        f"(result_payload ->> 'campaign_id') ~ '{_PHASE3A_UUID_PATTERN}' AND "
+        "lower(result_payload ->> 'campaign_id') = result_entity_id::text AND "
+        "(jsonb_typeof(result_payload -> 'source_pool_run_id') = 'null' OR "
+        "(jsonb_typeof(result_payload -> 'source_pool_run_id') = 'string' AND "
+        f"(result_payload ->> 'source_pool_run_id') ~ '{_PHASE3A_UUID_PATTERN}')) AND "
+        "jsonb_typeof(result_payload -> 'requested_count') = 'number' AND "
+        "(result_payload ->> 'requested_count') ~ '^[0-9]+$' AND "
+        "jsonb_typeof(result_payload -> 'added_count') = 'number' AND "
+        "(result_payload ->> 'added_count') ~ '^[0-9]+$' AND "
+        "jsonb_typeof(result_payload -> 'restored_count') = 'number' AND "
+        "(result_payload ->> 'restored_count') ~ '^[0-9]+$' AND "
+        "jsonb_typeof(result_payload -> 'already_active_count') = 'number' AND "
+        "(result_payload ->> 'already_active_count') ~ '^[0-9]+$' AND "
+        "jsonb_typeof(result_payload -> 'active_count_after') = 'number' AND "
+        "(result_payload ->> 'active_count_after') ~ '^[0-9]+$' AND "
+        "((result_payload ->> 'added_count')::numeric + "
+        "(result_payload ->> 'restored_count')::numeric + "
+        "(result_payload ->> 'already_active_count')::numeric = "
+        "(result_payload ->> 'requested_count')::numeric))"
+    )
+
+
+class Phase3AIdempotencyRecord(UUIDPrimaryKeyMixin, Base):
+    """Committed Phase 3A mutation results available for durable replay."""
+
+    __tablename__ = "phase3a_idempotency_records"
+    __table_args__ = (
+        UniqueConstraint(
+            "department_id",
+            "operation_scope",
+            "idempotency_key",
+            name="uq_phase3a_idempotency_record_department_scope_key",
+        ),
+        ForeignKeyConstraint(
+            ["department_id"],
+            ["departments.id"],
+            name="fk_phase3a_idempotency_record_department",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "length(idempotency_key) BETWEEN 1 AND 255",
+            name="ck_phase3a_idempotency_record_key_length",
+        ),
+        CheckConstraint(
+            "result_schema_version >= 1",
+            name="ck_phase3a_idempotency_record_result_schema_version",
+        ),
+        CheckConstraint(
+            "request_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_phase3a_idempotency_record_request_hash",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "jsonb_typeof(result_payload) = 'object'",
+            name="ck_phase3a_idempotency_record_payload_object",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "octet_length(result_payload::text) <= 16384",
+            name="ck_phase3a_idempotency_record_payload_size",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            _phase3a_bulk_add_result_payload_constraint(),
+            name="ck_phase3a_idempotency_record_bulk_add_payload",
+        ).ddl_if(dialect="postgresql"),
+    )
+
+    department_id: Mapped[UUID] = mapped_column(nullable=False)
+    operation_scope: Mapped[Phase3AOperationScope] = mapped_column(
+        Enum(
+            Phase3AOperationScope,
+            name="phase3a_operation_scope",
+            values_callable=enum_values,
+        ),
+        nullable=False,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    result_entity_id: Mapped[UUID] = mapped_column(nullable=False)
+    result_schema_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1)
+    result_payload: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
 
 
 class CandidatePool(UUIDPrimaryKeyMixin, TimestampMixin, Base):
