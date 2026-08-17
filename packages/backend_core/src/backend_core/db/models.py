@@ -2,6 +2,14 @@
 
 from backend_core.audit.models import AuditLog
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.growth.models import (
+    Campaign,
+    CampaignMember,
+    CandidatePool,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    TargetingPolicy,
+)
 from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
@@ -20,11 +28,23 @@ from backend_core.influencers.models import (
     InfluencerSourceState,
     PlatformAccountSourceIdentity,
 )
+from backend_core.outreach.models import (
+    MessageTemplate,
+    MessageTemplateVersion,
+    OutreachEvent,
+    OutreachTarget,
+    OutreachTask,
+)
 from backend_core.refresh.models import RefreshQueue, RefreshQueueItem
 
 __all__ = [
     "AuditLog",
     "AuthSession",
+    "CandidatePool",
+    "CandidatePoolMember",
+    "CandidatePoolRun",
+    "Campaign",
+    "CampaignMember",
     "CollectionJob",
     "Department",
     "DepartmentPermission",
@@ -43,5 +63,11 @@ __all__ = [
     "RefreshQueue",
     "RefreshQueueItem",
     "Operator",
+    "MessageTemplate",
+    "MessageTemplateVersion",
+    "OutreachEvent",
+    "OutreachTarget",
+    "OutreachTask",
     "StoredImportFile",
+    "TargetingPolicy",
 ]

@@ -17,11 +17,32 @@ if config.config_file_name is not None:
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
 
+# PostgreSQL normalizes the guarded JSONB expressions with implicit casts when
+# reflecting them. Comparing their rendered text would make `alembic check`
+# report a false index replacement after every upgrade.
+MANUAL_EXPRESSION_INDEXES = {
+    "ix_current_metrics_followers_count_guarded",
+    "ix_current_metrics_notes_7d_guarded",
+    "ix_current_metrics_notes_60d_guarded",
+}
+
+
+def include_object(
+    object_: object,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: object | None,
+) -> bool:
+    del object_, reflected, compare_to
+    return not (type_ == "index" and name in MANUAL_EXPRESSION_INDEXES)
+
 
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
@@ -31,7 +52,12 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: object) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

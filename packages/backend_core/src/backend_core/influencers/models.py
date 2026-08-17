@@ -15,8 +15,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.sql.elements import TextClause
 
 from backend_core.db.base import Base
 from backend_core.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
@@ -33,6 +35,19 @@ from backend_core.influencers.enums import (
 
 def enum_values(enum_type: type[Any]) -> list[str]:
     return [item.value for item in enum_type]
+
+
+def guarded_metric_jsonb_bigint(key: str) -> TextClause:
+    raw = f"metrics ->> '{key}'"
+    normalized = f"NULLIF(ltrim({raw}, '0'), '')"
+    return text(
+        "(CASE WHEN "
+        f"{raw} ~ '^[0-9]+$' AND "
+        f"(length(COALESCE({normalized}, '0')) < 19 OR "
+        f"(length(COALESCE({normalized}, '0')) = 19 AND "
+        f"COALESCE({normalized}, '0') <= '9223372036854775807')) "
+        f"THEN COALESCE({normalized}, '0')::bigint END)"
+    )
 
 
 class Influencer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -63,6 +78,7 @@ class InfluencerPlatformAccount(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("id", "influencer_id", name="uq_platform_account_influencer_pair"),
         UniqueConstraint("id", "platform", name="uq_platform_account_platform_pair"),
         Index("ix_platform_accounts_influencer", "influencer_id", "is_active"),
+        Index("ix_platform_accounts_source_tags_gin", "source_tags", postgresql_using="gin"),
     )
 
     influencer_id: Mapped[UUID] = mapped_column(
@@ -136,6 +152,7 @@ class InfluencerContact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "source",
             name="uq_influencer_contact_source",
         ),
+        UniqueConstraint("id", "influencer_id", name="uq_influencer_contact_id_influencer"),
         ForeignKeyConstraint(
             ["platform_account_id", "influencer_id"],
             ["influencer_platform_accounts.id", "influencer_platform_accounts.influencer_id"],
@@ -171,6 +188,17 @@ class InfluencerContact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("last_seen_at >= first_seen_at", name="ck_contact_seen_range"),
         Index("ix_influencer_contacts_normalized", "type", "normalized_value"),
+        Index(
+            "ix_influencer_contacts_current_influencer_type",
+            "influencer_id",
+            "type",
+            postgresql_where=text("is_current = true"),
+        ),
+        Index(
+            "ix_influencer_contacts_current_influencer",
+            "influencer_id",
+            postgresql_where=text("is_current = true"),
+        ),
     )
 
     influencer_id: Mapped[UUID] = mapped_column(
@@ -224,6 +252,12 @@ class InfluencerCurrentMetrics(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="fk_current_metrics_last_import",
             ondelete="RESTRICT",
         ),
+        Index(
+            "ix_current_metrics_followers_count_guarded",
+            guarded_metric_jsonb_bigint("followers_count"),
+        ),
+        Index("ix_current_metrics_notes_7d_guarded", guarded_metric_jsonb_bigint("notes_7d")),
+        Index("ix_current_metrics_notes_60d_guarded", guarded_metric_jsonb_bigint("notes_60d")),
     )
 
     influencer_id: Mapped[UUID] = mapped_column(
