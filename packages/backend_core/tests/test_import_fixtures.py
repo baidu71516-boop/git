@@ -8,6 +8,10 @@ from backend_core.imports.parsers import parse_csv, parse_xlsx
 from openpyxl import Workbook
 
 FIXTURE = Path(__file__).parents[3] / "tests" / "fixtures" / "huitun_sanitized_37_columns.csv"
+LEGACY_HUITUN_HEADERS = [header for header in HUITUN_FIELD_MAPPING if header != "近7天笔记数"]
+LEGACY_HUITUN_FIELD_MAPPING = {
+    header: HUITUN_FIELD_MAPPING[header] for header in LEGACY_HUITUN_HEADERS
+}
 
 
 def xlsx_from_sanitized_csv() -> bytes:
@@ -31,17 +35,18 @@ def test_sanitized_huitun_csv_and_xlsx_fixtures_keep_the_real_37_field_shape() -
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-    assert csv_table.headers == xlsx_table.headers == list(HUITUN_FIELD_MAPPING)
+    assert csv_table.headers == xlsx_table.headers == LEGACY_HUITUN_HEADERS
     assert len(csv_table.rows) == len(xlsx_table.rows) == 2
     csv_adapter = HuitunCsvAdapter()
     xlsx_adapter = HuitunExcelAdapter()
-    csv_adapter.mapping_for_headers(csv_table.headers)
-    xlsx_adapter.mapping_for_headers(xlsx_table.headers)
+    assert csv_adapter.mapping_for_headers(csv_table.headers) == LEGACY_HUITUN_FIELD_MAPPING
+    assert xlsx_adapter.mapping_for_headers(xlsx_table.headers) == LEGACY_HUITUN_FIELD_MAPPING
     adapted = [
         *(csv_adapter.adapt(row) for row in csv_table.rows),
         *(xlsx_adapter.adapt(row) for row in xlsx_table.rows),
     ]
     assert all(row.is_valid for row in adapted)
+    assert all("notes_7d" not in row.record.metrics for row in adapted)
     assert all(
         (row.record.platform_identity.platform_account_id or "").startswith("sanitizedFixture")
         for row in adapted

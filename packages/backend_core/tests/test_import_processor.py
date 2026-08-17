@@ -53,6 +53,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 SANITIZED_HUITUN_FIXTURE = (
     Path(__file__).parents[3] / "tests" / "fixtures" / "huitun_sanitized_37_columns.csv"
 )
+LEGACY_HUITUN_HEADERS = [header for header in HUITUN_FIELD_MAPPING if header != "近7天笔记数"]
+LEGACY_HUITUN_FIELD_MAPPING = {
+    header: HUITUN_FIELD_MAPPING[header] for header in LEGACY_HUITUN_HEADERS
+}
 
 
 @asynccontextmanager
@@ -225,8 +229,8 @@ def test_sanitized_real_huitun_shape_uploads_maps_and_builds_preview() -> None:
             assert preview["status"] == ImportJobStatus.PREVIEW_READY.value
             assert preview["preview_revision"] == 1
             assert job.status is ImportJobStatus.PREVIEW_READY
-            assert job.detected_fields == list(HUITUN_FIELD_MAPPING)
-            assert job.field_mapping == dict(HUITUN_FIELD_MAPPING)
+            assert job.detected_fields == LEGACY_HUITUN_HEADERS
+            assert job.field_mapping == LEGACY_HUITUN_FIELD_MAPPING
             assert job.field_mapping["达人官方地址"] == "profile_url"
             assert job.field_mapping["小红书号"] == "account_handle"
             assert job.field_mapping["联系邮箱"] == "email"
@@ -266,6 +270,36 @@ def test_sanitized_real_huitun_shape_uploads_maps_and_builds_preview() -> None:
                     "validation_status": "valid",
                 }
             ]
+            assert "notes_7d" not in first["metrics"]
+
+    asyncio.run(scenario())
+
+
+def test_current_38_field_huitun_export_preserves_notes_7d_in_preview() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            job = await seed_import_job(
+                session,
+                storage,
+                huitun_csv([valid_row("current-38") | {"近7天笔记数": "3"}]),
+                filename="huitun-current-38-columns.csv",
+            )
+
+            preview = await ImportProcessor(
+                session,
+                storage,
+                parser_limits=limits(),
+            ).parse_and_preview(job.id)
+
+            await session.refresh(job)
+            assert preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            assert job.detected_fields == list(HUITUN_FIELD_MAPPING)
+            assert job.field_mapping == dict(HUITUN_FIELD_MAPPING)
+            assert job.preview_summary is not None
+            assert job.preview_summary["field_count"] == 38
+            row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
+            assert row is not None
+            assert row.normalized_data["metrics"]["notes_7d"] == 3
 
     asyncio.run(scenario())
 
