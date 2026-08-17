@@ -155,6 +155,7 @@ def _decode_csv(content: bytes) -> tuple[str, str]:
             text = content.decode(encoding)
         except UnicodeDecodeError as exc:
             raise ImportDomainError("INVALID_CSV_ENCODING", "Unsupported CSV encoding") from exc
+    text = text.replace("\x0b", " ")
     if UNSAFE_CONTROL_CHARACTERS.search(text):
         raise ImportDomainError("INVALID_CSV", "CSV contains unsafe control characters")
     if not text.strip():

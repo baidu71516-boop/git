@@ -12,6 +12,7 @@ from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.parsers import (
     ParserLimits,
     parse_csv,
+    parse_table,
     parse_xlsx,
     validate_upload_type,
 )
@@ -86,6 +87,76 @@ def test_csv_gb18030_is_detected_without_corrupting_text() -> None:
 
     assert table.encoding == "gb18030"
     assert table.rows[0].values == {"达人名称": "示例达人", "地域": "上海"}
+
+
+def test_csv_without_vertical_tabs_is_unchanged() -> None:
+    content = b"name,bio\nAlpha,ordinary text\n"
+
+    table = parse_csv(content, "text/csv")
+
+    assert table.headers == ["name", "bio"]
+    assert [row.values for row in table.rows] == [{"name": "Alpha", "bio": "ordinary text"}]
+
+
+def test_csv_vertical_tabs_are_normalized_for_preflight_and_worker_parse() -> None:
+    content = '\ufeffname,bio\nAlpha,"first\x0bsecond\x0bthird"\nOmega,plain\n'.encode()
+    original_sha256 = hashlib.sha256(content).hexdigest()
+
+    assert (
+        validate_upload_type(
+            content,
+            suffix=".csv",
+            declared_mime="text/csv",
+            limits=ParserLimits(),
+        )
+        is StoredFileType.CSV
+    )
+    table = parse_table(
+        content,
+        file_type=StoredFileType.CSV,
+        declared_mime="text/csv",
+        limits=ParserLimits(),
+    )
+
+    assert content == '\ufeffname,bio\nAlpha,"first\x0bsecond\x0bthird"\nOmega,plain\n'.encode()
+    assert hashlib.sha256(content).hexdigest() == original_sha256
+    assert table.encoding == "utf-8-sig"
+    assert table.headers == ["name", "bio"]
+    assert len(table.rows) == 2
+    assert table.rows[0].values["bio"] == "first second third"
+    assert table.rows[1].values == {"name": "Omega", "bio": "plain"}
+
+
+@pytest.mark.parametrize("control", [b"\x00", b"\x0c", b"\x01", b"\x1f"])
+def test_csv_rejects_unsafe_controls_other_than_vertical_tab(control: bytes) -> None:
+    content = b"name,bio\nAlpha,unsafe" + control + b"value\n"
+
+    for operation in (
+        lambda: validate_upload_type(
+            content,
+            suffix=".csv",
+            declared_mime="text/csv",
+            limits=ParserLimits(),
+        ),
+        lambda: parse_table(
+            content,
+            file_type=StoredFileType.CSV,
+            declared_mime="text/csv",
+            limits=ParserLimits(),
+        ),
+    ):
+        with pytest.raises(ImportDomainError) as caught:
+            operation()
+        assert_import_error(caught.value, "INVALID_CSV")
+
+
+def test_csv_tab_cr_and_lf_remain_valid_csv_content() -> None:
+    content = b'name,bio\r\nAlpha,"tab\tfirst line\r\nsecond line"\r\n'
+
+    table = parse_csv(content, "text/csv")
+
+    assert table.headers == ["name", "bio"]
+    assert table.rows[0].values["bio"] == "tab\tfirst line\r\nsecond line"
 
 
 @pytest.mark.parametrize(
