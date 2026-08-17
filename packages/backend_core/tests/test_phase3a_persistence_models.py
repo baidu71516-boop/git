@@ -1,8 +1,14 @@
 """Phase 3A persistence metadata contract tests."""
 
 import backend_core.db.models  # noqa: F401
+from backend_core.audit.enums import AuditAction
 from backend_core.db import Base
-from backend_core.growth.enums import CampaignStatus, CandidatePoolKind, CandidateResult
+from backend_core.growth.enums import (
+    CampaignStatus,
+    CandidatePoolKind,
+    CandidateResult,
+    Phase3AOperationScope,
+)
 from backend_core.outreach.enums import (
     OutreachChannel,
     OutreachPriority,
@@ -23,7 +29,25 @@ PHASE3_TABLES = {
     "outreach_events",
     "message_templates",
     "message_template_versions",
+    "phase3a_idempotency_records",
 }
+
+PHASE3A_AUDIT_ACTIONS = [
+    "CANDIDATE_POOL_CREATED",
+    "CANDIDATE_POOL_UPDATED",
+    "TARGETING_POLICY_CREATED",
+    "CANDIDATE_POOL_RUN_REQUESTED",
+    "CANDIDATE_POOL_RUN_COMPLETED",
+    "CANDIDATE_POOL_RUN_FAILED",
+    "CAMPAIGN_CREATED",
+    "CAMPAIGN_UPDATED",
+    "CAMPAIGN_MEMBERS_ADDED",
+    "CAMPAIGN_MEMBERS_REMOVED",
+    "OUTREACH_TARGET_CREATED",
+    "OUTREACH_TARGET_UPDATED",
+    "OUTREACH_TASK_CREATED",
+    "OUTREACH_TASK_TRANSITIONED",
+]
 
 
 def constraint_names(table_name: str, kind: type[object]) -> set[str]:
@@ -55,6 +79,16 @@ def test_phase3a_enums_are_closed_to_the_frozen_contract() -> None:
     ]
     assert [item.value for item in OutreachPriority] == ["NORMAL", "HIGH"]
     assert [item.value for item in OutreachPrioritySource] == ["DEFAULT", "MANUAL", "POLICY"]
+    assert [item.value for item in Phase3AOperationScope] == [
+        "CANDIDATE_POOL_CREATE",
+        "TARGETING_POLICY_CREATE",
+        "CAMPAIGN_CREATE",
+        "CAMPAIGN_MEMBER_BULK_ADD",
+        "OUTREACH_TARGET_CREATE",
+    ]
+    assert [item.value for item in AuditAction][-len(PHASE3A_AUDIT_ACTIONS) :] == (
+        PHASE3A_AUDIT_ACTIONS
+    )
 
 
 def test_campaign_member_and_target_ownership_constraints_are_present() -> None:
@@ -88,3 +122,34 @@ def test_uniqueness_and_task_checks_are_present() -> None:
     assert "ck_outreach_target_channel_reference_shape" in constraint_names(
         "outreach_targets", CheckConstraint
     )
+
+
+def test_phase3a_idempotency_record_has_the_approved_persistence_shape() -> None:
+    table = Base.metadata.tables["phase3a_idempotency_records"]
+
+    assert set(table.columns.keys()) == {
+        "id",
+        "department_id",
+        "operation_scope",
+        "idempotency_key",
+        "request_hash",
+        "result_entity_id",
+        "result_schema_version",
+        "result_payload",
+        "created_at",
+    }
+    assert "updated_at" not in table.columns
+    assert "fk_phase3a_idempotency_record_department" in constraint_names(
+        "phase3a_idempotency_records", ForeignKeyConstraint
+    )
+    assert "uq_phase3a_idempotency_record_department_scope_key" in constraint_names(
+        "phase3a_idempotency_records", UniqueConstraint
+    )
+    assert {
+        "ck_phase3a_idempotency_record_key_length",
+        "ck_phase3a_idempotency_record_request_hash",
+        "ck_phase3a_idempotency_record_result_schema_version",
+        "ck_phase3a_idempotency_record_payload_object",
+        "ck_phase3a_idempotency_record_payload_size",
+        "ck_phase3a_idempotency_record_bulk_add_payload",
+    } <= constraint_names("phase3a_idempotency_records", CheckConstraint)

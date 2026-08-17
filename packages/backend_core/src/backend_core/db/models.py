@@ -8,6 +8,7 @@ from backend_core.growth.models import (
     CandidatePool,
     CandidatePoolMember,
     CandidatePoolRun,
+    Phase3AIdempotencyRecord,
     TargetingPolicy,
 )
 from backend_core.imports.models import (
@@ -63,6 +64,7 @@ __all__ = [
     "RefreshQueue",
     "RefreshQueueItem",
     "Operator",
+    "Phase3AIdempotencyRecord",
     "MessageTemplate",
     "MessageTemplateVersion",
     "OutreachEvent",
