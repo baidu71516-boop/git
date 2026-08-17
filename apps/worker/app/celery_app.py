@@ -12,7 +12,7 @@ celery_app = Celery(
     "influencer_outreach",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.health", "app.tasks.imports"],
+    include=["app.tasks.health", "app.tasks.imports", "app.tasks.targeting"],
 )
 celery_app.conf.update(
     accept_content=["json"],
@@ -26,17 +26,25 @@ celery_app.conf.update(
         "imports.preview_import_job": {"queue": "import"},
         "imports.confirm_import_job": {"queue": "import"},
         "imports.reconcile_import_tasks": {"queue": "default"},
+        "targeting.materialize_candidate_pool_run": {"queue": "targeting"},
+        "targeting.reconcile_pending_candidate_pool_runs": {"queue": "default"},
     },
     beat_schedule={
         "reconcile-durable-import-tasks": {
             "task": "imports.reconcile_import_tasks",
             "schedule": settings.import_task_reconcile_interval_seconds,
             "options": {"queue": "default"},
-        }
+        },
+        "reconcile-pending-candidate-pool-runs": {
+            "task": "targeting.reconcile_pending_candidate_pool_runs",
+            "schedule": 60,
+            "options": {"queue": "default"},
+        },
     },
     task_queues=(
         Queue("default"),
         Queue("import"),
+        Queue("targeting"),
         Queue("ai"),
         Queue("email"),
         Queue("analytics"),

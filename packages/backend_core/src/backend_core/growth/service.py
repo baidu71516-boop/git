@@ -1,0 +1,938 @@
+"""Candidate Pool policy, run lifecycle, authorization, and materialization service."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend_core.audit.enums import AuditAction, AuditResult
+from backend_core.audit.repository import AuditRepository
+from backend_core.auth import AuthContext, Role
+from backend_core.growth.enums import (
+    CandidatePoolKind,
+    CandidatePoolRunStatus,
+    CandidatePoolStatus,
+    Phase3AOperationScope,
+)
+from backend_core.growth.models import (
+    CandidatePool,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    Phase3AIdempotencyRecord,
+    TargetingPolicy,
+)
+from backend_core.growth.repository import CandidatePoolRepository
+from backend_core.growth.schemas import (
+    CandidatePoolCreateInput,
+    CandidatePoolMemberPublic,
+    CandidatePoolPage,
+    CandidatePoolPublic,
+    CandidatePoolRunMemberPage,
+    CandidatePoolRunPublic,
+    TargetingPolicyCreateInput,
+    TargetingPolicyCreateResultPublic,
+    TargetingPolicyPublic,
+    viewer_redacted_evidence,
+    viewer_redacted_reason_codes,
+)
+from backend_core.growth.targeting import (
+    BuyerTargetingPolicy,
+    SellerTargetingPolicy,
+    TargetingReasonCode,
+    evaluate_targeting,
+    parse_targeting_policy,
+)
+from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
+from backend_core.influencers.freshness import FreshnessPolicy
+
+
+class TargetingError(Exception):
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+IDEMPOTENCY_RESULT_SCHEMA_VERSION = 1
+MAX_IDEMPOTENCY_RESULT_PAYLOAD_BYTES = 16_384
+
+
+class CandidatePoolService:
+    """Own all mutable Candidate Pool operations; the repository never commits."""
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        *,
+        freshness_policy: FreshnessPolicy,
+    ) -> None:
+        self.session = session
+        self.repository = CandidatePoolRepository(session)
+        self.audit = AuditRepository(session)
+        self.freshness_policy = freshness_policy
+
+    @staticmethod
+    def _department_id(context: AuthContext) -> UUID:
+        return context.department.id
+
+    @classmethod
+    def _read_scope(cls, context: AuthContext) -> UUID | None:
+        return None if context.role is Role.SUPER_ADMIN else cls._department_id(context)
+
+    @classmethod
+    def _require_mutation(cls, context: AuthContext) -> UUID:
+        if context.operator is None:
+            raise TargetingError(409, "OPERATOR_REQUIRED", "Select an operator first")
+        if context.role is Role.VIEWER:
+            raise TargetingError(403, "PERMISSION_DENIED", "Viewer role is read-only")
+        return context.operator.id
+
+    async def _read_pool(self, context: AuthContext, pool_id: UUID) -> CandidatePool:
+        pool = await self.repository.get_pool(
+            pool_id,
+            department_id=self._read_scope(context),
+        )
+        if pool is None:
+            raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
+        return pool
+
+    async def _write_pool(self, context: AuthContext, pool_id: UUID) -> CandidatePool:
+        """Writes stay in the session Department unless a later API adds an audited override."""
+
+        pool = await self.repository.get_pool(
+            pool_id,
+            department_id=self._department_id(context),
+            for_update=True,
+        )
+        if pool is None:
+            raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
+        return pool
+
+    @staticmethod
+    def _typed_policy(
+        pool: CandidatePool,
+        policy: TargetingPolicy,
+    ) -> SellerTargetingPolicy | BuyerTargetingPolicy:
+        try:
+            definition = parse_targeting_policy(policy.definition)
+        except (TypeError, ValidationError, ValueError) as error:
+            raise TargetingError(
+                409, "TARGETING_POLICY_INVALID", "Targeting policy is invalid"
+            ) from error
+        if (
+            policy.schema_version != definition.schema_version
+            or policy.canonical_hash != definition.canonical_hash
+        ):
+            raise TargetingError(409, "TARGETING_POLICY_INVALID", "Targeting policy is invalid")
+        if pool.kind is CandidatePoolKind.POTENTIAL_SELLER and isinstance(
+            definition, SellerTargetingPolicy
+        ):
+            return definition
+        if pool.kind is CandidatePoolKind.POTENTIAL_BUYER and isinstance(
+            definition, BuyerTargetingPolicy
+        ):
+            return definition
+        raise TargetingError(
+            409, "POLICY_KIND_MISMATCH", "Policy type does not match Candidate Pool kind"
+        )
+
+    @staticmethod
+    def _require_reviewed_buyer_taxonomy(
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+        *,
+        status_code: int,
+    ) -> None:
+        """Keep unreviewed Buyer taxonomy snapshots out of an active run path."""
+
+        if isinstance(definition, BuyerTargetingPolicy) and not definition.taxonomy.reviewed:
+            raise TargetingError(
+                status_code,
+                "BUYER_TAXONOMY_UNREVIEWED",
+                "Buyer targeting requires a reviewed taxonomy",
+            )
+
+    @staticmethod
+    def _require_idempotency_key(idempotency_key: str) -> None:
+        if not idempotency_key or len(idempotency_key) > 255:
+            raise TargetingError(422, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is invalid")
+
+    @staticmethod
+    def _result_payload(
+        result: CandidatePoolPublic | TargetingPolicyCreateResultPublic,
+    ) -> dict[str, Any]:
+        payload = result.model_dump(mode="json")
+        if len(canonical_json(payload).encode("utf-8")) > MAX_IDEMPOTENCY_RESULT_PAYLOAD_BYTES:
+            raise TargetingError(
+                500,
+                "IDEMPOTENCY_RESULT_TOO_LARGE",
+                "Idempotency result exceeds the configured limit",
+            )
+        return payload
+
+    @staticmethod
+    def _idempotency_key_reused() -> TargetingError:
+        return TargetingError(
+            409,
+            "IDEMPOTENCY_KEY_REUSED",
+            "Idempotency-Key was already used for a different request",
+        )
+
+    @staticmethod
+    def _invalid_idempotency_record() -> TargetingError:
+        return TargetingError(
+            409,
+            "IDEMPOTENCY_RECORD_INVALID",
+            "Persisted idempotency result is invalid",
+        )
+
+    @classmethod
+    def _pool_result_from_idempotency_record(
+        cls,
+        record: Phase3AIdempotencyRecord,
+    ) -> CandidatePoolPublic:
+        if record.result_schema_version != IDEMPOTENCY_RESULT_SCHEMA_VERSION:
+            raise cls._invalid_idempotency_record()
+        try:
+            result = CandidatePoolPublic.model_validate(record.result_payload)
+        except ValidationError as error:
+            raise cls._invalid_idempotency_record() from error
+        if result.id != record.result_entity_id:
+            raise cls._invalid_idempotency_record()
+        return result
+
+    @classmethod
+    def _policy_result_from_idempotency_record(
+        cls,
+        record: Phase3AIdempotencyRecord,
+    ) -> TargetingPolicyCreateResultPublic:
+        if record.result_schema_version != IDEMPOTENCY_RESULT_SCHEMA_VERSION:
+            raise cls._invalid_idempotency_record()
+        try:
+            result = TargetingPolicyCreateResultPublic.model_validate(record.result_payload)
+        except ValidationError as error:
+            raise cls._invalid_idempotency_record() from error
+        if result.id != record.result_entity_id:
+            raise cls._invalid_idempotency_record()
+        return result
+
+    async def _pool_create_replay(
+        self,
+        *,
+        department_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> CandidatePoolPublic | None:
+        record = await self.repository.get_phase3a_idempotency_record(
+            department_id=department_id,
+            operation_scope=Phase3AOperationScope.CANDIDATE_POOL_CREATE,
+            idempotency_key=idempotency_key,
+        )
+        if record is None:
+            return None
+        if record.request_hash != request_hash:
+            raise self._idempotency_key_reused()
+        return self._pool_result_from_idempotency_record(record)
+
+    async def _policy_create_replay(
+        self,
+        *,
+        department_id: UUID,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> TargetingPolicyCreateResultPublic | None:
+        record = await self.repository.get_phase3a_idempotency_record(
+            department_id=department_id,
+            operation_scope=Phase3AOperationScope.TARGETING_POLICY_CREATE,
+            idempotency_key=idempotency_key,
+        )
+        if record is None:
+            return None
+        if record.request_hash != request_hash:
+            raise self._idempotency_key_reused()
+        return self._policy_result_from_idempotency_record(record)
+
+    @staticmethod
+    def _validate_policy_for_pool(
+        *,
+        kind: CandidatePoolKind,
+        source_collection_job_id: UUID | None,
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+    ) -> None:
+        CandidatePoolService._require_reviewed_buyer_taxonomy(definition, status_code=422)
+        if kind is CandidatePoolKind.POTENTIAL_SELLER and not isinstance(
+            definition, SellerTargetingPolicy
+        ):
+            raise TargetingError(
+                422, "POLICY_KIND_MISMATCH", "Seller pool requires SELLER_V1 policy"
+            )
+        if kind is CandidatePoolKind.POTENTIAL_BUYER and not isinstance(
+            definition, BuyerTargetingPolicy
+        ):
+            raise TargetingError(422, "POLICY_KIND_MISMATCH", "Buyer pool requires BUYER_V1 policy")
+        if kind is CandidatePoolKind.POTENTIAL_BUYER and source_collection_job_id is None:
+            raise TargetingError(
+                422,
+                "SOURCE_COLLECTION_REQUIRED",
+                "Buyer Candidate Pools require source_collection_job_id",
+            )
+
+    @staticmethod
+    def _policy_audit_after(policy: TargetingPolicy) -> dict[str, Any]:
+        return {
+            "pool_id": str(policy.pool_id),
+            "version": policy.version,
+            "schema_version": policy.schema_version,
+            "canonical_hash": policy.canonical_hash,
+        }
+
+    @staticmethod
+    def _pool_audit_after(pool: CandidatePool) -> dict[str, Any]:
+        return {
+            "status": pool.status.value,
+            "version": pool.version,
+            "current_policy_id": str(pool.current_policy_id) if pool.current_policy_id else None,
+        }
+
+    async def create_pool(
+        self,
+        context: AuthContext,
+        payload: CandidatePoolCreateInput,
+        *,
+        idempotency_key: str,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> CandidatePoolPublic:
+        operator_id = self._require_mutation(context)
+        department_id = self._department_id(context)
+        self._require_idempotency_key(idempotency_key)
+        mutation_started = False
+        try:
+            typed_definition = parse_targeting_policy(payload.policy)
+            self._validate_policy_for_pool(
+                kind=payload.kind,
+                source_collection_job_id=payload.source_collection_job_id,
+                definition=typed_definition,
+            )
+            if payload.kind is CandidatePoolKind.POTENTIAL_BUYER:
+                assert payload.source_collection_job_id is not None
+                collection = await self.repository.get_collection_job(
+                    payload.source_collection_job_id,
+                    department_id=department_id,
+                )
+                if collection is None:
+                    raise TargetingError(
+                        404,
+                        "COLLECTION_JOB_NOT_FOUND",
+                        "Collection Job not found",
+                    )
+            request_hash = hash_document(
+                {
+                    "operation": "candidate_pool_create",
+                    "department_id": department_id,
+                    "name": payload.name,
+                    "kind": payload.kind,
+                    "source_collection_job_id": payload.source_collection_job_id,
+                    "policy": typed_definition.model_dump(mode="json"),
+                }
+            )
+            replay = await self._pool_create_replay(
+                department_id=department_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                await self.session.commit()
+                return replay
+            mutation_started = True
+            pool = CandidatePool(
+                department_id=department_id,
+                owner_operator_id=operator_id,
+                name=payload.name,
+                kind=payload.kind,
+                source_collection_job_id=payload.source_collection_job_id,
+                status=CandidatePoolStatus.ACTIVE,
+                current_policy_id=None,
+                version=1,
+            )
+            self.session.add(pool)
+            await self.session.flush()
+            policy = await self._append_policy_locked(pool, operator_id, typed_definition)
+            await self.session.refresh(pool)
+            await self.session.refresh(policy)
+            result = CandidatePoolPublic.model_validate(pool)
+            self.audit.add(
+                action=AuditAction.CANDIDATE_POOL_CREATED,
+                result=AuditResult.SUCCESS,
+                department_id=department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="candidate_pool",
+                entity_id=pool.id,
+                after=self._pool_audit_after(pool),
+            )
+            self.audit.add(
+                action=AuditAction.TARGETING_POLICY_CREATED,
+                result=AuditResult.SUCCESS,
+                department_id=department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="targeting_policy",
+                entity_id=policy.id,
+                after=self._policy_audit_after(policy),
+            )
+            self.session.add(
+                Phase3AIdempotencyRecord(
+                    department_id=department_id,
+                    operation_scope=Phase3AOperationScope.CANDIDATE_POOL_CREATE,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    result_entity_id=pool.id,
+                    result_schema_version=IDEMPOTENCY_RESULT_SCHEMA_VERSION,
+                    result_payload=self._result_payload(result),
+                )
+            )
+            await self.session.flush()
+            await self.session.commit()
+            return result
+        except IntegrityError:
+            await self.session.rollback()
+            try:
+                replay = await self._pool_create_replay(
+                    department_id=department_id,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                if replay is not None:
+                    await self.session.commit()
+                    return replay
+            except BaseException:
+                await self.session.rollback()
+                raise
+            await self.session.rollback()
+            raise
+        except TargetingError:
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def append_policy(
+        self,
+        context: AuthContext,
+        pool_id: UUID,
+        payload: TargetingPolicyCreateInput,
+        *,
+        idempotency_key: str,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> TargetingPolicyCreateResultPublic:
+        operator_id = self._require_mutation(context)
+        department_id = self._department_id(context)
+        self._require_idempotency_key(idempotency_key)
+        mutation_started = False
+        try:
+            preflight_pool = await self.repository.get_pool(
+                pool_id,
+                department_id=department_id,
+            )
+            if preflight_pool is None:
+                raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
+            typed_definition = parse_targeting_policy(payload.policy)
+            self._validate_policy_for_pool(
+                kind=preflight_pool.kind,
+                source_collection_job_id=preflight_pool.source_collection_job_id,
+                definition=typed_definition,
+            )
+            request_hash = hash_document(
+                {
+                    "operation": "targeting_policy_create",
+                    "pool_id": pool_id,
+                    "policy": typed_definition.model_dump(mode="json"),
+                }
+            )
+            replay = await self._policy_create_replay(
+                department_id=department_id,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+            if replay is not None:
+                await self.session.commit()
+                return replay
+            pool = await self._write_pool(context, pool_id)
+            before = self._pool_audit_after(pool)
+            mutation_started = True
+            policy = await self._append_policy_locked(pool, operator_id, typed_definition)
+            await self.session.refresh(pool)
+            await self.session.refresh(policy)
+            result = TargetingPolicyCreateResultPublic.model_validate(policy)
+            self.audit.add(
+                action=AuditAction.CANDIDATE_POOL_UPDATED,
+                result=AuditResult.SUCCESS,
+                department_id=department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="candidate_pool",
+                entity_id=pool.id,
+                before=before,
+                after=self._pool_audit_after(pool),
+            )
+            self.audit.add(
+                action=AuditAction.TARGETING_POLICY_CREATED,
+                result=AuditResult.SUCCESS,
+                department_id=department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="targeting_policy",
+                entity_id=policy.id,
+                after=self._policy_audit_after(policy),
+            )
+            self.session.add(
+                Phase3AIdempotencyRecord(
+                    department_id=department_id,
+                    operation_scope=Phase3AOperationScope.TARGETING_POLICY_CREATE,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    result_entity_id=policy.id,
+                    result_schema_version=IDEMPOTENCY_RESULT_SCHEMA_VERSION,
+                    result_payload=self._result_payload(result),
+                )
+            )
+            await self.session.flush()
+            await self.session.commit()
+            return result
+        except IntegrityError:
+            await self.session.rollback()
+            try:
+                replay = await self._policy_create_replay(
+                    department_id=department_id,
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                if replay is not None:
+                    await self.session.commit()
+                    return replay
+            except BaseException:
+                await self.session.rollback()
+                raise
+            await self.session.rollback()
+            raise
+        except TargetingError:
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def _append_policy_locked(
+        self,
+        pool: CandidatePool,
+        operator_id: UUID,
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+    ) -> TargetingPolicy:
+        typed_definition = parse_targeting_policy(definition)
+        self._validate_policy_for_pool(
+            kind=pool.kind,
+            source_collection_job_id=pool.source_collection_job_id,
+            definition=typed_definition,
+        )
+        policy = TargetingPolicy(
+            pool_id=pool.id,
+            version=await self.repository.next_policy_version(pool.id),
+            schema_version=typed_definition.schema_version,
+            definition=typed_definition.model_dump(mode="json"),
+            canonical_hash=typed_definition.canonical_hash,
+            created_by_operator_id=operator_id,
+        )
+        self.session.add(policy)
+        await self.session.flush()
+        pool.current_policy_id = policy.id
+        pool.version += 1
+        await self.session.flush()
+        return policy
+
+    async def list_pools(
+        self,
+        context: AuthContext,
+        *,
+        cursor: UUID | None,
+        limit: int,
+    ) -> CandidatePoolPage:
+        page = await self.repository.list_pools(
+            department_id=self._read_scope(context),
+            cursor=cursor,
+            limit=limit,
+        )
+        return CandidatePoolPage(
+            items=tuple(CandidatePoolPublic.model_validate(item) for item in page.items),
+            next_cursor=page.next_cursor,
+        )
+
+    async def get_pool(self, context: AuthContext, pool_id: UUID) -> CandidatePoolPublic:
+        return CandidatePoolPublic.model_validate(await self._read_pool(context, pool_id))
+
+    async def list_policies(
+        self,
+        context: AuthContext,
+        pool_id: UUID,
+    ) -> tuple[TargetingPolicyPublic, ...]:
+        pool = await self._read_pool(context, pool_id)
+        return tuple(
+            TargetingPolicyPublic.model_validate(item)
+            for item in await self.repository.list_policies(pool.id)
+        )
+
+    @staticmethod
+    def _run_requested_audit_after(run: CandidatePoolRun) -> dict[str, Any]:
+        return {
+            "pool_id": str(run.pool_id),
+            "policy_id": str(run.policy_id),
+            "status": run.status.value,
+        }
+
+    @staticmethod
+    def _run_terminal_audit_after(run: CandidatePoolRun) -> dict[str, Any]:
+        return {
+            "pool_id": str(run.pool_id),
+            "policy_id": str(run.policy_id),
+            "status": run.status.value,
+            "match_count": run.match_count,
+            "unknown_count": run.unknown_count,
+            "not_match_count": run.not_match_count,
+            "error_code": run.error_code,
+        }
+
+    def _add_run_audit(
+        self,
+        *,
+        action: AuditAction,
+        result: AuditResult,
+        run: CandidatePoolRun,
+        department_id: UUID,
+        ip: str,
+        user_agent: str,
+        after: dict[str, Any],
+        operator_id: UUID | None = None,
+    ) -> None:
+        self.audit.add(
+            action=action,
+            result=result,
+            department_id=department_id,
+            operator_id=operator_id,
+            ip=ip,
+            user_agent=user_agent,
+            entity_type="candidate_pool_run",
+            entity_id=run.id,
+            after=after,
+        )
+
+    async def _mark_run_failed(
+        self,
+        *,
+        run: CandidatePoolRun,
+        pool: CandidatePool,
+        error_code: str,
+        error_message: str,
+    ) -> CandidatePoolRun:
+        try:
+            run.status = CandidatePoolRunStatus.FAILED
+            run.error_code = error_code
+            run.error_message = error_message
+            self._add_run_audit(
+                action=AuditAction.CANDIDATE_POOL_RUN_FAILED,
+                result=AuditResult.FAILED,
+                run=run,
+                department_id=pool.department_id,
+                ip="worker",
+                user_agent="celery:materialize_candidate_pool_run",
+                after=self._run_terminal_audit_after(run),
+            )
+            await self.session.commit()
+            return run
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def reserve_run(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        idempotency_key: str,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> CandidatePoolRunPublic:
+        operator_id = self._require_mutation(context)
+        self._require_idempotency_key(idempotency_key)
+        try:
+            pool = await self._write_pool(context, pool_id)
+            if pool.status is not CandidatePoolStatus.ACTIVE:
+                raise TargetingError(409, "CANDIDATE_POOL_INACTIVE", "Candidate Pool is not active")
+            policy_record = await self.repository.get_current_policy(pool, for_update=True)
+            if policy_record is None:
+                raise TargetingError(
+                    409, "TARGETING_POLICY_REQUIRED", "Candidate Pool has no policy"
+                )
+            policy = self._typed_policy(pool, policy_record)
+            self._require_reviewed_buyer_taxonomy(policy, status_code=409)
+            request_hash = hash_document(
+                {
+                    "operation": "candidate_pool_run",
+                    "pool_id": pool.id,
+                    "policy_id": policy_record.id,
+                    "policy_hash": policy.canonical_hash,
+                }
+            )
+            existing = await self.repository.get_run_by_idempotency_key(
+                pool_id=pool.id,
+                idempotency_key=idempotency_key,
+                for_update=True,
+            )
+            if existing is not None:
+                if existing.request_hash != request_hash:
+                    raise TargetingError(
+                        409,
+                        "IDEMPOTENCY_CONFLICT",
+                        "Idempotency-Key was already used for a different request",
+                    )
+                response = CandidatePoolRunPublic.model_validate(existing).model_copy(
+                    update={"idempotent_replay": True}
+                )
+                # The lookup acquired row locks but made no mutation. Commit to
+                # release them without expiring the request's authenticated ORM
+                # context through a rollback.
+                await self.session.commit()
+                return response
+            as_of = _utc_now()
+            watermark = await self.repository.capture_input_watermark(pool=pool, policy=policy)
+            watermark.update(
+                {
+                    "policy_id": policy_record.id,
+                    "policy_version": policy_record.version,
+                    "policy_hash": policy_record.canonical_hash,
+                    "as_of": as_of,
+                }
+            )
+            run = CandidatePoolRun(
+                pool_id=pool.id,
+                policy_id=policy_record.id,
+                as_of=as_of,
+                input_watermark=canonical_value(watermark),
+                status=CandidatePoolRunStatus.PENDING,
+                match_count=0,
+                unknown_count=0,
+                not_match_count=0,
+                error_code=None,
+                error_message=None,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+            )
+            self.session.add(run)
+            await self.session.flush()
+            self._add_run_audit(
+                action=AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
+                result=AuditResult.SUCCESS,
+                run=run,
+                department_id=pool.department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                after=self._run_requested_audit_after(run),
+            )
+            await self.session.commit()
+            await self.session.refresh(run)
+            return CandidatePoolRunPublic.model_validate(run)
+        except TargetingError:
+            # All domain rejections above occur before a run is staged. A
+            # read-only commit releases row locks while preserving the caller's
+            # authenticated context for an in-process follow-up read.
+            await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def get_run(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        run_id: UUID,
+    ) -> CandidatePoolRunPublic:
+        pool = await self._read_pool(context, pool_id)
+        run = await self.repository.get_run(run_id, pool_id=pool.id)
+        if run is None:
+            raise TargetingError(
+                404, "CANDIDATE_POOL_RUN_NOT_FOUND", "Candidate Pool run not found"
+            )
+        return CandidatePoolRunPublic.model_validate(run)
+
+    async def list_run_members(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        run_id: UUID,
+        cursor: UUID | None,
+        limit: int,
+    ) -> CandidatePoolRunMemberPage:
+        pool = await self._read_pool(context, pool_id)
+        run = await self.repository.get_run(run_id, pool_id=pool.id)
+        if run is None:
+            raise TargetingError(
+                404, "CANDIDATE_POOL_RUN_NOT_FOUND", "Candidate Pool run not found"
+            )
+        page = await self.repository.list_run_members(run_id=run.id, cursor=cursor, limit=limit)
+        viewer = context.role is Role.VIEWER
+        return CandidatePoolRunMemberPage(
+            items=tuple(self._member_public(item, viewer=viewer) for item in page.items),
+            next_cursor=page.next_cursor,
+        )
+
+    @staticmethod
+    def _member_public(member: CandidatePoolMember, *, viewer: bool) -> CandidatePoolMemberPublic:
+        evidence = member.redacted_evidence
+        if viewer:
+            evidence = viewer_redacted_evidence(evidence)
+        reason_codes = tuple(TargetingReasonCode(code) for code in member.reason_codes)
+        return CandidatePoolMemberPublic(
+            id=member.id,
+            run_id=member.run_id,
+            influencer_id=member.influencer_id,
+            platform_account_id=member.platform_account_id,
+            result=member.result,
+            reason_codes=(viewer_redacted_reason_codes(reason_codes) if viewer else reason_codes),
+            redacted_evidence=evidence,
+            evidence_hash=member.evidence_hash,
+            created_at=member.created_at,
+            updated_at=member.updated_at,
+        )
+
+    async def materialize_run(self, run_id: UUID) -> CandidatePoolRun | None:
+        """Claim and materialize one durable run in a single replay-safe transaction."""
+
+        run = await self.repository.get_run_any(run_id, for_update=True)
+        if run is None:
+            await self.session.rollback()
+            return None
+        if run.status is not CandidatePoolRunStatus.PENDING:
+            await self.session.commit()
+            return run
+        pool = await self.repository.get_pool(run.pool_id, department_id=None)
+        if pool is None:
+            await self.session.rollback()
+            return None
+        policy_record = await self.repository.get_policy(run.policy_id, pool_id=pool.id)
+        if policy_record is None:
+            return await self._mark_run_failed(
+                run=run,
+                pool=pool,
+                error_code="TARGETING_POLICY_MISSING",
+                error_message="Targeting policy is unavailable",
+            )
+        try:
+            policy = self._typed_policy(pool, policy_record)
+        except TargetingError:
+            return await self._mark_run_failed(
+                run=run,
+                pool=pool,
+                error_code="TARGETING_POLICY_INVALID",
+                error_message="Targeting policy is invalid",
+            )
+        if pool.status is not CandidatePoolStatus.ACTIVE:
+            return await self._mark_run_failed(
+                run=run,
+                pool=pool,
+                error_code="CANDIDATE_POOL_INACTIVE",
+                error_message="Candidate Pool is not active",
+            )
+
+        # Keep the FOR UPDATE lock through the final commit. A hard worker loss
+        # then rolls this status and every staged member back to PENDING, which
+        # lets broker redelivery or the pending-run reconciler safely retry.
+        run.status = CandidatePoolRunStatus.RUNNING
+        await self.session.flush()
+        collection_context = self.repository.collection_context_snapshot(
+            pool=pool,
+            input_watermark=run.input_watermark,
+        )
+        try:
+            match_count = 0
+            unknown_count = 0
+            not_match_count = 0
+            async for facts in self.repository.iter_candidate_fact_batches(
+                pool=pool,
+                policy=policy,
+                as_of=run.as_of,
+                freshness_policy=self.freshness_policy,
+                collection_context=collection_context,
+            ):
+                increments = self.repository.add_evaluation_batch(
+                    run=run,
+                    evaluations=((fact, evaluate_targeting(policy, fact)) for fact in facts),
+                )
+                match_count += increments[0]
+                unknown_count += increments[1]
+                not_match_count += increments[2]
+                await self.session.flush()
+            run.match_count = match_count
+            run.unknown_count = unknown_count
+            run.not_match_count = not_match_count
+            run.status = CandidatePoolRunStatus.COMPLETED
+            run.error_code = None
+            run.error_message = None
+            watermark: dict[str, Any] = dict(run.input_watermark or {})
+            watermark["materialized_at"] = _utc_now()
+            watermark["materialized_member_count"] = match_count + unknown_count
+            run.input_watermark = canonical_value(watermark)
+            self._add_run_audit(
+                action=AuditAction.CANDIDATE_POOL_RUN_COMPLETED,
+                result=AuditResult.SUCCESS,
+                run=run,
+                department_id=pool.department_id,
+                ip="worker",
+                user_agent="celery:materialize_candidate_pool_run",
+                after=self._run_terminal_audit_after(run),
+            )
+            await self.session.commit()
+            return run
+        except BaseException:
+            await self.session.rollback()
+            failed_run = await self.repository.get_run_any(run_id, for_update=True)
+            if failed_run is not None and failed_run.status is CandidatePoolRunStatus.PENDING:
+                failed_pool = await self.repository.get_pool(failed_run.pool_id, department_id=None)
+                if failed_pool is not None:
+                    await self._mark_run_failed(
+                        run=failed_run,
+                        pool=failed_pool,
+                        error_code="TARGETING_MATERIALIZATION_FAILED",
+                        error_message="Candidate Pool materialization failed",
+                    )
+                else:
+                    await self.session.rollback()
+            else:
+                await self.session.rollback()
+            raise
+
+
+__all__ = ["CandidatePoolService", "TargetingError"]

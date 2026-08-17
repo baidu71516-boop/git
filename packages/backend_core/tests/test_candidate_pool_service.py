@@ -1,0 +1,1555 @@
+"""Portable lifecycle, idempotency, materialization, and RBAC tests for WO-3A-2."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import cast
+from uuid import uuid4
+
+import pytest
+from backend_core.audit.enums import AuditAction, AuditResult
+from backend_core.audit.models import AuditLog
+from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.service import AuthContext
+from backend_core.db import models as database_models  # noqa: F401
+from backend_core.db.base import Base
+from backend_core.growth.enums import (
+    CandidatePoolKind,
+    CandidatePoolRunStatus,
+    CandidateResult,
+    Phase3AOperationScope,
+)
+from backend_core.growth.models import CandidatePool, Phase3AIdempotencyRecord
+from backend_core.growth.schemas import CandidatePoolCreateInput, TargetingPolicyCreateInput
+from backend_core.growth.service import CandidatePoolService, TargetingError
+from backend_core.growth.targeting import (
+    BuyerTargetingPolicy,
+    CandidateFactBundle,
+    CollectionContextSnapshot,
+    IntegerRange,
+    SellerTargetingPolicy,
+    TaxonomyDefinition,
+    TaxonomyRelation,
+)
+from backend_core.imports.enums import (
+    CollectionJobStatus,
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportMatchType,
+    ImportRowAction,
+    ImportSourceType,
+    SourceAcquiredAtOrigin,
+    StoredFileType,
+)
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
+from backend_core.influencers.enums import (
+    ContactFilter,
+    ContactType,
+    ContactValidationStatus,
+    CRMStage,
+    DataSource,
+    InfluencerStatus,
+    Platform,
+)
+from backend_core.influencers.freshness import FreshnessPolicy
+from backend_core.influencers.models import (
+    Influencer,
+    InfluencerContact,
+    InfluencerPlatformAccount,
+    InfluencerSourceState,
+)
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+NOW = datetime(2026, 8, 17, 8, 0, tzinfo=UTC)
+
+
+async def _actor(session: AsyncSession, *, role: Role) -> AuthContext:
+    department = Department(
+        name=f"targeting-{uuid4().hex}",
+        password_hash="not-used-by-targeting-tests",
+        status=DepartmentStatus.ACTIVE,
+        session_days=30,
+    )
+    session.add(department)
+    await session.flush()
+    operator = Operator(
+        department_id=department.id,
+        name="Targeting operator",
+        role=Role.OPERATOR,
+        status=OperatorStatus.ACTIVE,
+    )
+    permission = DepartmentPermission(department_id=department.id, role=role)
+    session.add_all([operator, permission])
+    await session.flush()
+    auth_session = AuthSession(
+        department_id=department.id,
+        operator_id=operator.id,
+        token_hash=uuid4().hex * 2,
+        csrf_token_hash=uuid4().hex * 2,
+        ip="127.0.0.1",
+        user_agent="candidate-pool-service-test",
+        expires_at=NOW + timedelta(days=1),
+    )
+    session.add(auth_session)
+    await session.flush()
+    return AuthContext(
+        department=department,
+        operator=operator,
+        role=role,
+        auth_session=auth_session,
+    )
+
+
+async def _account(
+    session: AsyncSession,
+    *,
+    owner: Operator,
+    source_tags: list[str] | None = None,
+) -> InfluencerPlatformAccount:
+    influencer = Influencer(
+        display_name="Targeting Candidate",
+        owner_operator_id=owner.id,
+        crm_stage=CRMStage.TO_DEVELOP,
+        status=InfluencerStatus.ACTIVE,
+        deleted_at=None,
+    )
+    session.add(influencer)
+    await session.flush()
+    account = InfluencerPlatformAccount(
+        influencer_id=influencer.id,
+        platform=Platform.XIAOHONGSHU,
+        platform_account_id=f"candidate-{uuid4().hex}",
+        account_name="Targeting Candidate",
+        account_handle="targeting-candidate",
+        profile_url=f"https://example.invalid/{uuid4().hex}",
+        normalized_profile_url=f"https://example.invalid/{uuid4().hex}",
+        source=DataSource.GENERIC,
+        source_tags=source_tags if source_tags is not None else ["beauty"],
+        is_active=True,
+    )
+    session.add(account)
+    await session.flush()
+    return account
+
+
+def _service(session: AsyncSession) -> CandidatePoolService:
+    return CandidatePoolService(session, freshness_policy=FreshnessPolicy())
+
+
+async def _collection_job(
+    session: AsyncSession,
+    *,
+    context: AuthContext,
+    industry: str,
+    subdirection: str | None = "makeup",
+) -> CollectionJob:
+    assert context.operator is not None
+    collection = CollectionJob(
+        name=f"Targeting collection {uuid4().hex}",
+        industry=industry,
+        subdirection=subdirection,
+        purpose="Targeting test fixture",
+        target_action="discover",
+        target_count=1,
+        department_id=context.department.id,
+        owner_operator_id=context.operator.id,
+        source_type=ImportSourceType.GENERIC_CSV,
+        status=CollectionJobStatus.COMPLETED,
+    )
+    session.add(collection)
+    await session.flush()
+    return collection
+
+
+async def _committed_import(
+    session: AsyncSession,
+    *,
+    context: AuthContext,
+    collection: CollectionJob,
+    account: InfluencerPlatformAccount,
+    creator_tags: list[str] | None,
+) -> ImportJob:
+    """Seed committed canonical import provenance for one account."""
+
+    assert context.operator is not None
+    stored_file = StoredImportFile(
+        sha256=uuid4().hex * 2,
+        storage_key=f"targeting/{uuid4().hex}.csv",
+        size=1,
+        detected_type=StoredFileType.CSV,
+        detected_mime="text/csv",
+        expires_at=NOW + timedelta(days=1),
+    )
+    session.add(stored_file)
+    await session.flush()
+    job = ImportJob(
+        collection_job_id=collection.id,
+        department_id=context.department.id,
+        operator_id=context.operator.id,
+        source_type=ImportSourceType.GENERIC_CSV,
+        status=ImportJobStatus.COMPLETED,
+        preview_revision=1,
+        confirmed_revision=1,
+    )
+    session.add(job)
+    await session.flush()
+    file = ImportJobFile(
+        import_job_id=job.id,
+        stored_file_id=stored_file.id,
+        position=1,
+        original_filename="targeting.csv",
+        status=ImportJobFileStatus.READY,
+        source_acquired_at=None,
+        source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+        source_acquired_at_confirmation_required=False,
+    )
+    session.add(file)
+    await session.flush()
+    row = ImportRow(
+        import_job_id=job.id,
+        import_job_file_id=file.id,
+        row_number=2,
+        raw_data={},
+        normalized_data={
+            "source": account.source.value,
+            "public_profile": ({"creator_tags": creator_tags} if creator_tags is not None else {}),
+        },
+        matched_influencer_id=account.influencer_id,
+        matched_platform_account_id=account.id,
+        match_type=ImportMatchType.PLATFORM_ACCOUNT_ID,
+        action=ImportRowAction.NO_CHANGE,
+        merge_plan=None,
+        warnings=[],
+        errors=[],
+        preview_revision=1,
+        plan_hash=uuid4().hex * 2,
+        committed_action=ImportRowAction.NO_CHANGE,
+        committed_at=NOW,
+    )
+    session.add(row)
+    await session.flush()
+    state = await session.scalar(
+        select(InfluencerSourceState).where(
+            InfluencerSourceState.platform_account_id == account.id,
+            InfluencerSourceState.source == account.source,
+        )
+    )
+    if state is None:
+        state = InfluencerSourceState(
+            influencer_id=account.influencer_id,
+            platform_account_id=account.id,
+            source=account.source,
+            source_updated_at=NOW,
+            source_data={"creator_tags": creator_tags or []},
+            source_data_hash=uuid4().hex * 2,
+            state_version=1,
+            last_import_job_id=job.id,
+            last_import_row_id=row.id,
+        )
+        session.add(state)
+    else:
+        state.source_updated_at = NOW
+        if creator_tags is not None:
+            state.source_data = {"creator_tags": creator_tags}
+        state.source_data_hash = uuid4().hex * 2
+        state.state_version += 1
+        state.last_import_job_id = job.id
+        state.last_import_row_id = row.id
+    await session.flush()
+    return job
+
+
+async def _create_schema(connection: AsyncConnection) -> None:
+    """SQLite cannot compile the project’s PostgreSQL guarded-metric indexes."""
+
+    metric_table = Base.metadata.tables["influencer_current_metrics"]
+    metric_indexes = tuple(metric_table.indexes)
+    metric_table.indexes.clear()
+    try:
+        await connection.run_sync(Base.metadata.create_all)
+    finally:
+        metric_table.indexes.update(metric_indexes)
+
+
+def test_pool_create_uses_shared_idempotency_record_and_single_audits() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                contact_secret = "pool-create-contact-secret@example.com"
+                session.add(
+                    InfluencerContact(
+                        influencer_id=account.influencer_id,
+                        platform_account_id=account.id,
+                        type=ContactType.EMAIL,
+                        value=contact_secret,
+                        normalized_value=contact_secret,
+                        source=DataSource.MANUAL,
+                        validation_status=ContactValidationStatus.VALID,
+                        is_current=True,
+                        possible_duplicate_contact=False,
+                        first_seen_at=NOW,
+                        last_seen_at=NOW,
+                    )
+                )
+                await session.commit()
+
+                service = _service(session)
+                idempotency_key = "candidate-pool-create-a1"
+                input_payload = CandidatePoolCreateInput(
+                    name="A1 seller candidates",
+                    kind=CandidatePoolKind.POTENTIAL_SELLER,
+                    policy=SellerTargetingPolicy(contact_availability=ContactFilter.HAS_EMAIL),
+                )
+                first = await service.create_pool(
+                    context,
+                    input_payload,
+                    idempotency_key=idempotency_key,
+                    ip="198.51.100.10",
+                    user_agent="candidate-pool-a1-service-test",
+                )
+                record = await session.scalar(
+                    select(Phase3AIdempotencyRecord).where(
+                        Phase3AIdempotencyRecord.department_id == context.department.id,
+                        Phase3AIdempotencyRecord.operation_scope
+                        == Phase3AOperationScope.CANDIDATE_POOL_CREATE,
+                        Phase3AIdempotencyRecord.idempotency_key == idempotency_key,
+                    )
+                )
+                assert record is not None
+                assert record.result_entity_id == first.id
+                assert record.result_schema_version == 1
+                assert len(record.request_hash) == 64
+                assert set(record.result_payload) == set(first.model_dump(mode="json"))
+                assert record.result_payload == first.model_dump(mode="json")
+                assert (
+                    len(
+                        json.dumps(
+                            record.result_payload, separators=(",", ":"), sort_keys=True
+                        ).encode()
+                    )
+                    <= 16 * 1024
+                )
+
+                pool_created = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.CANDIDATE_POOL_CREATED,
+                            AuditLog.entity_id == first.id,
+                        )
+                    )
+                )
+                policy_created = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.TARGETING_POLICY_CREATED,
+                            AuditLog.entity_id == first.current_policy_id,
+                        )
+                    )
+                )
+                assert len(pool_created) == 1
+                assert len(policy_created) == 1
+                assert {audit.result for audit in (*pool_created, *policy_created)} == {
+                    AuditResult.SUCCESS
+                }
+                assert {
+                    (audit.department_id, audit.operator_id, audit.ip, audit.user_agent)
+                    for audit in (*pool_created, *policy_created)
+                } == {
+                    (
+                        context.department.id,
+                        context.operator.id,
+                        "198.51.100.10",
+                        "candidate-pool-a1-service-test",
+                    )
+                }
+
+                replay = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="A1 seller candidates",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(contact_availability=ContactFilter.HAS_EMAIL),
+                    ),
+                    idempotency_key=idempotency_key,
+                    ip="198.51.100.10",
+                    user_agent="candidate-pool-a1-service-test",
+                )
+                assert replay == first
+                assert len(list(await session.scalars(select(CandidatePool)))) == 1
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(Phase3AIdempotencyRecord).where(
+                                    Phase3AIdempotencyRecord.department_id == context.department.id,
+                                    Phase3AIdempotencyRecord.operation_scope
+                                    == Phase3AOperationScope.CANDIDATE_POOL_CREATE,
+                                    Phase3AIdempotencyRecord.idempotency_key == idempotency_key,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(AuditLog).where(
+                                    AuditLog.action == AuditAction.CANDIDATE_POOL_CREATED,
+                                    AuditLog.entity_id == first.id,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(AuditLog).where(
+                                    AuditLog.action == AuditAction.TARGETING_POLICY_CREATED,
+                                    AuditLog.entity_id == first.current_policy_id,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+
+                with pytest.raises(TargetingError) as conflict:
+                    await service.create_pool(
+                        context,
+                        CandidatePoolCreateInput(
+                            name="A1 seller candidates changed",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            policy=SellerTargetingPolicy(
+                                contact_availability=ContactFilter.HAS_EMAIL
+                            ),
+                        ),
+                        idempotency_key=idempotency_key,
+                    )
+                assert conflict.value.status_code == 409
+                assert conflict.value.code == "IDEMPOTENCY_KEY_REUSED"
+                assert len(list(await session.scalars(select(CandidatePool)))) == 1
+
+                # A key is scoped by Department, not globally across tenants.
+                other_context = await _actor(session, role=Role.OPERATOR)
+                await session.commit()
+                other = await service.create_pool(
+                    other_context,
+                    input_payload,
+                    idempotency_key=idempotency_key,
+                )
+                records = list(
+                    await session.scalars(
+                        select(Phase3AIdempotencyRecord).where(
+                            Phase3AIdempotencyRecord.operation_scope
+                            == Phase3AOperationScope.CANDIDATE_POOL_CREATE,
+                            Phase3AIdempotencyRecord.idempotency_key == idempotency_key,
+                        )
+                    )
+                )
+                assert other.department_id == other_context.department.id
+                assert {record.department_id for record in records} == {
+                    first.department_id,
+                    other_context.department.id,
+                }
+                assert len(records) == 2
+
+                # Replay records and Audit metadata must not retain Contact data,
+                # request bodies, policy definitions, or Idempotency-Key values.
+                serialized_records = json.dumps(
+                    [record.result_payload for record in records],
+                    default=str,
+                    sort_keys=True,
+                )
+                serialized_audits = json.dumps(
+                    [
+                        {"before": audit.before, "after": audit.after}
+                        for audit in (*pool_created, *policy_created)
+                    ],
+                    default=str,
+                    sort_keys=True,
+                )
+                for serialized in (serialized_records, serialized_audits):
+                    assert contact_secret not in serialized
+                    assert "normalized_value" not in serialized
+                    assert "definition" not in serialized
+                    assert idempotency_key not in serialized
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_policy_create_uses_minimal_replay_dto_and_single_audits() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                contact_secret = "policy-create-contact-secret@example.com"
+                session.add(
+                    InfluencerContact(
+                        influencer_id=account.influencer_id,
+                        platform_account_id=account.id,
+                        type=ContactType.EMAIL,
+                        value=contact_secret,
+                        normalized_value=contact_secret,
+                        source=DataSource.MANUAL,
+                        validation_status=ContactValidationStatus.VALID,
+                        is_current=True,
+                        possible_duplicate_contact=False,
+                        first_seen_at=NOW,
+                        last_seen_at=NOW,
+                    )
+                )
+                await session.commit()
+
+                service = _service(session)
+                # Scope isolation permits the same opaque key for the initial
+                # Pool create and this distinct TargetingPolicy create operation.
+                shared_key = "candidate-policy-create-a1"
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Policy A1 seller candidates",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key=shared_key,
+                )
+                policy_input = TargetingPolicyCreateInput(
+                    policy=SellerTargetingPolicy(contact_availability=ContactFilter.HAS_EMAIL)
+                )
+                first = await service.append_policy(
+                    context,
+                    pool.id,
+                    policy_input,
+                    idempotency_key=shared_key,
+                    ip="198.51.100.11",
+                    user_agent="targeting-policy-a1-service-test",
+                )
+                record = await session.scalar(
+                    select(Phase3AIdempotencyRecord).where(
+                        Phase3AIdempotencyRecord.department_id == context.department.id,
+                        Phase3AIdempotencyRecord.operation_scope
+                        == Phase3AOperationScope.TARGETING_POLICY_CREATE,
+                        Phase3AIdempotencyRecord.idempotency_key == shared_key,
+                    )
+                )
+                assert record is not None
+                assert record.result_entity_id == first.id
+                assert record.result_schema_version == 1
+                assert len(record.request_hash) == 64
+                expected_payload_keys = {
+                    "id",
+                    "pool_id",
+                    "version",
+                    "schema_version",
+                    "canonical_hash",
+                    "created_by_operator_id",
+                    "created_at",
+                }
+                assert set(record.result_payload) == expected_payload_keys
+                assert record.result_payload == first.model_dump(mode="json")
+                assert (
+                    len(
+                        json.dumps(
+                            record.result_payload, separators=(",", ":"), sort_keys=True
+                        ).encode()
+                    )
+                    <= 16 * 1024
+                )
+
+                pool_updates = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.CANDIDATE_POOL_UPDATED,
+                            AuditLog.entity_id == pool.id,
+                        )
+                    )
+                )
+                policy_created = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.TARGETING_POLICY_CREATED,
+                            AuditLog.entity_id == first.id,
+                        )
+                    )
+                )
+                assert len(pool_updates) == 1
+                assert len(policy_created) == 1
+                assert {audit.result for audit in (*pool_updates, *policy_created)} == {
+                    AuditResult.SUCCESS
+                }
+                assert {
+                    (audit.department_id, audit.operator_id, audit.ip, audit.user_agent)
+                    for audit in (*pool_updates, *policy_created)
+                } == {
+                    (
+                        context.department.id,
+                        context.operator.id,
+                        "198.51.100.11",
+                        "targeting-policy-a1-service-test",
+                    )
+                }
+
+                replay = await service.append_policy(
+                    context,
+                    pool.id,
+                    TargetingPolicyCreateInput(
+                        policy=SellerTargetingPolicy(contact_availability=ContactFilter.HAS_EMAIL)
+                    ),
+                    idempotency_key=shared_key,
+                    ip="198.51.100.11",
+                    user_agent="targeting-policy-a1-service-test",
+                )
+                assert replay == first
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(Phase3AIdempotencyRecord).where(
+                                    Phase3AIdempotencyRecord.department_id == context.department.id,
+                                    Phase3AIdempotencyRecord.operation_scope
+                                    == Phase3AOperationScope.TARGETING_POLICY_CREATE,
+                                    Phase3AIdempotencyRecord.idempotency_key == shared_key,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(AuditLog).where(
+                                    AuditLog.action == AuditAction.CANDIDATE_POOL_UPDATED,
+                                    AuditLog.entity_id == pool.id,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(AuditLog).where(
+                                    AuditLog.action == AuditAction.TARGETING_POLICY_CREATED,
+                                    AuditLog.entity_id == first.id,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+
+                # The Pool path is part of the semantic request hash, so this
+                # exact policy/key pair cannot replay against another Pool.
+                other_pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Other policy path",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key="candidate-policy-path-a1",
+                )
+                assert len(await service.list_policies(context, other_pool.id)) == 1
+                with pytest.raises(TargetingError) as path_conflict:
+                    await service.append_policy(
+                        context,
+                        other_pool.id,
+                        policy_input,
+                        idempotency_key=shared_key,
+                    )
+                assert path_conflict.value.status_code == 409
+                assert path_conflict.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+                with pytest.raises(TargetingError) as conflict:
+                    await service.append_policy(
+                        context,
+                        pool.id,
+                        TargetingPolicyCreateInput(
+                            policy=SellerTargetingPolicy(followers=IntegerRange(minimum=1_000))
+                        ),
+                        idempotency_key=shared_key,
+                    )
+                assert conflict.value.status_code == 409
+                assert conflict.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+                serialized_record = json.dumps(record.result_payload, default=str, sort_keys=True)
+                serialized_audits = json.dumps(
+                    [
+                        {"before": audit.before, "after": audit.after}
+                        for audit in (*pool_updates, *policy_created)
+                    ],
+                    default=str,
+                    sort_keys=True,
+                )
+                for serialized in (serialized_record, serialized_audits):
+                    assert contact_secret not in serialized
+                    assert "normalized_value" not in serialized
+                    assert "definition" not in serialized
+                    assert shared_key not in serialized
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_pool_create_rolls_back_domain_and_idempotency_when_audit_write_fails() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                await session.commit()
+                service = _service(session)
+
+                def fail_audit_write(**_kwargs: object) -> AuditLog:
+                    raise RuntimeError("synthetic audit write failure")
+
+                service.audit.add = fail_audit_write  # type: ignore[method-assign]
+                with pytest.raises(RuntimeError, match="synthetic audit write failure"):
+                    await service.create_pool(
+                        context,
+                        CandidatePoolCreateInput(
+                            name="Atomicity regression",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                        ),
+                        idempotency_key="candidate-pool-audit-rollback",
+                    )
+
+                assert list(await session.scalars(select(CandidatePool))) == []
+                assert list(await session.scalars(select(database_models.TargetingPolicy))) == []
+                assert list(await session.scalars(select(Phase3AIdempotencyRecord))) == []
+                assert list(await session.scalars(select(AuditLog))) == []
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_run_idempotency_materialization_and_member_evidence() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.MANAGER)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Seller candidates",
+                        kind="POTENTIAL_SELLER",
+                        policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                    ),
+                    idempotency_key="targeting-pool-run-lifecycle",
+                )
+                first = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-1",
+                    ip="198.51.100.12",
+                    user_agent="candidate-pool-run-service-test",
+                )
+                replay = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-1",
+                    ip="198.51.100.12",
+                    user_agent="candidate-pool-run-service-test",
+                )
+                assert replay.id == first.id
+                assert replay.idempotent_replay is True
+                assert replay.input_watermark is not None
+                assert replay.input_watermark["policy_hash"]
+                assert "max_current_contact_updated_at" in replay.input_watermark
+                requested_audits = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
+                            AuditLog.entity_id == first.id,
+                        )
+                    )
+                )
+                assert len(requested_audits) == 1
+                assert requested_audits[0].result is AuditResult.SUCCESS
+                assert requested_audits[0].ip == "198.51.100.12"
+                assert requested_audits[0].user_agent == "candidate-pool-run-service-test"
+
+                materialization_commits: list[object] = []
+
+                def record_materialization_commit(_session: object) -> None:
+                    materialization_commits.append(object())
+
+                event.listen(session.sync_session, "after_commit", record_materialization_commit)
+                try:
+                    await service.materialize_run(first.id)
+                finally:
+                    event.remove(
+                        session.sync_session, "after_commit", record_materialization_commit
+                    )
+                assert len(materialization_commits) == 1
+                completed = await service.get_run(context, pool_id=pool.id, run_id=first.id)
+                assert completed.status.value == "COMPLETED"
+                assert completed.match_count == 1
+                assert completed.unknown_count == 0
+                assert completed.not_match_count == 0
+                assert completed.input_watermark is not None
+                assert completed.input_watermark["policy_version"] == 1
+                assert completed.input_watermark["materialized_member_count"] == 1
+                assert completed.input_watermark["materialized_at"]
+                completed_audits = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.CANDIDATE_POOL_RUN_COMPLETED,
+                            AuditLog.entity_id == first.id,
+                        )
+                    )
+                )
+                assert len(completed_audits) == 1
+                assert completed_audits[0].result is AuditResult.SUCCESS
+                assert completed_audits[0].ip == "worker"
+                assert completed_audits[0].user_agent == "celery:materialize_candidate_pool_run"
+                first_as_of = completed.as_of
+                first_policy_hash = completed.input_watermark["policy_hash"]
+
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=first.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert len(members.items) == 1
+                member = members.items[0]
+                assert member.platform_account_id == account.id
+                assert member.result.value == "MATCH"
+                assert member.evidence_hash
+                assert "contact@example.com" not in str(member.redacted_evidence)
+
+                delivery_replay = await service.materialize_run(first.id)
+                assert delivery_replay is not None
+                assert delivery_replay.status is CandidatePoolRunStatus.COMPLETED
+                assert (
+                    len(
+                        list(
+                            await session.scalars(
+                                select(AuditLog).where(
+                                    AuditLog.action == AuditAction.CANDIDATE_POOL_RUN_COMPLETED,
+                                    AuditLog.entity_id == first.id,
+                                )
+                            )
+                        )
+                    )
+                    == 1
+                )
+                replayed_members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=first.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert len(replayed_members.items) == 1
+
+                next_policy = await service.append_policy(
+                    context,
+                    pool.id,
+                    TargetingPolicyCreateInput(
+                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100))
+                    ),
+                    idempotency_key="targeting-policy-run-lifecycle",
+                )
+                assert next_policy.version == 2
+                policies = await service.list_policies(context, pool.id)
+                assert [item.version for item in policies] == [1, 2]
+                assert policies[0].id == first.policy_id
+                assert policies[1].canonical_hash == next_policy.canonical_hash
+                with pytest.raises(TargetingError, match="different request") as raised:
+                    await service.reserve_run(
+                        context,
+                        pool_id=pool.id,
+                        idempotency_key="targeting-run-1",
+                    )
+                assert raised.value.code == "IDEMPOTENCY_CONFLICT"
+                assert (
+                    len(
+                        tuple(
+                            (
+                                await session.execute(
+                                    select(database_models.CandidatePoolRun).where(
+                                        database_models.CandidatePoolRun.pool_id == pool.id
+                                    )
+                                )
+                            ).scalars()
+                        )
+                    )
+                    == 1
+                )
+
+                second = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-2",
+                )
+                assert second.policy_id == next_policy.id
+                assert second.input_watermark is not None
+                assert second.input_watermark["policy_version"] == 2
+                await service.materialize_run(second.id)
+
+                first_after_rerun = await service.get_run(
+                    context,
+                    pool_id=pool.id,
+                    run_id=first.id,
+                )
+                assert first_after_rerun.policy_id == first.policy_id
+                assert first_after_rerun.as_of == first_as_of
+                assert first_after_rerun.input_watermark is not None
+                assert first_after_rerun.input_watermark["policy_version"] == 1
+                assert first_after_rerun.input_watermark["policy_hash"] == first_policy_hash
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_missing_seller_evidence_materializes_unknown_member() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Followers unknown",
+                        kind="POTENTIAL_SELLER",
+                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
+                    ),
+                    idempotency_key="targeting-pool-unknown-evidence",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-unknown",
+                )
+                await service.materialize_run(run.id)
+
+                completed = await service.get_run(context, pool_id=pool.id, run_id=run.id)
+                assert completed.match_count == 0
+                assert completed.unknown_count == 1
+                assert completed.not_match_count == 0
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert len(members.items) == 1
+                assert members.items[0].platform_account_id == account.id
+                assert members.items[0].result is CandidateResult.UNKNOWN
+                assert "FOLLOWERS_MISSING" in members.items[0].reason_codes
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_invalid_seller_tag_evidence_materializes_unknown_member() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                account.source_tags = cast(list[str], ["beauty", 1])
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Tags unknown",
+                        kind="POTENTIAL_SELLER",
+                        policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                    ),
+                    idempotency_key="targeting-pool-invalid-tags",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-invalid-tags",
+                )
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert completed.status is CandidatePoolRunStatus.COMPLETED
+                assert completed.match_count == 0
+                assert completed.unknown_count == 1
+                assert completed.not_match_count == 0
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert members.items[0].platform_account_id == account.id
+                assert members.items[0].reason_codes == ("TRACK_MISSING",)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_materialization_uses_committed_source_provenance_once_per_account() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(
+                    session,
+                    owner=context.operator,
+                    source_tags=["gaming"],
+                )
+                source_collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="beauty",
+                    subdirection=None,
+                )
+                unrelated_collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="gaming",
+                    subdirection=None,
+                )
+                source_first = await _committed_import(
+                    session,
+                    context=context,
+                    collection=source_collection,
+                    account=account,
+                    creator_tags=["gaming"],
+                )
+                source_second = await _committed_import(
+                    session,
+                    context=context,
+                    collection=source_collection,
+                    account=account,
+                    creator_tags=["gaming"],
+                )
+                classification_import = await _committed_import(
+                    session,
+                    context=context,
+                    collection=unrelated_collection,
+                    account=account,
+                    creator_tags=["gaming"],
+                )
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Buyer provenance",
+                        kind="POTENTIAL_BUYER",
+                        source_collection_job_id=source_collection.id,
+                        policy=BuyerTargetingPolicy(
+                            taxonomy=TaxonomyDefinition(
+                                taxonomy_version="reviewed-v1",
+                                reviewed=True,
+                                categories=("beauty", "gaming"),
+                                incompatible=(
+                                    TaxonomyRelation(
+                                        left_category_id="beauty",
+                                        right_category_id="gaming",
+                                    ),
+                                ),
+                            )
+                        ),
+                    ),
+                    idempotency_key="targeting-pool-buyer-provenance",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-buyer-provenance",
+                )
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert completed.status is CandidatePoolRunStatus.COMPLETED
+                assert completed.match_count == 1
+                assert completed.unknown_count == 0
+                assert completed.not_match_count == 0
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert len(members.items) == 1
+                member = members.items[0]
+                assert member.platform_account_id == account.id
+                assert member.result is CandidateResult.MATCH
+                assert member.redacted_evidence["collection_context"][
+                    "provenance_import_job_ids"
+                ] == sorted((str(source_first.id), str(source_second.id)))
+                assert member.redacted_evidence["creator_classification"][
+                    "provenance_import_job_ids"
+                ] == [str(classification_import.id)]
+                assert "purchased_account" not in str(member.redacted_evidence)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_classification_requires_provenance_for_retained_tags() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(
+                    session,
+                    owner=context.operator,
+                    source_tags=["gaming"],
+                )
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="beauty",
+                    subdirection=None,
+                )
+                tagged_import = await _committed_import(
+                    session,
+                    context=context,
+                    collection=collection,
+                    account=account,
+                    creator_tags=["gaming"],
+                )
+                tagless_import = await _committed_import(
+                    session,
+                    context=context,
+                    collection=collection,
+                    account=account,
+                    creator_tags=None,
+                )
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Buyer retained-tag provenance",
+                        kind=CandidatePoolKind.POTENTIAL_BUYER,
+                        source_collection_job_id=collection.id,
+                        policy=BuyerTargetingPolicy(
+                            taxonomy=TaxonomyDefinition(
+                                taxonomy_version="reviewed-v1",
+                                reviewed=True,
+                                categories=("beauty", "gaming"),
+                                incompatible=(
+                                    TaxonomyRelation(
+                                        left_category_id="beauty",
+                                        right_category_id="gaming",
+                                    ),
+                                ),
+                            )
+                        ),
+                    ),
+                    idempotency_key="targeting-pool-buyer-retained",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-buyer-retained-tags",
+                )
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert completed.match_count == 0
+                assert completed.unknown_count == 1
+                assert completed.not_match_count == 0
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert members.items[0].reason_codes == ("CREATOR_CLASSIFICATION_MISSING",)
+                evidence = members.items[0].redacted_evidence
+                assert evidence["creator_classification"]["provenance_import_job_ids"] == []
+                assert str(tagged_import.id) in str(evidence)
+                assert str(tagless_import.id) in str(evidence)
+                assert "CATEGORY_MISMATCH" not in str(evidence)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_pool_rejects_unreviewed_taxonomy_activation() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="beauty",
+                    subdirection=None,
+                )
+                await session.commit()
+
+                with pytest.raises(TargetingError) as rejected:
+                    await _service(session).create_pool(
+                        context,
+                        CandidatePoolCreateInput(
+                            name="Unreviewed buyer taxonomy",
+                            kind=CandidatePoolKind.POTENTIAL_BUYER,
+                            source_collection_job_id=collection.id,
+                            policy=BuyerTargetingPolicy(
+                                taxonomy=TaxonomyDefinition(
+                                    taxonomy_version="unreviewed-v1",
+                                    reviewed=False,
+                                    categories=("beauty",),
+                                )
+                            ),
+                        ),
+                        idempotency_key="targeting-pool-unreviewed",
+                    )
+
+                assert rejected.value.status_code == 422
+                assert rejected.value.code == "BUYER_TAXONOMY_UNREVIEWED"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_pool_rejects_cross_department_source_collection() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                other_context = await _actor(session, role=Role.OPERATOR)
+                foreign_collection = await _collection_job(
+                    session,
+                    context=other_context,
+                    industry="beauty",
+                )
+                await session.commit()
+
+                with pytest.raises(TargetingError) as raised:
+                    await _service(session).create_pool(
+                        context,
+                        CandidatePoolCreateInput(
+                            name="Foreign source",
+                            kind="POTENTIAL_BUYER",
+                            source_collection_job_id=foreign_collection.id,
+                            policy=BuyerTargetingPolicy(
+                                taxonomy=TaxonomyDefinition(
+                                    taxonomy_version="reviewed-v1",
+                                    reviewed=True,
+                                    categories=("beauty",),
+                                )
+                            ),
+                        ),
+                        idempotency_key="targeting-pool-cross-department",
+                    )
+                assert raised.value.status_code == 404
+                assert raised.value.code == "COLLECTION_JOB_NOT_FOUND"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_materialization_uses_reservation_time_collection_context() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                collection = await _collection_job(session, context=context, industry="beauty")
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Buyer candidates",
+                        kind="POTENTIAL_BUYER",
+                        source_collection_job_id=collection.id,
+                        policy=BuyerTargetingPolicy(
+                            taxonomy=TaxonomyDefinition(
+                                taxonomy_version="reviewed-v1",
+                                reviewed=True,
+                                categories=("beauty", "gaming"),
+                            )
+                        ),
+                    ),
+                    idempotency_key="targeting-pool-buyer-snapshot",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-buyer-snapshot",
+                )
+                assert run.input_watermark is not None
+                assert run.input_watermark["collection_context"]["industry"] == "beauty"
+
+                collection.industry = "gaming"
+                await session.commit()
+                observed_contexts: list[CollectionContextSnapshot | None] = []
+
+                async def empty_batches(
+                    **kwargs: object,
+                ) -> AsyncIterator[tuple[CandidateFactBundle, ...]]:
+                    context_snapshot = kwargs["collection_context"]
+                    assert context_snapshot is None or isinstance(
+                        context_snapshot, CollectionContextSnapshot
+                    )
+                    observed_contexts.append(context_snapshot)
+                    if False:
+                        yield ()
+
+                service.repository.iter_candidate_fact_batches = empty_batches  # type: ignore[method-assign]
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert len(observed_contexts) == 1
+                snapshot = observed_contexts[0]
+                assert snapshot is not None
+                assert snapshot.source_collection_job_id == collection.id
+                assert snapshot.industry == "beauty"
+                assert snapshot.subdirection == "makeup"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_invalid_persisted_policy_finishes_the_run_as_failed() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                await _account(session, owner=context.operator)
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Invalid policy",
+                        kind="POTENTIAL_SELLER",
+                        policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                    ),
+                    idempotency_key="targeting-pool-invalid-policy",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-invalid-policy",
+                )
+                policy = await session.get(database_models.TargetingPolicy, run.policy_id)
+                assert policy is not None
+                policy.definition = {"schema_version": 999, "policy_type": "SELLER_V1"}
+                await session.commit()
+
+                failed = await service.materialize_run(run.id)
+
+                assert failed is not None
+                assert failed.status is CandidatePoolRunStatus.FAILED
+                assert failed.error_code == "TARGETING_POLICY_INVALID"
+                assert failed.error_message == "Targeting policy is invalid"
+                failure_audits = list(
+                    await session.scalars(
+                        select(AuditLog).where(
+                            AuditLog.action == AuditAction.CANDIDATE_POOL_RUN_FAILED,
+                            AuditLog.entity_id == run.id,
+                        )
+                    )
+                )
+                assert len(failure_audits) == 1
+                assert failure_audits[0].result is AuditResult.FAILED
+                assert failure_audits[0].after == {
+                    "pool_id": str(pool.id),
+                    "policy_id": str(run.policy_id),
+                    "status": "FAILED",
+                    "match_count": 0,
+                    "unknown_count": 0,
+                    "not_match_count": 0,
+                    "error_code": "TARGETING_POLICY_INVALID",
+                }
+                assert failure_audits[0].ip == "worker"
+                assert failure_audits[0].user_agent == "celery:materialize_candidate_pool_run"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_viewer_contact_evidence_is_masked_and_cross_department_is_hidden() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                manager = await _actor(session, role=Role.MANAGER)
+                assert manager.operator is not None
+                account = await _account(session, owner=manager.operator)
+                session.add(
+                    InfluencerContact(
+                        influencer_id=account.influencer_id,
+                        platform_account_id=account.id,
+                        type=ContactType.EMAIL,
+                        value="contact@example.com",
+                        normalized_value="contact@example.com",
+                        source=DataSource.MANUAL,
+                        validation_status=ContactValidationStatus.VALID,
+                        is_current=True,
+                        possible_duplicate_contact=False,
+                        first_seen_at=NOW,
+                        last_seen_at=NOW,
+                    )
+                )
+                await session.commit()
+                service = _service(session)
+                pool = await service.create_pool(
+                    manager,
+                    CandidatePoolCreateInput(
+                        name="Email sellers",
+                        kind="POTENTIAL_SELLER",
+                        policy=SellerTargetingPolicy(contact_availability=ContactFilter.HAS_EMAIL),
+                    ),
+                    idempotency_key="targeting-pool-viewer",
+                )
+                run = await service.reserve_run(
+                    manager,
+                    pool_id=pool.id,
+                    idempotency_key="targeting-run-viewer",
+                )
+                await service.materialize_run(run.id)
+
+                viewer = AuthContext(
+                    department=manager.department,
+                    operator=None,
+                    role=Role.VIEWER,
+                    auth_session=manager.auth_session,
+                )
+                members = await service.list_run_members(
+                    viewer,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                rendered = str(members.items[0].redacted_evidence)
+                assert "contact@example.com" not in rendered
+                assert "email" not in rendered
+                assert "***" in rendered
+                assert members.items[0].reason_codes == ("CONTACT_EVIDENCE_REDACTED",)
+
+                other = await _actor(session, role=Role.OPERATOR)
+                await session.commit()
+                with pytest.raises(TargetingError) as hidden:
+                    await service.get_pool(other, pool.id)
+                assert hidden.value.status_code == 404
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())

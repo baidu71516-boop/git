@@ -16,6 +16,7 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.http.import_tasks import ImportTaskDispatcher
+from app.http.targeting_tasks import TargetingTaskDispatcher
 
 settings = get_settings()
 
@@ -35,6 +36,10 @@ def get_import_storage(request: Request) -> StorageAdapter:
 
 def get_import_task_dispatcher(request: Request) -> ImportTaskDispatcher:
     return cast(ImportTaskDispatcher, request.app.state.import_task_dispatcher)
+
+
+def get_targeting_task_dispatcher(request: Request) -> TargetingTaskDispatcher:
+    return cast(TargetingTaskDispatcher, request.app.state.targeting_task_dispatcher)
 
 
 def get_client_ip(request: Request) -> str:
@@ -142,6 +147,18 @@ async def require_refresh_mutation(
     context: Annotated[AuthContext, Depends(require_csrf_context)],
 ) -> AuthContext:
     """Require the shared mutation prerequisites for Refresh Queue actions."""
+
+    if context.operator is None:
+        raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+    if context.role == Role.VIEWER:
+        raise AuthError(403, "PERMISSION_DENIED", "Viewer role is read-only")
+    return context
+
+
+async def require_targeting_mutation(
+    context: Annotated[AuthContext, Depends(require_csrf_context)],
+) -> AuthContext:
+    """Require the shared mutation prerequisites for Candidate Pool runs."""
 
     if context.operator is None:
         raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
