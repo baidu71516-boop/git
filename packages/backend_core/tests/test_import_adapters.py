@@ -49,12 +49,42 @@ def huitun_row(**overrides: str) -> RawTabularRecord:
 def test_huitun_mapping_is_complete_centralized_and_shared_by_file_types() -> None:
     headers = list(HUITUN_FIELD_MAPPING)
     assert len(headers) == 37
+    assert HUITUN_FIELD_MAPPING["达人官方地址"] == "profile_url"
     assert HUITUN_FIELD_MAPPING["灰豚指数"] == "huitun_score"
     assert HUITUN_FIELD_MAPPING["小红书号"] == "account_handle"
+    assert HUITUN_FIELD_MAPPING["联系邮箱"] == "email"
 
     csv_mapping = HuitunCsvAdapter().mapping_for_headers(headers)
     excel_mapping = HuitunExcelAdapter().mapping_for_headers(headers)
     assert csv_mapping == excel_mapping == dict(HUITUN_FIELD_MAPPING)
+
+
+def test_mapping_requires_profile_or_another_stable_identity_not_handle_or_email() -> None:
+    assert validate_mapping(
+        ["name", "official_profile", "handle", "email"],
+        {
+            "name": "nickname",
+            "official_profile": "profile_url",
+            "handle": "account_handle",
+            "email": "email",
+        },
+    ) == {
+        "name": "nickname",
+        "official_profile": "profile_url",
+        "handle": "account_handle",
+        "email": "email",
+    }
+
+    with pytest.raises(ImportDomainError) as missing_stable_identity:
+        validate_mapping(
+            ["name", "handle", "email"],
+            {"name": "nickname", "handle": "account_handle", "email": "email"},
+        )
+
+    assert missing_stable_identity.value.code == "MAPPING_INVALID"
+    assert missing_stable_identity.value.message == (
+        "Mapping must include a platform, source, or profile identity"
+    )
 
 
 def test_huitun_adapter_builds_platform_neutral_canonical_record() -> None:

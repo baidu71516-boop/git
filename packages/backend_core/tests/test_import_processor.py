@@ -50,6 +50,10 @@ from openpyxl import Workbook
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+SANITIZED_HUITUN_FIXTURE = (
+    Path(__file__).parents[3] / "tests" / "fixtures" / "huitun_sanitized_37_columns.csv"
+)
+
 
 @asynccontextmanager
 async def processor_session() -> AsyncIterator[tuple[AsyncSession, LocalStorageAdapter]]:
@@ -197,6 +201,73 @@ def valid_row(profile_id: str, *, email: str = "--", followers: str = "1000") ->
 
 def limits() -> ParserLimits:
     return ParserLimits(max_rows=1000, max_columns=100, max_cells=100_000)
+
+
+def test_sanitized_real_huitun_shape_uploads_maps_and_builds_preview() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            job = await seed_import_job(
+                session,
+                storage,
+                SANITIZED_HUITUN_FIXTURE.read_bytes(),
+                filename="huitun-sanitized-37-columns.csv",
+            )
+            assert job.status is ImportJobStatus.UPLOADED
+            assert job.field_mapping is None
+
+            preview = await ImportProcessor(
+                session,
+                storage,
+                parser_limits=limits(),
+            ).parse_and_preview(job.id)
+
+            await session.refresh(job)
+            assert preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            assert preview["preview_revision"] == 1
+            assert job.status is ImportJobStatus.PREVIEW_READY
+            assert job.detected_fields == list(HUITUN_FIELD_MAPPING)
+            assert job.field_mapping == dict(HUITUN_FIELD_MAPPING)
+            assert job.field_mapping["达人官方地址"] == "profile_url"
+            assert job.field_mapping["小红书号"] == "account_handle"
+            assert job.field_mapping["联系邮箱"] == "email"
+            assert job.preview_summary is not None
+            assert job.preview_summary["field_count"] == 37
+            assert job.preview_summary["total_rows"] == 2
+            assert job.preview_summary["valid_rows"] == 2
+            assert job.preview_summary["warning_rows"] == 0
+            assert job.preview_summary["error_rows"] == 0
+
+            rows = list(
+                await session.scalars(
+                    select(ImportRow)
+                    .where(ImportRow.import_job_id == job.id)
+                    .order_by(ImportRow.row_number)
+                )
+            )
+            assert len(rows) == 2
+            assert all(not row.warnings and not row.errors for row in rows)
+            first = rows[0].normalized_data
+            assert first["display_name"] == "脱敏达人甲"
+            assert first["platform_identity"] == {
+                "platform": "xiaohongshu",
+                "platform_account_id": "sanitizedFixtureA",
+                "account_handle": "fixture-handle-a",
+                "profile_url": ("https://www.xiaohongshu.com/user/profile/sanitizedFixtureA"),
+                "normalized_profile_url": (
+                    "https://www.xiaohongshu.com/user/profile/sanitizedFixtureA"
+                ),
+                "external_source_id": None,
+            }
+            assert first["contacts"] == [
+                {
+                    "type": "email",
+                    "value": "fixture-a@example.test",
+                    "normalized_value": "fixture-a@example.test",
+                    "validation_status": "valid",
+                }
+            ]
+
+    asyncio.run(scenario())
 
 
 async def queue_confirm(session: AsyncSession, job_id: UUID, revision: int) -> None:

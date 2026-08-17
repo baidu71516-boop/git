@@ -951,7 +951,8 @@ export function BulkImportWorkspace({
         width={680}
       >
         <Paragraph type="secondary">
-          每个源字段只能映射一个目标字段；必须包含达人昵称与至少一个身份字段。
+          需要达人官方地址 / 平台账号ID /
+          来源ID之一；小红书号和邮箱不能作为稳定身份字段。
         </Paragraph>
         <ImportFieldMappingEditor
           sourceFields={mappingFile?.file.detected_fields ?? []}

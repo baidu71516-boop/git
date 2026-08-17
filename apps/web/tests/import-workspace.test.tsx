@@ -299,6 +299,11 @@ describe("ImportWorkspace", () => {
     render(<ImportWorkspace role="operator" />);
     await selectAndUpload();
     expect(await screen.findByText("字段映射")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "需要达人官方地址 / 平台账号ID / 来源ID之一；小红书号和邮箱不能作为稳定身份字段。",
+      ),
+    ).toBeInTheDocument();
 
     const select = screen.getByRole("combobox", {
       name: "将 达人名称 映射到",
