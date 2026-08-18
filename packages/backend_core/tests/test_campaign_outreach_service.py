@@ -1,0 +1,1798 @@
+"""Focused domain tests for Phase 3A Campaign and Outreach services.
+
+SQLite exercises service-level contracts and transaction ownership through a
+minimal compatible table set. PostgreSQL-specific row-lock races remain covered
+by the opt-in integration test module.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from functools import wraps
+from unittest.mock import patch
+from uuid import UUID, uuid4
+
+import pytest
+from backend_core.audit.enums import AuditAction
+from backend_core.audit.models import AuditLog
+from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import AuthSession, Department, Operator
+from backend_core.auth.service import AuthContext
+from backend_core.campaigns.channels import StaticChannelEnablementRegistry
+from backend_core.campaigns.errors import CampaignOutreachError
+from backend_core.campaigns.schemas import (
+    CampaignCreateInput,
+    CampaignMemberAddItem,
+    CampaignMemberBulkAddInput,
+    CampaignMemberBulkAddResult,
+    CampaignMemberRemoveInput,
+    CampaignStatusTransitionInput,
+    CampaignUpdateInput,
+)
+from backend_core.campaigns.service import CampaignService
+from backend_core.db import models as database_models  # noqa: F401
+from backend_core.db.base import Base
+from backend_core.growth.enums import (
+    CampaignReviewMode,
+    CampaignStatus,
+    CandidatePoolKind,
+    CandidatePoolRunStatus,
+    CandidatePoolStatus,
+    CandidateResult,
+    DuplicateHistoryPolicy,
+    Phase3AOperationScope,
+)
+from backend_core.growth.models import (
+    Campaign,
+    CampaignMember,
+    CandidatePool,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    Phase3AIdempotencyRecord,
+    TargetingPolicy,
+)
+from backend_core.influencers.enums import (
+    ContactType,
+    ContactValidationStatus,
+    CRMStage,
+    DataSource,
+    InfluencerStatus,
+    Platform,
+)
+from backend_core.influencers.models import (
+    Influencer,
+    InfluencerContact,
+    InfluencerPlatformAccount,
+)
+from backend_core.outreach.enums import (
+    OutreachChannel,
+    OutreachEventType,
+    OutreachPriority,
+    OutreachPrioritySource,
+    OutreachTaskState,
+)
+from backend_core.outreach.models import OutreachEvent, OutreachTarget, OutreachTask
+from backend_core.outreach.schemas import (
+    HistoryWarning,
+    OutreachTargetCreateInput,
+    OutreachTaskCreateInput,
+    OutreachTaskTransitionInput,
+)
+from backend_core.outreach.service import OutreachService
+from pydantic import ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+SQLITE_TABLES = (
+    "departments",
+    "operators",
+    "influencers",
+    "influencer_platform_accounts",
+    "influencer_contacts",
+    "candidate_pools",
+    "targeting_policies",
+    "candidate_pool_runs",
+    "candidate_pool_members",
+    "campaigns",
+    "campaign_members",
+    "outreach_targets",
+    "outreach_tasks",
+    "outreach_events",
+    "phase3a_idempotency_records",
+    "audit_logs",
+)
+
+
+def async_test(function: object) -> object:
+    """Run an async scenario without adding a project-wide pytest plugin."""
+
+    @wraps(function)
+    def wrapper() -> None:
+        asyncio.run(function())  # type: ignore[operator]
+
+    return wrapper
+
+
+class MutableClock:
+    def __init__(self) -> None:
+        self.current = datetime(2026, 8, 18, 4, 0, tzinfo=UTC)
+
+    def now(self) -> datetime:
+        return self.current
+
+
+@dataclass(slots=True)
+class DomainHarness:
+    session: AsyncSession
+    context: AuthContext
+    campaign_service: CampaignService
+    outreach_service: OutreachService
+    clock: MutableClock
+
+
+@dataclass(frozen=True, slots=True)
+class InfluencerFixture:
+    """Stable identifiers retained across rollback-driven ORM expiry."""
+
+    influencer_id: UUID
+    account_id: UUID
+    contact_id: UUID
+
+
+@asynccontextmanager
+async def domain_harness(
+    *,
+    enabled_channels: frozenset[OutreachChannel] | None = None,
+) -> AsyncIterator[DomainHarness]:
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as connection:
+        for table_name in SQLITE_TABLES:
+            await connection.run_sync(
+                lambda sync_connection, name=table_name: Base.metadata.tables[name].create(
+                    sync_connection
+                )
+            )
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with factory() as session:
+            context = await seed_context(session)
+            await session.commit()
+            clock = MutableClock()
+            registry = StaticChannelEnablementRegistry(
+                enabled_channels
+                if enabled_channels is not None
+                else frozenset(
+                    {
+                        OutreachChannel.EMAIL,
+                        OutreachChannel.WECHAT,
+                        OutreachChannel.XIAOHONGSHU_PRIVATE_MESSAGE,
+                        OutreachChannel.MANUAL,
+                    }
+                )
+            )
+            yield DomainHarness(
+                session=session,
+                context=context,
+                campaign_service=CampaignService(
+                    session,
+                    channel_registry=registry,
+                    clock=clock,
+                ),
+                outreach_service=OutreachService(
+                    session,
+                    channel_registry=registry,
+                    clock=clock,
+                ),
+                clock=clock,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def seed_context(session: AsyncSession, *, role: Role = Role.OPERATOR) -> AuthContext:
+    department = Department(
+        name=f"Campaign Outreach {uuid4().hex}",
+        password_hash="not-used-by-domain-test",
+        status=DepartmentStatus.ACTIVE,
+        session_days=30,
+    )
+    session.add(department)
+    await session.flush()
+    operator = Operator(
+        department_id=department.id,
+        name="Campaign Outreach Operator",
+        role=Role.OPERATOR,
+        status=OperatorStatus.ACTIVE,
+    )
+    session.add(operator)
+    await session.flush()
+    auth_session = AuthSession(
+        department_id=department.id,
+        operator_id=operator.id,
+        token_hash=uuid4().hex + uuid4().hex,
+        csrf_token_hash=uuid4().hex + uuid4().hex,
+        ip="127.0.0.1",
+        user_agent="campaign-outreach-domain-test",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        revoked_at=None,
+    )
+    return AuthContext(
+        department=department,
+        operator=operator,
+        role=role,
+        auth_session=auth_session,
+    )
+
+
+async def seed_influencer(
+    session: AsyncSession,
+    context: AuthContext,
+    *,
+    contact_type: ContactType = ContactType.EMAIL,
+    contact_status: ContactValidationStatus = ContactValidationStatus.VALID,
+    contact_value: str | None = None,
+) -> InfluencerFixture:
+    assert context.operator is not None
+    influencer = Influencer(
+        display_name=f"Influencer {uuid4().hex}",
+        owner_operator_id=context.operator.id,
+        crm_stage=CRMStage.TO_DEVELOP,
+        status=InfluencerStatus.ACTIVE,
+        deleted_at=None,
+    )
+    session.add(influencer)
+    await session.flush()
+    account = InfluencerPlatformAccount(
+        influencer_id=influencer.id,
+        platform=Platform.XIAOHONGSHU,
+        platform_account_id=uuid4().hex,
+        account_name=f"Account {uuid4().hex}",
+        source=DataSource.MANUAL,
+        is_active=True,
+    )
+    session.add(account)
+    await session.flush()
+    now = datetime.now(UTC)
+    value = contact_value or f"{uuid4().hex}@example.invalid"
+    contact = InfluencerContact(
+        influencer_id=influencer.id,
+        platform_account_id=None,
+        type=contact_type,
+        value=value,
+        normalized_value=value.lower(),
+        source=DataSource.MANUAL,
+        validation_status=contact_status,
+        is_current=True,
+        possible_duplicate_contact=False,
+        first_seen_at=now,
+        last_seen_at=now,
+        source_updated_at=None,
+        first_import_job_id=None,
+        first_import_row_id=None,
+        last_import_job_id=None,
+        last_import_row_id=None,
+    )
+    session.add(contact)
+    await session.flush()
+    return InfluencerFixture(
+        influencer_id=influencer.id,
+        account_id=account.id,
+        contact_id=contact.id,
+    )
+
+
+async def refresh_context_after_rollback(harness: DomainHarness) -> None:
+    """Reload the auth fields read by services after rollback-driven ORM expiry."""
+
+    await harness.session.refresh(harness.context.department)
+    if harness.context.operator is not None:
+        await harness.session.refresh(harness.context.operator)
+
+
+async def seed_candidate_pool_run(
+    harness: DomainHarness,
+    fixture: InfluencerFixture,
+    *,
+    status: CandidatePoolRunStatus,
+    include_member: bool,
+) -> UUID:
+    """Seed only the persisted run provenance required by Campaign member tests."""
+
+    assert harness.context.operator is not None
+    pool = CandidatePool(
+        department_id=harness.context.department.id,
+        owner_operator_id=harness.context.operator.id,
+        name=f"Pool {uuid4().hex}",
+        kind=CandidatePoolKind.POTENTIAL_SELLER,
+        source_collection_job_id=None,
+        status=CandidatePoolStatus.ACTIVE,
+        current_policy_id=None,
+        version=1,
+    )
+    harness.session.add(pool)
+    await harness.session.flush()
+    policy = TargetingPolicy(
+        pool_id=pool.id,
+        version=1,
+        schema_version=1,
+        definition={},
+        canonical_hash="0" * 64,
+        created_by_operator_id=harness.context.operator.id,
+    )
+    harness.session.add(policy)
+    await harness.session.flush()
+    run = CandidatePoolRun(
+        pool_id=pool.id,
+        policy_id=policy.id,
+        as_of=harness.clock.now(),
+        input_watermark=None,
+        status=status,
+        match_count=1 if include_member else 0,
+        unknown_count=0,
+        not_match_count=0,
+        error_code=None,
+        error_message=None,
+        idempotency_key=f"run-{uuid4().hex}",
+        request_hash="0" * 64,
+    )
+    harness.session.add(run)
+    await harness.session.flush()
+    if include_member:
+        harness.session.add(
+            CandidatePoolMember(
+                run_id=run.id,
+                influencer_id=fixture.influencer_id,
+                platform_account_id=fixture.account_id,
+                result=CandidateResult.MATCH,
+                reason_codes=[],
+                redacted_evidence={},
+                evidence_hash="0" * 64,
+            )
+        )
+        await harness.session.flush()
+    return run.id
+
+
+async def create_campaign(harness: DomainHarness, *, name: str = "Campaign") -> UUID:
+    result = await harness.campaign_service.create_campaign(
+        harness.context,
+        CampaignCreateInput(name=name),
+        idempotency_key=f"campaign-{uuid4().hex}",
+        ip="127.0.0.1",
+        user_agent="campaign-outreach-domain-test",
+    )
+    return result.result.id
+
+
+async def add_member(
+    harness: DomainHarness,
+    campaign_id: UUID,
+    fixture: InfluencerFixture,
+) -> CampaignMember:
+    await harness.campaign_service.bulk_add_members(
+        harness.context,
+        campaign_id,
+        CampaignMemberBulkAddInput(
+            members=(
+                CampaignMemberAddItem(
+                    influencer_id=fixture.influencer_id,
+                    preferred_platform_account_id=fixture.account_id,
+                ),
+            )
+        ),
+        idempotency_key=f"member-{uuid4().hex}",
+        ip="127.0.0.1",
+        user_agent="campaign-outreach-domain-test",
+    )
+    members = await harness.campaign_service.repository.list_members_for_influencers(
+        campaign_id,
+        (fixture.influencer_id,),
+    )
+    assert len(members) == 1
+    return members[0]
+
+
+async def create_email_target(
+    harness: DomainHarness,
+    campaign_id: UUID,
+    member_id: UUID,
+    fixture: InfluencerFixture,
+) -> OutreachTarget:
+    result = await harness.outreach_service.create_target(
+        harness.context,
+        campaign_id,
+        OutreachTargetCreateInput(
+            member_id=member_id,
+            influencer_id=fixture.influencer_id,
+            channel=OutreachChannel.EMAIL,
+            contact_id=fixture.contact_id,
+        ),
+        idempotency_key=f"target-{uuid4().hex}",
+        ip="127.0.0.1",
+        user_agent="campaign-outreach-domain-test",
+    )
+    target = await harness.outreach_service.repository.get_target(
+        result.result.id,
+        department_id=harness.context.department.id,
+    )
+    assert target is not None
+    return target
+
+
+async def activate_campaign(harness: DomainHarness, campaign_id: UUID) -> None:
+    await harness.campaign_service.transition_campaign_status(
+        harness.context,
+        campaign_id,
+        CampaignStatusTransitionInput(
+            to_status=CampaignStatus.ACTIVE,
+            expected_version=1,
+        ),
+        ip="127.0.0.1",
+        user_agent="campaign-outreach-domain-test",
+    )
+
+
+async def count_rows(session: AsyncSession, model: type[object]) -> int:
+    return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def count_audits(session: AsyncSession, action: AuditAction) -> int:
+    return int(
+        await session.scalar(
+            select(func.count()).select_from(AuditLog).where(AuditLog.action == action)
+        )
+        or 0
+    )
+
+
+def test_history_warning_never_contains_cross_department_entity_ids() -> None:
+    warning = HistoryWarning(
+        channel=OutreachChannel.EMAIL,
+        last_sent_at=datetime(2026, 8, 18, 4, 0, tzinfo=UTC),
+    )
+    assert set(warning.model_dump()) == {"channel", "last_sent_at"}
+    with pytest.raises(ValidationError):
+        HistoryWarning.model_validate(
+            {
+                "campaign_id": str(uuid4()),
+                "task_id": str(uuid4()),
+                "channel": OutreachChannel.EMAIL,
+                "last_sent_at": datetime(2026, 8, 18, 4, 0, tzinfo=UTC),
+            }
+        )
+
+
+def test_task_create_input_requires_timezone_aware_due_at() -> None:
+    with pytest.raises(ValidationError):
+        OutreachTaskCreateInput()
+    with pytest.raises(ValidationError):
+        OutreachTaskCreateInput(due_at=datetime(2026, 8, 18, 12, 0))
+
+
+@async_test
+async def test_campaign_create_shared_idempotency_replays_and_conflicts_without_second_audit() -> (
+    None
+):
+    async with domain_harness() as harness:
+        first = await harness.campaign_service.create_campaign(
+            harness.context,
+            CampaignCreateInput(name="Durable replay"),
+            idempotency_key="campaign-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replay = await harness.campaign_service.create_campaign(
+            harness.context,
+            CampaignCreateInput(name="Durable replay"),
+            idempotency_key="campaign-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+
+        assert first.status_code == replay.status_code == 201
+        assert not first.replayed and replay.replayed
+        assert replay.result == first.result
+        assert await count_rows(harness.session, Campaign) == 1
+        assert await count_rows(harness.session, Phase3AIdempotencyRecord) == 1
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_CREATED) == 1
+
+        with pytest.raises(CampaignOutreachError) as error:
+            await harness.campaign_service.create_campaign(
+                harness.context,
+                CampaignCreateInput(name="Different semantic request"),
+                idempotency_key="campaign-create-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert error.value.status_code == 409
+        assert error.value.code == "IDEMPOTENCY_KEY_REUSED"
+        assert await count_rows(harness.session, Campaign) == 1
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_CREATED) == 1
+
+
+@async_test
+async def test_campaign_create_replay_ignores_owner_state_after_initial_success() -> None:
+    async with domain_harness() as harness:
+        assert harness.context.operator is not None
+        owner = Operator(
+            department_id=harness.context.department.id,
+            name=f"Campaign Owner {uuid4().hex}",
+            role=Role.OPERATOR,
+            status=OperatorStatus.ACTIVE,
+        )
+        harness.session.add(owner)
+        await harness.session.flush()
+        request = CampaignCreateInput(
+            name="Owner-state-independent replay",
+            owner_operator_id=owner.id,
+        )
+        first = await harness.campaign_service.create_campaign(
+            harness.context,
+            request,
+            idempotency_key="campaign-owner-state-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+
+        owner.status = OperatorStatus.DISABLED
+        await harness.session.commit()
+
+        replay = await harness.campaign_service.create_campaign(
+            harness.context,
+            request,
+            idempotency_key="campaign-owner-state-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert replay.replayed
+        assert replay.result == first.result
+        assert await count_rows(harness.session, Campaign) == 1
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_CREATED) == 1
+
+
+@async_test
+async def test_non_super_cross_department_mutations_do_not_disclose_scope() -> None:
+    async with domain_harness() as harness:
+        with pytest.raises(CampaignOutreachError) as error:
+            await harness.campaign_service.create_campaign(
+                harness.context,
+                CampaignCreateInput(
+                    department_id=uuid4(),
+                    name="Cross-department Campaign",
+                ),
+                idempotency_key="cross-department-campaign",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert error.value.status_code == 404
+        assert error.value.code == "RESOURCE_NOT_FOUND"
+        assert await count_rows(harness.session, Campaign) == 0
+        assert await count_rows(harness.session, Phase3AIdempotencyRecord) == 0
+
+
+@async_test
+async def test_bulk_member_replay_restore_noop_and_bounded_payload() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        add_input = CampaignMemberBulkAddInput(
+            members=(
+                CampaignMemberAddItem(
+                    influencer_id=fixture.influencer_id,
+                    preferred_platform_account_id=fixture.account_id,
+                ),
+            )
+        )
+        added = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            add_input,
+            idempotency_key="member-add-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replay = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            add_input,
+            idempotency_key="member-add-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert added.result.added_count == 1
+        assert replay.replayed
+        assert replay.result == added.result
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 1
+
+        members = await harness.campaign_service.repository.list_members_for_influencers(
+            campaign_id,
+            (fixture.influencer_id,),
+        )
+        assert len(members) == 1
+        member = members[0]
+        removed = await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            member.id,
+            CampaignMemberRemoveInput(expected_version=member.version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert removed.removed_at is not None
+
+        restored = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            add_input,
+            idempotency_key="member-restore-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        no_op = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            add_input,
+            idempotency_key="member-noop-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert restored.result.restored_count == 1
+        assert no_op.result.already_active_count == 1
+        assert no_op.result.active_count_after == 1
+        assert set(no_op.result.to_replay_payload()) == {
+            "campaign_id",
+            "source_pool_run_id",
+            "requested_count",
+            "added_count",
+            "restored_count",
+            "already_active_count",
+            "active_count_after",
+        }
+        assert await count_rows(harness.session, CampaignMember) == 1
+        # First add and restore mutate. The all-active no-op still has a durable
+        # idempotency record, but correctly produces no Member mutation Audit.
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 2
+        assert await count_rows(harness.session, Phase3AIdempotencyRecord) == 4
+
+        ten_thousand = tuple(
+            CampaignMemberAddItem(
+                influencer_id=uuid4(),
+                preferred_platform_account_id=uuid4(),
+            )
+            for _ in range(10_000)
+        )
+        bulk_input = CampaignMemberBulkAddInput(members=ten_thousand)
+        canonical = harness.campaign_service._canonical_members(bulk_input.members)
+        summary = CampaignMemberBulkAddResult(
+            campaign_id=campaign_id,
+            source_pool_run_id=None,
+            requested_count=len(canonical),
+            added_count=len(canonical),
+            restored_count=0,
+            already_active_count=0,
+            active_count_after=len(canonical),
+        ).to_replay_payload()
+        assert len(canonical) == 10_000
+        assert len(json.dumps(summary)) < 1_000
+        assert "members" not in summary
+
+
+@async_test
+async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs() -> None:
+    async with domain_harness() as harness:
+        selected = await seed_influencer(harness.session, harness.context)
+        pending = await seed_influencer(harness.session, harness.context)
+        mismatched = await seed_influencer(harness.session, harness.context)
+        completed_run_id = await seed_candidate_pool_run(
+            harness,
+            selected,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        pending_run_id = await seed_candidate_pool_run(
+            harness,
+            pending,
+            status=CandidatePoolRunStatus.PENDING,
+            include_member=True,
+        )
+        mismatched_run_id = await seed_candidate_pool_run(
+            harness,
+            selected,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        selected_input = CampaignMemberBulkAddInput(
+            source_pool_run_id=completed_run_id,
+            members=(
+                CampaignMemberAddItem(
+                    influencer_id=selected.influencer_id,
+                    preferred_platform_account_id=selected.account_id,
+                ),
+            ),
+        )
+        added = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            selected_input,
+            idempotency_key="member-source-run-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replay = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            selected_input,
+            idempotency_key="member-source-run-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        members = await harness.campaign_service.repository.list_members_for_influencers(
+            campaign_id,
+            (selected.influencer_id,),
+        )
+        assert added.result.source_pool_run_id == completed_run_id
+        assert replay.replayed
+        assert replay.result == added.result
+        assert len(members) == 1
+        assert members[0].source_pool_run_id == completed_run_id
+        record = await harness.session.scalar(
+            select(Phase3AIdempotencyRecord).where(
+                Phase3AIdempotencyRecord.operation_scope
+                == Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                Phase3AIdempotencyRecord.idempotency_key == "member-source-run-key",
+            )
+        )
+        assert record is not None
+        assert record.result_payload["source_pool_run_id"] == str(completed_run_id)
+
+        with pytest.raises(CampaignOutreachError) as incomplete:
+            await harness.campaign_service.bulk_add_members(
+                harness.context,
+                campaign_id,
+                CampaignMemberBulkAddInput(
+                    source_pool_run_id=pending_run_id,
+                    members=(
+                        CampaignMemberAddItem(
+                            influencer_id=pending.influencer_id,
+                            preferred_platform_account_id=pending.account_id,
+                        ),
+                    ),
+                ),
+                idempotency_key="member-pending-run-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert incomplete.value.code == "CANDIDATE_POOL_RUN_NOT_COMPLETED"
+        await refresh_context_after_rollback(harness)
+
+        with pytest.raises(CampaignOutreachError) as missing_pair:
+            await harness.campaign_service.bulk_add_members(
+                harness.context,
+                campaign_id,
+                CampaignMemberBulkAddInput(
+                    source_pool_run_id=mismatched_run_id,
+                    members=(
+                        CampaignMemberAddItem(
+                            influencer_id=mismatched.influencer_id,
+                            preferred_platform_account_id=mismatched.account_id,
+                        ),
+                    ),
+                ),
+                idempotency_key="member-mismatched-run-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert missing_pair.value.code == "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
+        assert await count_rows(harness.session, CampaignMember) == 1
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 1
+        for key in ("member-pending-run-key", "member-mismatched-run-key"):
+            assert (
+                await harness.session.scalar(
+                    select(Phase3AIdempotencyRecord).where(
+                        Phase3AIdempotencyRecord.operation_scope
+                        == Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                        Phase3AIdempotencyRecord.idempotency_key == key,
+                    )
+                )
+                is None
+            )
+
+
+@async_test
+async def test_target_shared_replay_is_redacted_and_viewer_cannot_mutate() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(
+            harness.session,
+            harness.context,
+            contact_value="secret-contact@example.invalid",
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        member = await add_member(harness, campaign_id, fixture)
+        request = OutreachTargetCreateInput(
+            member_id=member.id,
+            influencer_id=fixture.influencer_id,
+            channel=OutreachChannel.EMAIL,
+            contact_id=fixture.contact_id,
+        )
+        first = await harness.outreach_service.create_target(
+            harness.context,
+            campaign_id,
+            request,
+            idempotency_key="target-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replay = await harness.outreach_service.create_target(
+            harness.context,
+            campaign_id,
+            request,
+            idempotency_key="target-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert replay.replayed
+        assert replay.result.masked_display == "***"
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TARGET_CREATED) == 1
+        record = await harness.session.scalar(
+            select(Phase3AIdempotencyRecord).where(
+                Phase3AIdempotencyRecord.operation_scope
+                == Phase3AOperationScope.OUTREACH_TARGET_CREATE,
+                Phase3AIdempotencyRecord.idempotency_key == "target-create-key",
+            )
+        )
+        assert record is not None
+        encoded_payload = json.dumps(record.result_payload)
+        assert "secret-contact@example.invalid" not in encoded_payload
+        assert "contact_id" in record.result_payload
+
+        with pytest.raises(CampaignOutreachError) as error:
+            await harness.outreach_service.create_target(
+                harness.context,
+                campaign_id,
+                OutreachTargetCreateInput(
+                    member_id=member.id,
+                    influencer_id=fixture.influencer_id,
+                    channel=OutreachChannel.EMAIL,
+                    contact_id=uuid4(),
+                ),
+                idempotency_key="target-create-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert error.value.code == "IDEMPOTENCY_KEY_REUSED"
+        await refresh_context_after_rollback(harness)
+
+        viewer = AuthContext(
+            department=harness.context.department,
+            operator=harness.context.operator,
+            role=Role.VIEWER,
+            auth_session=harness.context.auth_session,
+        )
+        target = await harness.outreach_service.get_target(viewer, first.result.id)
+        assert target.masked_display == "***"
+        with pytest.raises(CampaignOutreachError) as viewer_error:
+            await harness.outreach_service.create_target(
+                viewer,
+                campaign_id,
+                request,
+                idempotency_key="viewer-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert viewer_error.value.status_code == 403
+
+
+@async_test
+async def test_campaign_lifecycle_activation_cas_and_terminal_closed() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        with pytest.raises(CampaignOutreachError) as no_member:
+            await activate_campaign(harness, campaign_id)
+        assert no_member.value.code == "CAMPAIGN_ACTIVATION_REQUIRES_MEMBER"
+        await refresh_context_after_rollback(harness)
+
+        member = await add_member(harness, campaign_id, fixture)
+        member_id = member.id
+        with pytest.raises(CampaignOutreachError) as no_target:
+            await activate_campaign(harness, campaign_id)
+        assert no_target.value.code == "CAMPAIGN_ACTIVATION_REQUIRES_TARGET"
+        await refresh_context_after_rollback(harness)
+
+        await create_email_target(harness, campaign_id, member_id, fixture)
+        active = await harness.campaign_service.transition_campaign_status(
+            harness.context,
+            campaign_id,
+            CampaignStatusTransitionInput(
+                to_status=CampaignStatus.ACTIVE,
+                expected_version=1,
+            ),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert active.status is CampaignStatus.ACTIVE
+        assert active.version == 2
+
+        with pytest.raises(CampaignOutreachError) as stale:
+            await harness.campaign_service.update_campaign(
+                harness.context,
+                campaign_id,
+                CampaignUpdateInput(
+                    name="CAS",
+                    owner_operator_id=active.owner_operator_id,
+                    review_mode=CampaignReviewMode.FIRST_N,
+                    review_count=50,
+                    duplicate_history_policy=DuplicateHistoryPolicy.ALLOW_WITH_WARNING,
+                    duplicate_window_days=None,
+                    expected_version=1,
+                ),
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert stale.value.code == "VERSION_CONFLICT"
+        await refresh_context_after_rollback(harness)
+
+        with pytest.raises(CampaignOutreachError) as direct_close:
+            await harness.campaign_service.transition_campaign_status(
+                harness.context,
+                campaign_id,
+                CampaignStatusTransitionInput(
+                    to_status=CampaignStatus.CLOSED,
+                    expected_version=2,
+                ),
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert direct_close.value.code == "INVALID_CAMPAIGN_TRANSITION"
+        await refresh_context_after_rollback(harness)
+
+        paused = await harness.campaign_service.transition_campaign_status(
+            harness.context,
+            campaign_id,
+            CampaignStatusTransitionInput(
+                to_status=CampaignStatus.PAUSED,
+                expected_version=2,
+            ),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        closed = await harness.campaign_service.transition_campaign_status(
+            harness.context,
+            campaign_id,
+            CampaignStatusTransitionInput(
+                to_status=CampaignStatus.CLOSED,
+                expected_version=paused.version,
+            ),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert closed.status is CampaignStatus.CLOSED
+        with pytest.raises(CampaignOutreachError) as terminal:
+            await harness.campaign_service.transition_campaign_status(
+                harness.context,
+                campaign_id,
+                CampaignStatusTransitionInput(
+                    to_status=CampaignStatus.ACTIVE,
+                    expected_version=closed.version,
+                ),
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert terminal.value.code == "INVALID_CAMPAIGN_TRANSITION"
+
+
+@async_test
+async def test_task_state_machine_event_replay_and_atomic_rollback() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(
+            harness.session,
+            harness.context,
+            contact_value="sent-proof@example.invalid",
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        member = await add_member(harness, campaign_id, fixture)
+        target = await create_email_target(harness, campaign_id, member.id, fixture)
+        await activate_campaign(harness, campaign_id)
+
+        created = await harness.outreach_service.create_task(
+            harness.context,
+            target.id,
+            OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+            idempotency_key="task-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replayed_create = await harness.outreach_service.create_task(
+            harness.context,
+            target.id,
+            OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+            idempotency_key="task-create-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert created.result.task.state is OutreachTaskState.REVIEW_REQUIRED
+        assert replayed_create.replayed
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TASK_CREATED) == 1
+
+        contact = await harness.session.get(InfluencerContact, fixture.contact_id)
+        assert contact is not None
+        contact.validation_status = ContactValidationStatus.INVALID
+        await harness.session.commit()
+        with pytest.raises(CampaignOutreachError) as invalid_ready:
+            await harness.outreach_service.transition_task(
+                harness.context,
+                created.result.task.id,
+                OutreachTaskTransitionInput(
+                    to_state=OutreachTaskState.READY,
+                    expected_version=1,
+                ),
+                idempotency_key="invalid-ready-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert invalid_ready.value.code == "OUTREACH_CONTACT_INVALID"
+        await refresh_context_after_rollback(harness)
+        contact = await harness.session.get(InfluencerContact, fixture.contact_id)
+        assert contact is not None
+        contact.validation_status = ContactValidationStatus.VALID
+        await harness.session.commit()
+
+        approved = await harness.outreach_service.transition_task(
+            harness.context,
+            created.result.task.id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.READY,
+                expected_version=1,
+            ),
+            idempotency_key="approve-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replayed_approval = await harness.outreach_service.transition_task(
+            harness.context,
+            created.result.task.id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.READY,
+                expected_version=1,
+            ),
+            idempotency_key="approve-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert replayed_approval.replayed
+        assert replayed_approval.event_id == approved.event_id
+
+        with pytest.raises(CampaignOutreachError) as reused_key:
+            await harness.outreach_service.transition_task(
+                harness.context,
+                created.result.task.id,
+                OutreachTaskTransitionInput(
+                    to_state=OutreachTaskState.STOPPED,
+                    expected_version=1,
+                ),
+                idempotency_key="approve-key",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert reused_key.value.code == "IDEMPOTENCY_KEY_REUSED"
+        await refresh_context_after_rollback(harness)
+
+        sent = await harness.outreach_service.transition_task(
+            harness.context,
+            created.result.task.id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.SENT,
+                expected_version=approved.version,
+            ),
+            idempotency_key="sent-key",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        event = await harness.session.get(OutreachEvent, sent.event_id)
+        assert event is not None
+        assert event.event_type.value == "OUTREACH_SENT"
+        assert event.redacted_target_snapshot is not None
+        assert "sent-proof@example.invalid" not in json.dumps(event.redacted_target_snapshot)
+        assert "endpoint_fingerprint" in event.redacted_target_snapshot
+        assert (
+            event.redacted_target_snapshot["endpoint_fingerprint"]
+            == hashlib.sha256(
+                b"phase3a:endpoint:v1:contact:email:sent-proof@example.invalid"
+            ).hexdigest()
+        )
+
+        with pytest.raises(CampaignOutreachError) as terminal:
+            await harness.outreach_service.transition_task(
+                harness.context,
+                created.result.task.id,
+                OutreachTaskTransitionInput(
+                    to_state=OutreachTaskState.STOPPED,
+                    expected_version=sent.version,
+                ),
+                idempotency_key="different-after-sent",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert terminal.value.code == "INVALID_OUTREACH_TASK_TRANSITION"
+        await refresh_context_after_rollback(harness)
+        assert await count_rows(harness.session, OutreachEvent) == 3
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TASK_TRANSITIONED) == 2
+
+        assert OutreachService._is_legal_task_transition(
+            OutreachTaskState.REVIEW_REQUIRED,
+            OutreachTaskState.READY,
+        )
+        assert OutreachService._is_legal_task_transition(
+            OutreachTaskState.REVIEW_REQUIRED,
+            OutreachTaskState.STOPPED,
+        )
+        assert OutreachService._is_legal_task_transition(
+            OutreachTaskState.READY,
+            OutreachTaskState.FAILED,
+        )
+        assert OutreachService._is_legal_task_transition(
+            OutreachTaskState.FAILED,
+            OutreachTaskState.READY,
+        )
+        assert not OutreachService._is_legal_task_transition(
+            OutreachTaskState.SENT,
+            OutreachTaskState.READY,
+        )
+
+        with patch.object(
+            harness.campaign_service.audit, "add", side_effect=RuntimeError("audit fail")
+        ):
+            with pytest.raises(RuntimeError, match="audit fail"):
+                await harness.campaign_service.create_campaign(
+                    harness.context,
+                    CampaignCreateInput(name="Must rollback"),
+                    idempotency_key="rollback-key",
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+        stored = await harness.session.scalar(
+            select(Campaign).where(Campaign.name == "Must rollback")
+        )
+        assert stored is None
+        assert (
+            await harness.session.scalar(
+                select(Phase3AIdempotencyRecord).where(
+                    Phase3AIdempotencyRecord.idempotency_key == "rollback-key"
+                )
+            )
+            is None
+        )
+
+
+@async_test
+async def test_task_execution_requires_active_member_and_template_rendering() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        member = await add_member(harness, campaign_id, fixture)
+        member_id = member.id
+        member_version = member.version
+        target = await create_email_target(harness, campaign_id, member.id, fixture)
+        await activate_campaign(harness, campaign_id)
+        created = await harness.outreach_service.create_task(
+            harness.context,
+            target.id,
+            OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+            idempotency_key="guarded-task-create",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        ready = await harness.outreach_service.transition_task(
+            harness.context,
+            created.result.task.id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.READY,
+                expected_version=1,
+            ),
+            idempotency_key="guarded-task-ready",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+
+        task = await harness.session.get(OutreachTask, created.result.task.id)
+        assert task is not None
+        task.template_version_id = uuid4()
+        await harness.session.commit()
+        with pytest.raises(CampaignOutreachError) as template_error:
+            await harness.outreach_service.transition_task(
+                harness.context,
+                created.result.task.id,
+                OutreachTaskTransitionInput(
+                    to_state=OutreachTaskState.SENT,
+                    expected_version=ready.version,
+                ),
+                idempotency_key="guarded-task-template-send",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert template_error.value.code == "TEMPLATE_RENDERING_UNAVAILABLE"
+        await refresh_context_after_rollback(harness)
+
+        task = await harness.session.get(OutreachTask, created.result.task.id)
+        assert task is not None
+        task.template_version_id = None
+        await harness.session.commit()
+        await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            member_id,
+            CampaignMemberRemoveInput(expected_version=member_version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        with pytest.raises(CampaignOutreachError) as inactive_member:
+            await harness.outreach_service.transition_task(
+                harness.context,
+                created.result.task.id,
+                OutreachTaskTransitionInput(
+                    to_state=OutreachTaskState.SENT,
+                    expected_version=ready.version,
+                ),
+                idempotency_key="guarded-task-inactive-send",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert inactive_member.value.code == "CAMPAIGN_MEMBER_INACTIVE"
+        await refresh_context_after_rollback(harness)
+        assert (
+            len(
+                await harness.outreach_service.list_task_events(
+                    harness.context, created.result.task.id
+                )
+            )
+            == 2
+        )
+
+
+@async_test
+async def test_target_channel_enablement_and_invalid_endpoint_rules() -> None:
+    async with domain_harness(enabled_channels=frozenset()) as disabled_harness:
+        fixture = await seed_influencer(disabled_harness.session, disabled_harness.context)
+        await disabled_harness.session.commit()
+        campaign_id = await create_campaign(disabled_harness)
+        member = await add_member(disabled_harness, campaign_id, fixture)
+        with pytest.raises(CampaignOutreachError) as disabled:
+            await disabled_harness.outreach_service.create_target(
+                disabled_harness.context,
+                campaign_id,
+                OutreachTargetCreateInput(
+                    member_id=member.id,
+                    influencer_id=fixture.influencer_id,
+                    channel=OutreachChannel.EMAIL,
+                    contact_id=fixture.contact_id,
+                ),
+                idempotency_key="disabled-channel",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert disabled.value.code == "CHANNEL_DISABLED"
+
+    async with domain_harness() as harness:
+        invalid = await seed_influencer(
+            harness.session,
+            harness.context,
+            contact_status=ContactValidationStatus.INVALID,
+        )
+        valid = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        invalid_member = await add_member(harness, campaign_id, invalid)
+        with pytest.raises(CampaignOutreachError) as invalid_error:
+            await harness.outreach_service.create_target(
+                harness.context,
+                campaign_id,
+                OutreachTargetCreateInput(
+                    member_id=invalid_member.id,
+                    influencer_id=invalid.influencer_id,
+                    channel=OutreachChannel.EMAIL,
+                    contact_id=invalid.contact_id,
+                ),
+                idempotency_key="invalid-contact",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert invalid_error.value.code == "OUTREACH_CONTACT_INVALID"
+        await refresh_context_after_rollback(harness)
+
+        valid_member = await add_member(harness, campaign_id, valid)
+        xhs_target = await harness.outreach_service.create_target(
+            harness.context,
+            campaign_id,
+            OutreachTargetCreateInput(
+                member_id=valid_member.id,
+                influencer_id=valid.influencer_id,
+                channel=OutreachChannel.XIAOHONGSHU_PRIVATE_MESSAGE,
+                platform_account_id=valid.account_id,
+            ),
+            idempotency_key="xhs-target",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert xhs_target.result.channel is OutreachChannel.XIAOHONGSHU_PRIVATE_MESSAGE
+
+
+@async_test
+async def test_task_manual_priority_and_duplicate_step_are_enforced() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign = await harness.campaign_service.create_campaign(
+            harness.context,
+            CampaignCreateInput(
+                name="Manual priority",
+                review_mode=CampaignReviewMode.AUTO,
+                review_count=None,
+            ),
+            idempotency_key="manual-priority-campaign",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        member = await add_member(harness, campaign.result.id, fixture)
+        target = await create_email_target(harness, campaign.result.id, member.id, fixture)
+        await activate_campaign(harness, campaign.result.id)
+
+        created = await harness.outreach_service.create_task(
+            harness.context,
+            target.id,
+            OutreachTaskCreateInput(
+                due_at=harness.clock.now() + timedelta(days=1),
+                priority=OutreachPriority.HIGH,
+                priority_reason_codes=("MANUAL_PRIORITY",),
+            ),
+            idempotency_key="manual-priority-task",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert created.result.task.state is OutreachTaskState.READY
+        assert created.result.task.priority is OutreachPriority.HIGH
+        assert created.result.task.priority_source is OutreachPrioritySource.MANUAL
+        assert created.result.task.priority_reason_codes == ("MANUAL_PRIORITY",)
+
+        with pytest.raises(CampaignOutreachError) as duplicate:
+            await harness.outreach_service.create_task(
+                harness.context,
+                target.id,
+                OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=2)),
+                idempotency_key="manual-priority-duplicate-step",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert duplicate.value.code == "OUTREACH_TASK_STEP_ALREADY_EXISTS"
+
+
+@async_test
+async def test_task_transition_matrix_executes_legal_and_rejects_invalid_edges() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+
+        async def create_state_task(
+            review_mode: CampaignReviewMode,
+            *,
+            suffix: str,
+        ) -> tuple[UUID, OutreachTaskState]:
+            campaign = await harness.campaign_service.create_campaign(
+                harness.context,
+                CampaignCreateInput(
+                    name=f"State matrix {suffix}",
+                    review_mode=review_mode,
+                    review_count=None if review_mode is CampaignReviewMode.AUTO else 1,
+                ),
+                idempotency_key=f"state-matrix-campaign-{suffix}",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+            member = await add_member(harness, campaign.result.id, fixture)
+            target = await create_email_target(harness, campaign.result.id, member.id, fixture)
+            await activate_campaign(harness, campaign.result.id)
+            task = await harness.outreach_service.create_task(
+                harness.context,
+                target.id,
+                OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+                idempotency_key=f"state-matrix-task-{suffix}",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+            return task.result.task.id, task.result.task.state
+
+        review_task_id, review_state = await create_state_task(
+            CampaignReviewMode.FIRST_N,
+            suffix="review-ready-sent",
+        )
+        assert review_state is OutreachTaskState.REVIEW_REQUIRED
+        approved = await harness.outreach_service.transition_task(
+            harness.context,
+            review_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.READY,
+                expected_version=1,
+            ),
+            idempotency_key="state-matrix-review-ready",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        sent = await harness.outreach_service.transition_task(
+            harness.context,
+            review_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.SENT,
+                expected_version=approved.version,
+            ),
+            idempotency_key="state-matrix-ready-sent",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert sent.state is OutreachTaskState.SENT
+
+        stopped_review_task_id, stopped_review_state = await create_state_task(
+            CampaignReviewMode.FIRST_N,
+            suffix="review-stopped",
+        )
+        assert stopped_review_state is OutreachTaskState.REVIEW_REQUIRED
+        stopped_from_review = await harness.outreach_service.transition_task(
+            harness.context,
+            stopped_review_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.STOPPED,
+                expected_version=1,
+            ),
+            idempotency_key="state-matrix-review-stopped",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert stopped_from_review.state is OutreachTaskState.STOPPED
+
+        retry_task_id, retry_state = await create_state_task(
+            CampaignReviewMode.AUTO,
+            suffix="failed-retry-stopped",
+        )
+        assert retry_state is OutreachTaskState.READY
+        failed = await harness.outreach_service.transition_task(
+            harness.context,
+            retry_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.FAILED,
+                expected_version=1,
+                reason_code="TEST_FAILURE",
+            ),
+            idempotency_key="state-matrix-ready-failed",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        retried = await harness.outreach_service.transition_task(
+            harness.context,
+            retry_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.READY,
+                expected_version=failed.version,
+            ),
+            idempotency_key="state-matrix-failed-ready",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        stopped_from_ready = await harness.outreach_service.transition_task(
+            harness.context,
+            retry_task_id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.STOPPED,
+                expected_version=retried.version,
+            ),
+            idempotency_key="state-matrix-ready-stopped",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert stopped_from_ready.state is OutreachTaskState.STOPPED
+
+        with pytest.raises(ValidationError):
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.REVIEW_REQUIRED,
+                expected_version=1,
+            )
+
+        async def assert_invalid_transition(
+            from_state: OutreachTaskState,
+            to_state: OutreachTaskState,
+        ) -> None:
+            task = await harness.session.get(OutreachTask, review_task_id)
+            assert task is not None
+            task.state = from_state
+            task.version = 1
+            await harness.session.commit()
+            with pytest.raises(CampaignOutreachError) as invalid:
+                await harness.outreach_service.transition_task(
+                    harness.context,
+                    review_task_id,
+                    OutreachTaskTransitionInput(
+                        to_state=to_state,
+                        expected_version=1,
+                        reason_code=(
+                            "TEST_FAILURE" if to_state is OutreachTaskState.FAILED else None
+                        ),
+                    ),
+                    idempotency_key=f"invalid-{from_state.value}-{to_state.value}",
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+            assert invalid.value.code == "INVALID_OUTREACH_TASK_TRANSITION"
+            await refresh_context_after_rollback(harness)
+
+        # The legal edges above use only public service calls. Re-seeding the
+        # Task state here lets the service guard every forbidden source/target
+        # pair without creating unrelated logical steps.
+        invalid_targets = {
+            OutreachTaskState.REVIEW_REQUIRED: (
+                OutreachTaskState.SENT,
+                OutreachTaskState.FAILED,
+            ),
+            OutreachTaskState.READY: (OutreachTaskState.READY,),
+            OutreachTaskState.SENT: (
+                OutreachTaskState.READY,
+                OutreachTaskState.SENT,
+                OutreachTaskState.STOPPED,
+                OutreachTaskState.FAILED,
+            ),
+            OutreachTaskState.STOPPED: (
+                OutreachTaskState.READY,
+                OutreachTaskState.SENT,
+                OutreachTaskState.STOPPED,
+                OutreachTaskState.FAILED,
+            ),
+            OutreachTaskState.FAILED: (
+                OutreachTaskState.SENT,
+                OutreachTaskState.STOPPED,
+                OutreachTaskState.FAILED,
+            ),
+        }
+        for from_state, targets in invalid_targets.items():
+            for to_state in targets:
+                await assert_invalid_transition(from_state, to_state)
+
+
+@async_test
+async def test_cross_campaign_history_warning_is_redacted_in_result_and_event() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        history_context = await seed_context(harness.session)
+        await harness.session.commit()
+        history_campaigns = CampaignService(
+            harness.session,
+            channel_registry=harness.campaign_service.channel_registry,
+            clock=harness.clock,
+        )
+        history_outreach = OutreachService(
+            harness.session,
+            channel_registry=harness.campaign_service.channel_registry,
+            clock=harness.clock,
+        )
+        history_campaign = await history_campaigns.create_campaign(
+            history_context,
+            CampaignCreateInput(
+                name="Historical campaign",
+                review_mode=CampaignReviewMode.AUTO,
+                review_count=None,
+            ),
+            idempotency_key="history-campaign",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        await history_campaigns.bulk_add_members(
+            history_context,
+            history_campaign.result.id,
+            CampaignMemberBulkAddInput(
+                members=(
+                    CampaignMemberAddItem(
+                        influencer_id=fixture.influencer_id,
+                        preferred_platform_account_id=fixture.account_id,
+                    ),
+                )
+            ),
+            idempotency_key="history-member",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        history_member = await history_campaigns.repository.get_member(
+            (
+                await history_campaigns.repository.list_members_for_influencers(
+                    history_campaign.result.id,
+                    (fixture.influencer_id,),
+                )
+            )[0].id,
+            campaign_id=history_campaign.result.id,
+            department_id=history_context.department.id,
+        )
+        assert history_member is not None
+        history_target = await history_outreach.create_target(
+            history_context,
+            history_campaign.result.id,
+            OutreachTargetCreateInput(
+                member_id=history_member.id,
+                influencer_id=fixture.influencer_id,
+                channel=OutreachChannel.EMAIL,
+                contact_id=fixture.contact_id,
+            ),
+            idempotency_key="history-target",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        await history_campaigns.transition_campaign_status(
+            history_context,
+            history_campaign.result.id,
+            CampaignStatusTransitionInput(
+                to_status=CampaignStatus.ACTIVE,
+                expected_version=1,
+            ),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        historical_task = await history_outreach.create_task(
+            history_context,
+            history_target.result.id,
+            OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+            idempotency_key="history-task",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert historical_task.result.task.state is OutreachTaskState.READY
+        historical_sent = await history_outreach.transition_task(
+            history_context,
+            historical_task.result.task.id,
+            OutreachTaskTransitionInput(
+                to_state=OutreachTaskState.SENT,
+                expected_version=historical_task.result.task.version,
+            ),
+            idempotency_key="history-sent",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+
+        campaign_id = await create_campaign(harness, name="New campaign")
+        member = await add_member(harness, campaign_id, fixture)
+        target = await create_email_target(harness, campaign_id, member.id, fixture)
+        created = await harness.outreach_service.create_task(
+            harness.context,
+            target.id,
+            OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1)),
+            idempotency_key="history-warning-task",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert created.result.history_warning is not None
+        assert created.result.history_warning.channel is OutreachChannel.EMAIL
+        assert created.result.history_warning.last_sent_at == harness.clock.now()
+
+        created_event = await harness.session.scalar(
+            select(OutreachEvent).where(
+                OutreachEvent.task_id == created.result.task.id,
+                OutreachEvent.event_type == OutreachEventType.TASK_CREATED,
+            )
+        )
+        assert created_event is not None
+        assert isinstance(created_event.event_metadata, dict)
+        warning_metadata = created_event.event_metadata["history_warning"]
+        assert isinstance(warning_metadata, dict)
+        assert set(warning_metadata) == {"channel", "last_sent_at"}
+        encoded_warning = json.dumps(warning_metadata)
+        assert str(history_campaign.result.id) not in encoded_warning
+        assert str(historical_task.result.task.id) not in encoded_warning
+        assert str(historical_sent.event_id) not in encoded_warning
+
+
+@async_test
+async def test_task_event_and_audit_rollback_is_atomic() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        member = await add_member(harness, campaign_id, fixture)
+        target = await create_email_target(harness, campaign_id, member.id, fixture)
+        target_id = target.id
+        await activate_campaign(harness, campaign_id)
+        create_input = OutreachTaskCreateInput(due_at=harness.clock.now() + timedelta(days=1))
+
+        with patch.object(
+            harness.outreach_service.audit,
+            "add",
+            side_effect=RuntimeError("task create audit fail"),
+        ):
+            with pytest.raises(RuntimeError, match="task create audit fail"):
+                await harness.outreach_service.create_task(
+                    harness.context,
+                    target_id,
+                    create_input,
+                    idempotency_key="task-create-audit-rollback",
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+        assert await count_rows(harness.session, OutreachTask) == 0
+        assert await count_rows(harness.session, OutreachEvent) == 0
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TASK_CREATED) == 0
+        await refresh_context_after_rollback(harness)
+
+        created = await harness.outreach_service.create_task(
+            harness.context,
+            target_id,
+            create_input,
+            idempotency_key="task-create-after-rollback",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        with patch.object(
+            harness.outreach_service.audit,
+            "add",
+            side_effect=RuntimeError("task transition audit fail"),
+        ):
+            with pytest.raises(RuntimeError, match="task transition audit fail"):
+                await harness.outreach_service.transition_task(
+                    harness.context,
+                    created.result.task.id,
+                    OutreachTaskTransitionInput(
+                        to_state=OutreachTaskState.READY,
+                        expected_version=created.result.task.version,
+                    ),
+                    idempotency_key="task-transition-audit-rollback",
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+        await refresh_context_after_rollback(harness)
+        stored = await harness.session.get(OutreachTask, created.result.task.id)
+        assert stored is not None
+        assert stored.state is OutreachTaskState.REVIEW_REQUIRED
+        assert stored.version == 1
+        assert await count_rows(harness.session, OutreachEvent) == 1
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TASK_CREATED) == 1
+        assert await count_audits(harness.session, AuditAction.OUTREACH_TASK_TRANSITIONED) == 0
+
+
+@async_test
+async def test_member_bulk_add_rejects_preferred_account_owned_by_another_influencer() -> None:
+    async with domain_harness() as harness:
+        selected = await seed_influencer(harness.session, harness.context)
+        other = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        with pytest.raises(CampaignOutreachError) as invalid_account:
+            await harness.campaign_service.bulk_add_members(
+                harness.context,
+                campaign_id,
+                CampaignMemberBulkAddInput(
+                    members=(
+                        CampaignMemberAddItem(
+                            influencer_id=selected.influencer_id,
+                            preferred_platform_account_id=other.account_id,
+                        ),
+                    )
+                ),
+                idempotency_key="foreign-preferred-account",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert invalid_account.value.code == "PREFERRED_PLATFORM_ACCOUNT_INVALID"
+        assert await count_rows(harness.session, CampaignMember) == 0
+        assert (
+            await harness.session.scalar(
+                select(Phase3AIdempotencyRecord).where(
+                    Phase3AIdempotencyRecord.idempotency_key == "foreign-preferred-account"
+                )
+            )
+            is None
+        )
