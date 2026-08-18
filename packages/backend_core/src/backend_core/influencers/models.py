@@ -255,9 +255,15 @@ class InfluencerCurrentMetrics(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index(
             "ix_current_metrics_followers_count_guarded",
             guarded_metric_jsonb_bigint("followers_count"),
-        ),
-        Index("ix_current_metrics_notes_7d_guarded", guarded_metric_jsonb_bigint("notes_7d")),
-        Index("ix_current_metrics_notes_60d_guarded", guarded_metric_jsonb_bigint("notes_60d")),
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "ix_current_metrics_notes_7d_guarded",
+            guarded_metric_jsonb_bigint("notes_7d"),
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "ix_current_metrics_notes_60d_guarded",
+            guarded_metric_jsonb_bigint("notes_60d"),
+        ).ddl_if(dialect="postgresql"),
     )
 
     influencer_id: Mapped[UUID] = mapped_column(

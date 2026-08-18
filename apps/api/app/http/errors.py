@@ -3,6 +3,7 @@
 import logging
 
 from backend_core.auth import AuthError
+from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.imports.errors import ImportDomainError
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -57,6 +58,24 @@ def register_exception_handlers(app: FastAPI) -> None:
                     "message": exc.message,
                     "details": exc.details,
                 },
+            ),
+        )
+
+    @app.exception_handler(CampaignOutreachError)
+    async def campaign_outreach_error_handler(
+        request: Request,
+        exc: CampaignOutreachError,
+    ) -> JSONResponse:
+        """Expose only the safe optimistic-concurrency fact from Phase 3A errors."""
+
+        details = (
+            {"current_version": exc.current_version} if exc.current_version is not None else None
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=envelope(
+                request,
+                error={"code": exc.code, "message": exc.message, "details": details},
             ),
         )
 

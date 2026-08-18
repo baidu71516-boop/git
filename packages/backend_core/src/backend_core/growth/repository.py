@@ -60,6 +60,12 @@ class CandidateRunMemberPage:
     next_cursor: UUID | None
 
 
+@dataclass(frozen=True, slots=True)
+class CandidateRunPage:
+    items: tuple[CandidatePoolRun, ...]
+    next_cursor: UUID | None
+
+
 def _utc(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -158,7 +164,7 @@ class CandidatePoolRepository:
         rows = tuple((await self.session.execute(statement)).scalars())
         return CandidatePoolPage(
             items=rows[:limit],
-            next_cursor=rows[limit].id if len(rows) > limit else None,
+            next_cursor=rows[limit - 1].id if len(rows) > limit else None,
         )
 
     async def get_policy(
@@ -249,12 +255,16 @@ class CandidatePoolRepository:
         pool_id: UUID,
         cursor: UUID | None,
         limit: int,
-    ) -> tuple[CandidatePoolRun, ...]:
+    ) -> CandidateRunPage:
         statement = select(CandidatePoolRun).where(CandidatePoolRun.pool_id == pool_id)
         if cursor is not None:
             statement = statement.where(CandidatePoolRun.id > cursor)
-        statement = statement.order_by(CandidatePoolRun.id).limit(limit)
-        return tuple((await self.session.execute(statement)).scalars())
+        statement = statement.order_by(CandidatePoolRun.id).limit(limit + 1)
+        rows = tuple((await self.session.execute(statement)).scalars())
+        return CandidateRunPage(
+            items=rows[:limit],
+            next_cursor=rows[limit - 1].id if len(rows) > limit else None,
+        )
 
     async def list_run_members(
         self,
@@ -262,15 +272,24 @@ class CandidatePoolRepository:
         run_id: UUID,
         cursor: UUID | None,
         limit: int,
+        result: CandidateResult | None = None,
     ) -> CandidateRunMemberPage:
-        statement = select(CandidatePoolMember).where(CandidatePoolMember.run_id == run_id)
+        # NOT_MATCH is counted on the run but never materialized as a public
+        # row. Keep the invariant in the read path as well for legacy/corrupt
+        # rows that may predate the materializer guard.
+        statement = select(CandidatePoolMember).where(
+            CandidatePoolMember.run_id == run_id,
+            CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
+        )
+        if result is not None:
+            statement = statement.where(CandidatePoolMember.result == result)
         if cursor is not None:
             statement = statement.where(CandidatePoolMember.id > cursor)
         statement = statement.order_by(CandidatePoolMember.id).limit(limit + 1)
         rows = tuple((await self.session.execute(statement)).scalars())
         return CandidateRunMemberPage(
             items=rows[:limit],
-            next_cursor=rows[limit].id if len(rows) > limit else None,
+            next_cursor=rows[limit - 1].id if len(rows) > limit else None,
         )
 
     async def get_collection_job(
@@ -730,6 +749,7 @@ __all__ = [
     "CandidatePoolPage",
     "CandidatePoolRepository",
     "CandidateRunMemberPage",
+    "CandidateRunPage",
     "DEFAULT_BATCH_SIZE",
     "MAX_BATCH_SIZE",
 ]

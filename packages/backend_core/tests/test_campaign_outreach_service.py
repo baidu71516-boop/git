@@ -28,9 +28,11 @@ from backend_core.campaigns.channels import StaticChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.schemas import (
     CampaignCreateInput,
+    CampaignCursor,
     CampaignMemberAddItem,
     CampaignMemberBulkAddInput,
     CampaignMemberBulkAddResult,
+    CampaignMemberFromCandidateRunBulkAddInput,
     CampaignMemberRemoveInput,
     CampaignStatusTransitionInput,
     CampaignUpdateInput,
@@ -86,7 +88,7 @@ from backend_core.outreach.schemas import (
 )
 from backend_core.outreach.service import OutreachService
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 SQLITE_TABLES = (
@@ -143,6 +145,12 @@ class InfluencerFixture:
     influencer_id: UUID
     account_id: UUID
     contact_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRunFixture:
+    run_id: UUID
+    member_id: UUID | None
 
 
 @asynccontextmanager
@@ -301,7 +309,8 @@ async def seed_candidate_pool_run(
     *,
     status: CandidatePoolRunStatus,
     include_member: bool,
-) -> UUID:
+    member_result: CandidateResult = CandidateResult.MATCH,
+) -> CandidateRunFixture:
     """Seed only the persisted run provenance required by Campaign member tests."""
 
     assert harness.context.operator is not None
@@ -333,8 +342,8 @@ async def seed_candidate_pool_run(
         as_of=harness.clock.now(),
         input_watermark=None,
         status=status,
-        match_count=1 if include_member else 0,
-        unknown_count=0,
+        match_count=1 if include_member and member_result is CandidateResult.MATCH else 0,
+        unknown_count=1 if include_member and member_result is CandidateResult.UNKNOWN else 0,
         not_match_count=0,
         error_code=None,
         error_message=None,
@@ -343,20 +352,37 @@ async def seed_candidate_pool_run(
     )
     harness.session.add(run)
     await harness.session.flush()
+    member_id: UUID | None = None
     if include_member:
-        harness.session.add(
-            CandidatePoolMember(
-                run_id=run.id,
-                influencer_id=fixture.influencer_id,
-                platform_account_id=fixture.account_id,
-                result=CandidateResult.MATCH,
-                reason_codes=[],
-                redacted_evidence={},
-                evidence_hash="0" * 64,
-            )
+        member_id = await add_candidate_pool_member(
+            harness,
+            run_id=run.id,
+            fixture=fixture,
+            result=member_result,
         )
-        await harness.session.flush()
-    return run.id
+    return CandidateRunFixture(run_id=run.id, member_id=member_id)
+
+
+async def add_candidate_pool_member(
+    harness: DomainHarness,
+    *,
+    run_id: UUID,
+    fixture: InfluencerFixture,
+    result: CandidateResult,
+    platform_account_id: UUID | None = None,
+) -> UUID:
+    member = CandidatePoolMember(
+        run_id=run_id,
+        influencer_id=fixture.influencer_id,
+        platform_account_id=platform_account_id or fixture.account_id,
+        result=result,
+        reason_codes=[],
+        redacted_evidence={},
+        evidence_hash="0" * 64,
+    )
+    harness.session.add(member)
+    await harness.session.flush()
+    return member.id
 
 
 async def create_campaign(harness: DomainHarness, *, name: str = "Campaign") -> UUID:
@@ -685,42 +711,40 @@ async def test_bulk_member_replay_restore_noop_and_bounded_payload() -> None:
 
 
 @async_test
-async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs() -> None:
+async def test_selected_run_member_ids_require_completed_matching_run_and_replay() -> None:
     async with domain_harness() as harness:
         selected = await seed_influencer(harness.session, harness.context)
         pending = await seed_influencer(harness.session, harness.context)
         mismatched = await seed_influencer(harness.session, harness.context)
-        completed_run_id = await seed_candidate_pool_run(
+        completed_run = await seed_candidate_pool_run(
             harness,
             selected,
             status=CandidatePoolRunStatus.COMPLETED,
             include_member=True,
         )
-        pending_run_id = await seed_candidate_pool_run(
+        pending_run = await seed_candidate_pool_run(
             harness,
             pending,
             status=CandidatePoolRunStatus.PENDING,
             include_member=True,
         )
-        mismatched_run_id = await seed_candidate_pool_run(
+        mismatched_run = await seed_candidate_pool_run(
             harness,
-            selected,
+            mismatched,
             status=CandidatePoolRunStatus.COMPLETED,
             include_member=True,
         )
+        assert completed_run.member_id is not None
+        assert pending_run.member_id is not None
+        assert mismatched_run.member_id is not None
         await harness.session.commit()
         campaign_id = await create_campaign(harness)
 
-        selected_input = CampaignMemberBulkAddInput(
-            source_pool_run_id=completed_run_id,
-            members=(
-                CampaignMemberAddItem(
-                    influencer_id=selected.influencer_id,
-                    preferred_platform_account_id=selected.account_id,
-                ),
-            ),
+        selected_input = CampaignMemberFromCandidateRunBulkAddInput(
+            run_id=completed_run.run_id,
+            member_ids=(completed_run.member_id,),
         )
-        added = await harness.campaign_service.bulk_add_members(
+        added = await harness.campaign_service.bulk_add_members_from_candidate_run(
             harness.context,
             campaign_id,
             selected_input,
@@ -728,7 +752,7 @@ async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs(
             ip="127.0.0.1",
             user_agent="campaign-outreach-domain-test",
         )
-        replay = await harness.campaign_service.bulk_add_members(
+        replay = await harness.campaign_service.bulk_add_members_from_candidate_run(
             harness.context,
             campaign_id,
             selected_input,
@@ -740,11 +764,11 @@ async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs(
             campaign_id,
             (selected.influencer_id,),
         )
-        assert added.result.source_pool_run_id == completed_run_id
+        assert added.result.source_pool_run_id == completed_run.run_id
         assert replay.replayed
         assert replay.result == added.result
         assert len(members) == 1
-        assert members[0].source_pool_run_id == completed_run_id
+        assert members[0].source_pool_run_id == completed_run.run_id
         record = await harness.session.scalar(
             select(Phase3AIdempotencyRecord).where(
                 Phase3AIdempotencyRecord.operation_scope
@@ -753,20 +777,15 @@ async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs(
             )
         )
         assert record is not None
-        assert record.result_payload["source_pool_run_id"] == str(completed_run_id)
+        assert record.result_payload["source_pool_run_id"] == str(completed_run.run_id)
 
         with pytest.raises(CampaignOutreachError) as incomplete:
-            await harness.campaign_service.bulk_add_members(
+            await harness.campaign_service.bulk_add_members_from_candidate_run(
                 harness.context,
                 campaign_id,
-                CampaignMemberBulkAddInput(
-                    source_pool_run_id=pending_run_id,
-                    members=(
-                        CampaignMemberAddItem(
-                            influencer_id=pending.influencer_id,
-                            preferred_platform_account_id=pending.account_id,
-                        ),
-                    ),
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=pending_run.run_id,
+                    member_ids=(pending_run.member_id,),
                 ),
                 idempotency_key="member-pending-run-key",
                 ip="127.0.0.1",
@@ -775,24 +794,19 @@ async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs(
         assert incomplete.value.code == "CANDIDATE_POOL_RUN_NOT_COMPLETED"
         await refresh_context_after_rollback(harness)
 
-        with pytest.raises(CampaignOutreachError) as missing_pair:
-            await harness.campaign_service.bulk_add_members(
+        with pytest.raises(CampaignOutreachError) as wrong_run_member:
+            await harness.campaign_service.bulk_add_members_from_candidate_run(
                 harness.context,
                 campaign_id,
-                CampaignMemberBulkAddInput(
-                    source_pool_run_id=mismatched_run_id,
-                    members=(
-                        CampaignMemberAddItem(
-                            influencer_id=mismatched.influencer_id,
-                            preferred_platform_account_id=mismatched.account_id,
-                        ),
-                    ),
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=mismatched_run.run_id,
+                    member_ids=(completed_run.member_id,),
                 ),
                 idempotency_key="member-mismatched-run-key",
                 ip="127.0.0.1",
                 user_agent="campaign-outreach-domain-test",
             )
-        assert missing_pair.value.code == "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
+        assert wrong_run_member.value.code == "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
         assert await count_rows(harness.session, CampaignMember) == 1
         assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 1
         for key in ("member-pending-run-key", "member-mismatched-run-key"):
@@ -806,6 +820,387 @@ async def test_bulk_member_source_run_provenance_requires_completed_exact_pairs(
                 )
                 is None
             )
+
+
+@async_test
+async def test_selected_run_member_ids_keep_unknown_selection_explicit_and_restore_in_place() -> (
+    None
+):
+    async with domain_harness() as harness:
+        match_fixture = await seed_influencer(harness.session, harness.context)
+        selected_unknown_fixture = await seed_influencer(harness.session, harness.context)
+        omitted_unknown_fixture = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            match_fixture,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        selected_unknown_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=selected_unknown_fixture,
+            result=CandidateResult.UNKNOWN,
+        )
+        omitted_unknown_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=omitted_unknown_fixture,
+            result=CandidateResult.UNKNOWN,
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        selected_input = CampaignMemberFromCandidateRunBulkAddInput(
+            run_id=source_run.run_id,
+            member_ids=(source_run.member_id, selected_unknown_id),
+        )
+
+        first = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            selected_input,
+            idempotency_key="selected-match-and-unknown",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        replay = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            selected_input,
+            idempotency_key="selected-match-and-unknown",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert first.result.added_count == 2
+        assert first.result.source_pool_run_id == source_run.run_id
+        assert replay.replayed
+        assert replay.result == first.result
+
+        selected_members = await harness.campaign_service.repository.list_members_for_influencers(
+            campaign_id,
+            (match_fixture.influencer_id, selected_unknown_fixture.influencer_id),
+        )
+        assert {member.influencer_id for member in selected_members} == {
+            match_fixture.influencer_id,
+            selected_unknown_fixture.influencer_id,
+        }
+        assert (
+            await harness.campaign_service.repository.list_members_for_influencers(
+                campaign_id,
+                (omitted_unknown_fixture.influencer_id,),
+            )
+            == []
+        )
+        assert omitted_unknown_id not in selected_input.member_ids
+
+        match_member = next(
+            member
+            for member in selected_members
+            if member.influencer_id == match_fixture.influencer_id
+        )
+        removed = await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            match_member.id,
+            CampaignMemberRemoveInput(expected_version=match_member.version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert removed.removed_at is not None
+        restored = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            CampaignMemberFromCandidateRunBulkAddInput(
+                run_id=source_run.run_id,
+                member_ids=(source_run.member_id,),
+            ),
+            idempotency_key="selected-match-restore",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        active = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            CampaignMemberFromCandidateRunBulkAddInput(
+                run_id=source_run.run_id,
+                member_ids=(source_run.member_id,),
+            ),
+            idempotency_key="selected-match-active",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        restored_member = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            match_member.id,
+        )
+        assert restored.result.restored_count == 1
+        assert active.result.already_active_count == 1
+        assert restored_member.id == match_member.id
+        assert restored_member.source_pool_run_id == source_run.run_id
+        assert restored_member.removed_at is None
+
+
+@async_test
+async def test_selected_run_rejects_multiple_accounts_for_one_influencer() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            fixture,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        alternate_account = InfluencerPlatformAccount(
+            influencer_id=fixture.influencer_id,
+            platform=Platform.XIAOHONGSHU,
+            platform_account_id=f"alternate-{uuid4().hex}",
+            account_name=f"Alternate account {uuid4().hex}",
+            source=DataSource.MANUAL,
+            is_active=True,
+        )
+        harness.session.add(alternate_account)
+        await harness.session.flush()
+        alternate_member_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=fixture,
+            result=CandidateResult.UNKNOWN,
+            platform_account_id=alternate_account.id,
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        with pytest.raises(CampaignOutreachError) as ambiguous:
+            await harness.campaign_service.bulk_add_members_from_candidate_run(
+                harness.context,
+                campaign_id,
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=source_run.run_id,
+                    member_ids=(source_run.member_id, alternate_member_id),
+                ),
+                idempotency_key="ambiguous-selected-run-accounts",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert ambiguous.value.status_code == 422
+        assert ambiguous.value.code == "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS"
+        assert await count_rows(harness.session, CampaignMember) == 0
+
+
+@async_test
+async def test_direct_bulk_add_rejects_all_duplicate_influencer_entries() -> None:
+    influencer_id = uuid4()
+    account_id = uuid4()
+    with pytest.raises(ValidationError):
+        CampaignMemberBulkAddInput(
+            members=(
+                CampaignMemberAddItem(
+                    influencer_id=influencer_id,
+                    preferred_platform_account_id=account_id,
+                ),
+                CampaignMemberAddItem(
+                    influencer_id=influencer_id,
+                    preferred_platform_account_id=account_id,
+                ),
+            )
+        )
+    with pytest.raises(ValidationError):
+        CampaignMemberBulkAddInput(
+            members=(
+                CampaignMemberAddItem(
+                    influencer_id=influencer_id,
+                    preferred_platform_account_id=account_id,
+                ),
+                CampaignMemberAddItem(
+                    influencer_id=influencer_id,
+                    preferred_platform_account_id=uuid4(),
+                ),
+            )
+        )
+
+
+@async_test
+async def test_direct_bulk_add_rejects_legacy_source_run_field() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        with pytest.raises(CampaignOutreachError) as rejected:
+            await harness.campaign_service.bulk_add_members(
+                harness.context,
+                campaign_id,
+                CampaignMemberBulkAddInput(
+                    source_pool_run_id=uuid4(),
+                    members=(
+                        CampaignMemberAddItem(
+                            influencer_id=fixture.influencer_id,
+                            preferred_platform_account_id=fixture.account_id,
+                        ),
+                    ),
+                ),
+                idempotency_key="direct-legacy-source-run",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert rejected.value.status_code == 422
+        assert rejected.value.code == "CAMPAIGN_MEMBER_SOURCE_RUN_NOT_ALLOWED"
+        assert await count_rows(harness.session, CampaignMember) == 0
+
+
+@async_test
+async def test_campaign_member_page_excludes_removed_and_retains_original_order_on_restore() -> (
+    None
+):
+    async with domain_harness() as harness:
+        first_fixture = await seed_influencer(harness.session, harness.context)
+        removed_fixture = await seed_influencer(harness.session, harness.context)
+        third_fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        first_member = await add_member(harness, campaign_id, first_fixture)
+        removed_member = await add_member(harness, campaign_id, removed_fixture)
+        third_member = await add_member(harness, campaign_id, third_fixture)
+        original_created_at = datetime(2026, 8, 18, 4, 0, tzinfo=UTC)
+        await harness.session.execute(
+            update(CampaignMember)
+            .where(CampaignMember.id.in_((first_member.id, removed_member.id, third_member.id)))
+            .values(created_at=original_created_at)
+        )
+        await harness.session.commit()
+        removed = await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            removed_member.id,
+            CampaignMemberRemoveInput(expected_version=removed_member.version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        removed_read = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            removed_member.id,
+        )
+        active_before_restore = await harness.campaign_service.list_members(
+            harness.context,
+            campaign_id,
+            cursor=None,
+            limit=10,
+        )
+        assert removed.removed_at is not None
+        assert removed_read.removed_at is not None
+        assert removed_member.id not in {item.id for item in active_before_restore.items}
+
+        restored = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            CampaignMemberBulkAddInput(
+                members=(
+                    CampaignMemberAddItem(
+                        influencer_id=removed_fixture.influencer_id,
+                        preferred_platform_account_id=removed_fixture.account_id,
+                    ),
+                )
+            ),
+            idempotency_key="restore-member-list-order",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert restored.result.restored_count == 1
+        restored_read = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            removed_member.id,
+        )
+        assert restored_read.id == removed_member.id
+        assert restored_read.created_at == removed_read.created_at
+        assert restored_read.removed_at is None
+
+        expected_ids = sorted(
+            (first_member.id, removed_member.id, third_member.id),
+            key=str,
+        )
+        first_page = await harness.campaign_service.list_members(
+            harness.context,
+            campaign_id,
+            cursor=None,
+            limit=1,
+        )
+        assert first_page.next_cursor is not None
+        second_page = await harness.campaign_service.list_members(
+            harness.context,
+            campaign_id,
+            cursor=first_page.next_cursor,
+            limit=1,
+        )
+        assert second_page.next_cursor is not None
+        third_page = await harness.campaign_service.list_members(
+            harness.context,
+            campaign_id,
+            cursor=second_page.next_cursor,
+            limit=1,
+        )
+        assert third_page.next_cursor is None
+        assert [item.id for item in (*first_page.items, *second_page.items, *third_page.items)] == (
+            expected_ids
+        )
+
+        other_campaign_id = await create_campaign(harness, name="Other cursor Campaign")
+        with pytest.raises(CampaignOutreachError) as wrong_campaign:
+            await harness.campaign_service.list_members(
+                harness.context,
+                other_campaign_id,
+                cursor=first_page.next_cursor,
+                limit=1,
+            )
+        assert wrong_campaign.value.code == "CURSOR_MISMATCH"
+        wrong_department_cursor = first_page.next_cursor.model_copy(
+            update={"department_id": uuid4()}
+        )
+        with pytest.raises(CampaignOutreachError) as wrong_department:
+            await harness.campaign_service.list_members(
+                harness.context,
+                campaign_id,
+                cursor=wrong_department_cursor,
+                limit=1,
+            )
+        assert wrong_department.value.code == "CURSOR_MISMATCH"
+
+
+@async_test
+async def test_campaign_page_uses_updated_at_desc_id_desc_keyset() -> None:
+    async with domain_harness() as harness:
+        first_campaign_id = await create_campaign(harness, name="First Campaign page")
+        second_campaign_id = await create_campaign(harness, name="Second Campaign page")
+        older = datetime(2026, 8, 18, 4, 0, tzinfo=UTC)
+        newer = datetime(2026, 8, 18, 5, 0, tzinfo=UTC)
+        await harness.session.execute(
+            update(Campaign).where(Campaign.id == first_campaign_id).values(updated_at=older)
+        )
+        await harness.session.execute(
+            update(Campaign).where(Campaign.id == second_campaign_id).values(updated_at=newer)
+        )
+        await harness.session.commit()
+        first_page = await harness.campaign_service.list_campaigns(
+            harness.context,
+            cursor=None,
+            limit=1,
+        )
+        assert first_page.items[0].id == second_campaign_id
+        assert first_page.next_cursor == CampaignCursor(
+            updated_at=first_page.items[0].updated_at,
+            id=second_campaign_id,
+        )
+        second_page = await harness.campaign_service.list_campaigns(
+            harness.context,
+            cursor=first_page.next_cursor,
+            limit=1,
+        )
+        assert [item.id for item in second_page.items] == [first_campaign_id]
+        assert second_page.next_cursor is None
 
 
 @async_test
