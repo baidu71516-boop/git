@@ -365,7 +365,13 @@ class Campaign(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=CampaignReviewMode.FIRST_N,
     )
-    review_count: Mapped[int | None] = mapped_column(Integer, nullable=True, default=50)
+    # An explicit None is meaningful for non-FIRST_N review modes.  Preserve it
+    # instead of allowing the database's FIRST_N default to replace it.
+    review_count: Mapped[int | None] = mapped_column(
+        Integer().evaluates_none(),
+        nullable=True,
+        default=50,
+    )
     duplicate_history_policy: Mapped[DuplicateHistoryPolicy] = mapped_column(
         Enum(DuplicateHistoryPolicy, name="duplicate_history_policy", values_callable=enum_values),
         nullable=False,
