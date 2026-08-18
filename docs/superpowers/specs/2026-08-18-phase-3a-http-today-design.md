@@ -2,7 +2,7 @@
 
 Date: 2026-08-18
 
-Status: Approved design for WO-3A-4, amended 2026-08-18. Implementation has not started.
+Status: SEALED Phase 3A HTTP contract for WO-3A-4, amended 2026-08-18.
 
 ## Scope
 
@@ -99,11 +99,14 @@ fetch `limit + 1` rows to produce the next cursor.
 | Candidate runs | `CandidatePoolRun.id ASC` | `id ASC`; cursor is the final `id` and continues with `id > cursor`. |
 | Candidate members | `CandidatePoolMember.id ASC` | `id ASC`; cursor is the final `id` and continues with `id > cursor`. |
 | Campaign list | `Campaign.updated_at DESC, Campaign.id DESC` | `updated_at DESC, id DESC`; cursor is `(updated_at, id)` and continues with `updated_at < cursor.updated_at OR (updated_at = cursor.updated_at AND id < cursor.id)`. |
-| Campaign members | No general member-list query or order exists. `list_members_for_influencers` deliberately has no ordering; `list_active_member_ids` uses `created_at ASC, id ASC` only for bounded review selection. | No public cursor tuple is frozen. It must not be invented from the review helper; define the member visibility and tuple in a follow-up contract before this route is implemented. |
+| Campaign members | `list_active_member_ids` uses `CampaignMember.created_at ASC, CampaignMember.id ASC` for active review selection. | Active rows only (`removed_at IS NULL`), ordered `created_at ASC, id ASC`; cursor is `(created_at, id)` and continues with `created_at > cursor.created_at OR (created_at = cursor.created_at AND id > cursor.id)`. It is bound to the resolved Department and `campaign_id`. |
 
-The final row is an explicit preflight finding, not a choice of
-`created_at ASC, id ASC`. The Campaign members route remains an approved
-surface but its keyset implementation is blocked on that missing contract.
+Phase 3A does not add an `include_removed` query parameter. The list returns
+only current active Members. The point read
+`GET /campaigns/{campaign_id}/members/{member_id}` may return either an active
+or removed Member when the resolved Department/Campaign scope permits it.
+Internal restore/re-add logic continues to locate removed rows and restores the
+same persistent Member identity.
 
 ## Campaign and Outreach Contract
 
@@ -249,10 +252,12 @@ The response contains the local `business_date`, literal
 `next_cursor`. Timestamps are stored and compared as timezone-aware instants;
 no server-local timezone is used.
 
-The existing contract does not yet say whether `business_date` is the
-Asia/Shanghai calendar date of `as_of` or the date of the next-business-day
-boundary. This is a public response ambiguity. Do not choose one in code; an
-explicit follow-up contract decision is required before Today implementation.
+`business_date` is the Asia/Shanghai local calendar date of `as_of`. It is not
+derived from `due_at` or `next_business_day`; the latter remains only the strict
+eligibility cutoff. For Friday `2026-08-21 15:00+08:00`, `business_date` is
+`2026-08-21` and `next_business_day` is `2026-08-24T00:00:00+08:00`. A Saturday
+or Sunday query similarly reports its own local calendar date while using
+Monday `00:00:00+08:00` as the cutoff.
 
 ### Filter Semantics
 
@@ -370,7 +375,9 @@ Focused tests cover:
 - Campaign CRUD, lifecycle/version conflicts, direct typed pair bulk-add,
   duplicate direct-Influencer rejection (same and different account), selected-run
   MATCH/UNKNOWN behavior, wrong-run and duplicate-Influencer rejection, restore,
-  active-member counting, and A1 replay.
+  active-member counting, A1 replay, active-only member lists, direct removed
+  Member reads, restore identity/order retention, stable `(created_at, id)`
+  pagination, and Department/Campaign-bound member cursors.
 - PUT boundaries: Campaign status is lifecycle-only, and OutreachTarget identity
   fields cannot be changed through the endpoint update route.
 - Target, Task, transition, history, cross-Department scope/audit, and
@@ -379,7 +386,8 @@ Focused tests cover:
   bounds behavior, latest-event warning redaction, weekday boundaries,
   stable ordering, keyset pagination, cursor mismatch/scope binding, 50/100
   limits, Department isolation, Viewer masking, invalid/mismatched cursor
-  mappings, and repeated Today query/header rejection.
+  mappings, repeated Today query/header rejection, weekday `business_date`, and
+  Friday/Saturday/Sunday `business_date` versus Monday-cutoff behavior.
 - Projection query-count or query-shape checks proving no per-item Contact,
   Metrics, Event, Campaign, or Member loads.
 - OpenAPI route/parameter/schema/enum/error assertions, including `/today`
