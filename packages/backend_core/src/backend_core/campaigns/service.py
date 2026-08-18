@@ -25,11 +25,16 @@ from backend_core.campaigns.repository import (
 )
 from backend_core.campaigns.schemas import (
     CampaignCreateInput,
+    CampaignCursor,
     CampaignMemberAddItem,
     CampaignMemberBulkAddInput,
     CampaignMemberBulkAddResult,
+    CampaignMemberCursor,
+    CampaignMemberFromCandidateRunBulkAddInput,
+    CampaignMemberPage,
     CampaignMemberRemoveInput,
     CampaignMemberResult,
+    CampaignPage,
     CampaignResult,
     CampaignStatusTransitionInput,
     CampaignUpdateInput,
@@ -122,6 +127,32 @@ class CampaignService:
             raise CampaignOutreachError(404, "CAMPAIGN_NOT_FOUND", "Campaign not found")
         return CampaignResult.from_model(campaign)
 
+    async def list_campaigns(
+        self,
+        context: AuthContext,
+        *,
+        cursor: CampaignCursor | None,
+        limit: int,
+        department_id: UUID | None = None,
+    ) -> CampaignPage:
+        """Read a Department-scoped Campaign page in the frozen DESC keyset order."""
+
+        scope = await self.access.resolve_read_scope(context, department_id)
+        page = await self.repository.list_campaigns_page(
+            department_id=scope.department_id,
+            cursor_updated_at=cursor.updated_at if cursor is not None else None,
+            cursor_id=cursor.id if cursor is not None else None,
+            limit=limit,
+        )
+        next_cursor: CampaignCursor | None = None
+        if page.next_cursor is not None:
+            updated_at, next_campaign_id = page.next_cursor
+            next_cursor = CampaignCursor(updated_at=updated_at, id=next_campaign_id)
+        return CampaignPage(
+            items=tuple(CampaignResult.from_model(item) for item in page.items),
+            next_cursor=next_cursor,
+        )
+
     async def get_member(
         self,
         context: AuthContext,
@@ -141,6 +172,53 @@ class CampaignService:
                 404, "CAMPAIGN_MEMBER_NOT_FOUND", "Campaign member not found"
             )
         return CampaignMemberResult.from_model(member)
+
+    async def list_members(
+        self,
+        context: AuthContext,
+        campaign_id: UUID,
+        *,
+        cursor: CampaignMemberCursor | None,
+        limit: int,
+        department_id: UUID | None = None,
+    ) -> CampaignMemberPage:
+        """Read only active Members, preserving original creation order across restore."""
+
+        scope = await self.access.resolve_read_scope(context, department_id)
+        if cursor is not None and (
+            cursor.department_id != scope.department_id or cursor.campaign_id != campaign_id
+        ):
+            raise CampaignOutreachError(
+                409,
+                "CURSOR_MISMATCH",
+                "Campaign member cursor does not match the resolved scope",
+            )
+        campaign = await self.repository.get_campaign(
+            campaign_id,
+            department_id=scope.department_id,
+        )
+        if campaign is None:
+            raise CampaignOutreachError(404, "CAMPAIGN_NOT_FOUND", "Campaign not found")
+        page = await self.repository.list_active_members_page(
+            campaign_id=campaign.id,
+            department_id=scope.department_id,
+            cursor_created_at=cursor.created_at if cursor is not None else None,
+            cursor_id=cursor.id if cursor is not None else None,
+            limit=limit,
+        )
+        next_cursor: CampaignMemberCursor | None = None
+        if page.next_cursor is not None:
+            created_at, next_member_id = page.next_cursor
+            next_cursor = CampaignMemberCursor(
+                created_at=created_at,
+                id=next_member_id,
+                department_id=scope.department_id,
+                campaign_id=campaign.id,
+            )
+        return CampaignMemberPage(
+            items=tuple(CampaignMemberResult.from_model(item) for item in page.items),
+            next_cursor=next_cursor,
+        )
 
     async def create_campaign(
         self,
@@ -394,12 +472,18 @@ class CampaignService:
             context,
             add_input.department_id,
         )
+        if add_input.source_pool_run_id is not None:
+            raise CampaignOutreachError(
+                422,
+                "CAMPAIGN_MEMBER_SOURCE_RUN_NOT_ALLOWED",
+                "Direct Campaign member add does not accept source_pool_run_id",
+            )
         key = self._validated_idempotency_key(idempotency_key)
         members = self._canonical_members(add_input.members)
         request_hash = canonical_request_hash(
             {
                 "campaign_id": campaign_id,
-                "source_pool_run_id": add_input.source_pool_run_id,
+                "source_pool_run_id": None,
                 "members": [
                     {
                         "influencer_id": member.influencer_id,
@@ -420,80 +504,15 @@ class CampaignService:
         try:
             campaign = await self._locked_campaign(campaign_id, scope)
             self._require_campaign_open_for_mutation(campaign)
-            await self._validate_source_pool_run(
-                scope.department_id,
-                add_input.source_pool_run_id,
-                members=members,
-            )
-            await self._validate_preferred_accounts(members)
-            existing_members = {
-                member.influencer_id: member
-                for member in await self.repository.list_members_for_influencers(
-                    campaign.id,
-                    tuple(member.influencer_id for member in members),
-                    for_update=True,
-                )
-            }
-            target_side_actor_id = await self._target_side_actor_id(
+            result = await self._apply_member_bulk_add(
                 context=context,
                 scope=scope,
                 actor_id=actor_id,
-                fallback_operator_id=campaign.owner_operator_id,
-            )
-            added_count = 0
-            restored_count = 0
-            already_active_count = 0
-            new_members: list[CampaignMemberInsertRow] = []
-            restored_members: list[CampaignMemberRestoreRow] = []
-            for requested in members:
-                member = existing_members.get(requested.influencer_id)
-                if member is None:
-                    new_members.append(
-                        CampaignMemberInsertRow(
-                            id=uuid4(),
-                            department_id=scope.department_id,
-                            campaign_id=campaign.id,
-                            influencer_id=requested.influencer_id,
-                            preferred_platform_account_id=requested.preferred_platform_account_id,
-                            source_pool_run_id=add_input.source_pool_run_id,
-                            added_by_operator_id=target_side_actor_id,
-                        )
-                    )
-                    added_count += 1
-                    continue
-                if member.removed_at is None:
-                    already_active_count += 1
-                    continue
-                restored_members.append(
-                    CampaignMemberRestoreRow(
-                        member_id=member.id,
-                        expected_version=member.version,
-                        preferred_platform_account_id=requested.preferred_platform_account_id,
-                        source_pool_run_id=add_input.source_pool_run_id,
-                        added_by_operator_id=target_side_actor_id,
-                    )
-                )
-                restored_count += 1
-            await self.repository.insert_campaign_members(new_members)
-            restored_rows = await self.repository.restore_campaign_members(
-                campaign.id,
-                restored_members,
-            )
-            if restored_rows != restored_count:
-                raise CampaignOutreachError(
-                    409,
-                    "CAMPAIGN_MEMBER_CONFLICT",
-                    "Campaign member mutation conflicted",
-                )
-            active_count_after = await self.repository.count_active_members(campaign.id)
-            result = CampaignMemberBulkAddResult(
-                campaign_id=campaign.id,
-                source_pool_run_id=add_input.source_pool_run_id,
-                requested_count=len(members),
-                added_count=added_count,
-                restored_count=restored_count,
-                already_active_count=already_active_count,
-                active_count_after=active_count_after,
+                campaign=campaign,
+                members=members,
+                source_pool_run_id=None,
+                ip=ip,
+                user_agent=user_agent,
             )
             self.idempotency.add(
                 department_id=scope.department_id,
@@ -503,24 +522,85 @@ class CampaignService:
                 result_entity_id=campaign.id,
                 result_payload=result.to_replay_payload(),
             )
-            if added_count or restored_count:
-                self.audit.add(
-                    action=AuditAction.CAMPAIGN_MEMBERS_ADDED,
-                    result=AuditResult.SUCCESS,
-                    department_id=scope.department_id,
-                    operator_id=actor_id,
-                    ip=ip,
-                    user_agent=user_agent,
-                    entity_type="campaign",
-                    entity_id=campaign.id,
-                    after={
-                        "added_count": added_count,
-                        "restored_count": restored_count,
-                        "already_active_count": already_active_count,
-                        "active_count_after": active_count_after,
-                        "cross_department_override": scope.cross_department_override,
-                    },
-                )
+            await self.session.commit()
+            return MutationResult(status_code=200, result=result)
+        except IntegrityError as error:
+            await self.session.rollback()
+            raced = await self.idempotency.get(
+                scope.department_id,
+                Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                key,
+            )
+            if raced is not None:
+                return self._replay_bulk_add(raced, request_hash)
+            raise CampaignOutreachError(
+                409,
+                "CAMPAIGN_MEMBER_CONFLICT",
+                "Campaign member mutation conflicted",
+            ) from error
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def bulk_add_members_from_candidate_run(
+        self,
+        context: AuthContext,
+        campaign_id: UUID,
+        add_input: CampaignMemberFromCandidateRunBulkAddInput,
+        *,
+        idempotency_key: str,
+        ip: str,
+        user_agent: str,
+    ) -> MutationResult[CampaignMemberBulkAddResult]:
+        """Add explicitly selected persisted MATCH/UNKNOWN rows from one completed run."""
+
+        scope, actor_id = await self.access.resolve_mutation_scope(
+            context,
+            add_input.department_id,
+        )
+        key = self._validated_idempotency_key(idempotency_key)
+        member_ids = self._canonical_member_ids(add_input.member_ids)
+        request_hash = canonical_request_hash(
+            {
+                "campaign_id": campaign_id,
+                "source_pool_run_id": add_input.run_id,
+                "member_ids": member_ids,
+            }
+        )
+        existing = await self.idempotency.get(
+            scope.department_id,
+            Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+            key,
+        )
+        if existing is not None:
+            return self._replay_bulk_add(existing, request_hash)
+
+        try:
+            campaign = await self._locked_campaign(campaign_id, scope)
+            self._require_campaign_open_for_mutation(campaign)
+            members = await self._selected_run_members(
+                department_id=scope.department_id,
+                run_id=add_input.run_id,
+                member_ids=member_ids,
+            )
+            result = await self._apply_member_bulk_add(
+                context=context,
+                scope=scope,
+                actor_id=actor_id,
+                campaign=campaign,
+                members=members,
+                source_pool_run_id=add_input.run_id,
+                ip=ip,
+                user_agent=user_agent,
+            )
+            self.idempotency.add(
+                department_id=scope.department_id,
+                operation_scope=Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                idempotency_key=key,
+                request_hash=request_hash,
+                result_entity_id=campaign.id,
+                result_payload=result.to_replay_payload(),
+            )
             await self.session.commit()
             return MutationResult(status_code=200, result=result)
         except IntegrityError as error:
@@ -614,10 +694,27 @@ class CampaignService:
     def _canonical_members(
         members: tuple[CampaignMemberAddItem, ...],
     ) -> tuple[CampaignMemberAddItem, ...]:
-        by_influencer = {member.influencer_id: member for member in members}
-        return tuple(
-            by_influencer[influencer_id] for influencer_id in sorted(by_influencer, key=str)
-        )
+        """Sort an already unique direct request without silently deduplicating it."""
+
+        if len({member.influencer_id for member in members}) != len(members):
+            raise CampaignOutreachError(
+                422,
+                "CAMPAIGN_MEMBER_DUPLICATE_INFLUENCER",
+                "Campaign member request contains duplicate influencer_id values",
+            )
+        return tuple(sorted(members, key=lambda member: str(member.influencer_id)))
+
+    @staticmethod
+    def _canonical_member_ids(member_ids: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        """Canonicalize the already distinct selected persistent IDs for replay hashing."""
+
+        if len(set(member_ids)) != len(member_ids):
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_DUPLICATE",
+                "Candidate pool member_ids must be distinct",
+            )
+        return tuple(sorted(member_ids, key=str))
 
     @staticmethod
     def _validated_idempotency_key(value: str) -> str:
@@ -708,18 +805,19 @@ class CampaignService:
         )
         return target_side or fallback_operator_id
 
-    async def _validate_source_pool_run(
+    async def _selected_run_members(
         self,
-        department_id: UUID,
-        source_pool_run_id: UUID | None,
         *,
-        members: tuple[CampaignMemberAddItem, ...],
-    ) -> None:
-        if source_pool_run_id is None:
-            return
+        department_id: UUID,
+        run_id: UUID,
+        member_ids: tuple[UUID, ...],
+    ) -> tuple[CampaignMemberAddItem, ...]:
+        """Resolve one explicit candidate selection without auto-including UNKNOWN rows."""
+
         source_run = await self.repository.get_source_pool_run(
-            source_pool_run_id,
+            run_id,
             department_id=department_id,
+            for_update=True,
         )
         if source_run is None:
             raise CampaignOutreachError(
@@ -733,19 +831,138 @@ class CampaignService:
                 "CANDIDATE_POOL_RUN_NOT_COMPLETED",
                 "Candidate pool run must be completed before Campaign members are added",
             )
-        requested_pairs = tuple(
-            (member.influencer_id, member.preferred_platform_account_id) for member in members
+        selected = await self.repository.list_selected_source_run_members(
+            source_pool_run_id=source_run.id,
+            member_ids=member_ids,
         )
-        persisted_pairs = await self.repository.list_source_run_member_pairs(
-            source_pool_run_id,
-            requested_pairs,
-        )
-        if len(persisted_pairs) != len(requested_pairs):
+        if len(selected) != len(member_ids):
             raise CampaignOutreachError(
                 422,
                 "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND",
-                "Every Campaign member must be persisted by the selected Candidate pool run",
+                "Every selected Candidate pool member must belong to the selected run",
             )
+        if await self.repository.selected_source_run_has_multiple_accounts_per_influencer(
+            source_pool_run_id=source_run.id,
+            member_ids=member_ids,
+        ):
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
+                "Selected Candidate pool members cannot choose multiple accounts "
+                "for one influencer",
+            )
+        return tuple(
+            CampaignMemberAddItem(
+                influencer_id=member.influencer_id,
+                preferred_platform_account_id=member.platform_account_id,
+            )
+            for member in selected
+        )
+
+    async def _apply_member_bulk_add(
+        self,
+        *,
+        context: AuthContext,
+        scope: DepartmentScope,
+        actor_id: UUID,
+        campaign: Campaign,
+        members: tuple[CampaignMemberAddItem, ...],
+        source_pool_run_id: UUID | None,
+        ip: str,
+        user_agent: str,
+    ) -> CampaignMemberBulkAddResult:
+        """Apply a bounded, set-prevalidated Member selection within the current transaction."""
+
+        self._require_campaign_open_for_mutation(campaign)
+        await self._validate_preferred_accounts(members)
+        existing_members = {
+            member.influencer_id: member
+            for member in await self.repository.list_members_for_influencers(
+                campaign.id,
+                tuple(member.influencer_id for member in members),
+                for_update=True,
+            )
+        }
+        target_side_actor_id = await self._target_side_actor_id(
+            context=context,
+            scope=scope,
+            actor_id=actor_id,
+            fallback_operator_id=campaign.owner_operator_id,
+        )
+        added_count = 0
+        restored_count = 0
+        already_active_count = 0
+        new_members: list[CampaignMemberInsertRow] = []
+        restored_members: list[CampaignMemberRestoreRow] = []
+        for requested in members:
+            member = existing_members.get(requested.influencer_id)
+            if member is None:
+                new_members.append(
+                    CampaignMemberInsertRow(
+                        id=uuid4(),
+                        department_id=scope.department_id,
+                        campaign_id=campaign.id,
+                        influencer_id=requested.influencer_id,
+                        preferred_platform_account_id=requested.preferred_platform_account_id,
+                        source_pool_run_id=source_pool_run_id,
+                        added_by_operator_id=target_side_actor_id,
+                    )
+                )
+                added_count += 1
+                continue
+            if member.removed_at is None:
+                already_active_count += 1
+                continue
+            restored_members.append(
+                CampaignMemberRestoreRow(
+                    member_id=member.id,
+                    expected_version=member.version,
+                    preferred_platform_account_id=requested.preferred_platform_account_id,
+                    source_pool_run_id=source_pool_run_id,
+                    added_by_operator_id=target_side_actor_id,
+                )
+            )
+            restored_count += 1
+        await self.repository.insert_campaign_members(new_members)
+        restored_rows = await self.repository.restore_campaign_members(
+            campaign.id,
+            restored_members,
+        )
+        if restored_rows != restored_count:
+            raise CampaignOutreachError(
+                409,
+                "CAMPAIGN_MEMBER_CONFLICT",
+                "Campaign member mutation conflicted",
+            )
+        active_count_after = await self.repository.count_active_members(campaign.id)
+        result = CampaignMemberBulkAddResult(
+            campaign_id=campaign.id,
+            source_pool_run_id=source_pool_run_id,
+            requested_count=len(members),
+            added_count=added_count,
+            restored_count=restored_count,
+            already_active_count=already_active_count,
+            active_count_after=active_count_after,
+        )
+        if added_count or restored_count:
+            self.audit.add(
+                action=AuditAction.CAMPAIGN_MEMBERS_ADDED,
+                result=AuditResult.SUCCESS,
+                department_id=scope.department_id,
+                operator_id=actor_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="campaign",
+                entity_id=campaign.id,
+                after={
+                    "added_count": added_count,
+                    "restored_count": restored_count,
+                    "already_active_count": already_active_count,
+                    "active_count_after": active_count_after,
+                    "cross_department_override": scope.cross_department_override,
+                },
+            )
+        return result
 
     async def _validate_preferred_accounts(
         self,

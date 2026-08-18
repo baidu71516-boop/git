@@ -29,6 +29,7 @@ class CandidatePoolCreateInput(TargetingWriteContract):
     name: StrictStr = Field(min_length=1, max_length=200)
     kind: CandidatePoolKind
     source_collection_job_id: UUID | None = None
+    owner_operator_id: UUID | None = None
     policy: TargetingPolicyDefinition
 
 
@@ -93,6 +94,11 @@ class CandidatePoolRunPublic(TargetingReadContract):
     created_at: datetime
     updated_at: datetime
     idempotent_replay: bool = False
+
+
+class CandidatePoolRunPage(TargetingReadContract):
+    items: tuple[CandidatePoolRunPublic, ...]
+    next_cursor: UUID | None = None
 
 
 class CandidatePoolMemberPublic(TargetingReadContract):
@@ -177,6 +183,7 @@ __all__ = [
     "CandidatePoolPage",
     "CandidatePoolPublic",
     "CandidatePoolRunMemberPage",
+    "CandidatePoolRunPage",
     "CandidatePoolRunPublic",
     "CandidatePoolRunRequest",
     "TargetingPolicyCreateInput",
