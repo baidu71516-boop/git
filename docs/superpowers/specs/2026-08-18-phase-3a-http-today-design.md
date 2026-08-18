@@ -2,7 +2,7 @@
 
 Date: 2026-08-18
 
-Status: Approved design for WO-3A-4. Implementation has not started.
+Status: Approved design for WO-3A-4, amended 2026-08-18. Implementation has not started.
 
 ## Scope
 
@@ -36,9 +36,11 @@ accept optional `X-Department-ID`.
 
 - When omitted, scope is the authenticated session Department.
 - A Super Admin may explicitly set it to an active target Department.
-- A non-Super caller may omit it or repeat the own Department. Any other
+- A non-Super caller may omit it or supply their own Department. Any other
   Department returns `404`, never `403`.
 - An unknown or inactive Department returns `404`.
+- `X-Department-ID` is optional but single-valued. Repeating it is rejected as
+  `422 VALIDATION_ERROR`; routes never choose a first or last header value.
 - The header selects scope only. It never changes DepartmentPermission,
   selected Operator, or authorization.
 - Today keeps its frozen closed query fields. It does not gain a
@@ -80,8 +82,28 @@ evidence remains masked, and raw Contact values are never returned.
   key with a different owner returns the existing idempotency conflict.
 - Audit records the selected actor independently from the resulting owner.
 
+The closed public create DTO exposes this optional field and the typed Candidate
+Pool response always returns its persisted `owner_operator_id`.
+
 No new Candidate persistence field is required; this uses the existing
 `CandidatePool.owner_operator_id` relationship.
+
+### Existing Keyset Ordering
+
+The following repository orderings were inspected before freezing the new
+public list cursors. A cursor represents the final returned sort tuple; reads
+fetch `limit + 1` rows to produce the next cursor.
+
+| Public list | Existing repository ordering | Frozen public ordering and cursor tuple |
+| --- | --- | --- |
+| Candidate runs | `CandidatePoolRun.id ASC` | `id ASC`; cursor is the final `id` and continues with `id > cursor`. |
+| Candidate members | `CandidatePoolMember.id ASC` | `id ASC`; cursor is the final `id` and continues with `id > cursor`. |
+| Campaign list | `Campaign.updated_at DESC, Campaign.id DESC` | `updated_at DESC, id DESC`; cursor is `(updated_at, id)` and continues with `updated_at < cursor.updated_at OR (updated_at = cursor.updated_at AND id < cursor.id)`. |
+| Campaign members | No general member-list query or order exists. `list_members_for_influencers` deliberately has no ordering; `list_active_member_ids` uses `created_at ASC, id ASC` only for bounded review selection. | No public cursor tuple is frozen. It must not be invented from the review helper; define the member visibility and tuple in a follow-up contract before this route is implemented. |
+
+The final row is an explicit preflight finding, not a choice of
+`created_at ASC, id ASC`. The Campaign members route remains an approved
+surface but its keyset implementation is blocked on that missing contract.
 
 ## Campaign and Outreach Contract
 
@@ -130,9 +152,29 @@ The direct bulk-add body contains only bounded typed pairs:
 }
 ```
 
-`preferred_platform_account_id` is required. The route does not accept an
-Influencer-only item and does not select an account automatically. Direct adds
-do not set `source_pool_run_id`.
+`members` contains 1 through 10,000 items. `preferred_platform_account_id` is
+required. The route does not accept an Influencer-only item and does not select
+an account automatically. `influencer_id` must occur exactly once in the
+request: duplicate entries for the same Influencer, whether they name the same
+or different preferred accounts, reject the entire body as `422
+VALIDATION_ERROR`. The service never silently deduplicates. Direct adds do not
+accept or set `source_pool_run_id`.
+
+### Mutable Field Boundaries
+
+`PUT /campaigns/{campaign_id}` is a full CAS update of only the existing WO-3
+mutable Campaign configuration: `name`, `owner_operator_id`, `review_mode`,
+`review_count`, `duplicate_history_policy`, `duplicate_window_days`, and
+`expected_version`. `status` is not a PUT field and is rejected by the closed
+DTO as `422 VALIDATION_ERROR`; the lifecycle route is the only status path.
+Department and creator identity remain immutable.
+
+`PUT /outreach-targets/{target_id}` is a CAS replacement of exactly one
+endpoint reference (`contact_id` or `platform_account_id`) plus
+`expected_version`. It cannot change Department, Campaign, Member, Influencer,
+or channel identity. Those fields are omitted from the closed PUT DTO and are
+therefore rejected as `422 VALIDATION_ERROR`. No new mutable domain fields are
+introduced.
 
 ### Add From Candidate Run
 
@@ -182,6 +224,9 @@ The Pydantic query DTO is closed and validates effective defaults:
 - follower bounds are nonnegative and `followers_min <= followers_max`.
 - `contact_filter` reuses `has_contact`, `has_email`, and `no_contact`.
 - No offset pagination or undocumented query field is accepted.
+- Every listed query field is single-valued. Unknown or repeated fields are
+  rejected as `422 VALIDATION_ERROR` before DTO construction; the API never
+  applies last-value-wins parsing.
 
 Eligibility is exactly the resolved Department, non-removed CampaignMember,
 Task `READY`, and `due_at < next_business_day`. Overdue work is included. No
@@ -203,6 +248,11 @@ The response contains the local `business_date`, literal
 `timezone = "Asia/Shanghai"`, timezone-aware `as_of`, typed `items`, and
 `next_cursor`. Timestamps are stored and compared as timezone-aware instants;
 no server-local timezone is used.
+
+The existing contract does not yet say whether `business_date` is the
+Asia/Shanghai calendar date of `as_of` or the date of the next-business-day
+boundary. This is a public response ambiguity. Do not choose one in code; an
+explicit follow-up contract decision is required before Today implementation.
 
 ### Filter Semantics
 
@@ -252,9 +302,10 @@ priority rank is derived deterministically from the frozen priority enum.
 
 The cursor is a versioned, HMAC-signed opaque token using existing application
 signing material. It contains the complete sort tuple, a canonical hash of the
-normalized parsed query DTO including effective defaults such as `limit` plus
-the resolved Department, and the resolved Department scope itself. It does not
-use raw query-string ordering or text. Cursor verification rejects
+normalized parsed query DTO excluding `cursor`, including effective defaults
+such as `limit`, plus the resolved Department, and the resolved Department
+scope itself. The opaque cursor token is never an input to its own hash. It
+does not use raw query-string ordering or text. Cursor verification rejects
 malformed/tampered tokens, changed query values, and a different resolved
 Department. It does not claim cross-request MVCC snapshot isolation; mutations
 require a fresh pagination session.
@@ -264,6 +315,23 @@ application master key. Non-production derives the signing key from existing
 application name and environment configuration so tests are deterministic and
 no new secret setting is required.
 
+## Implementation Preflight
+
+Before cursor code is written, verify without logging its value that the
+existing production configuration supplies non-empty HMAC material through
+`Settings.app_master_key`; production startup already rejects a missing
+`APP_MASTER_KEY`, although its current invariant does not reject a blank value.
+The Today signer therefore fails closed on a blank value before HMAC use. It
+uses this existing material in production and the existing name/environment
+configuration only for the already-approved non-production derivation. This
+does not add a WO-3A-4 secret setting or fall back to an empty key.
+
+Before route adapters are written, add regression coverage that sends repeated
+Today query keys and repeated `X-Department-ID` headers. Both must produce the
+closed `422 VALIDATION_ERROR` response before scope selection, query hashing,
+or projection execution. This verifies that framework scalar binding cannot
+silently choose a last value.
+
 ## Error and OpenAPI Contract
 
 Route adapters map `TargetingError` and `CampaignOutreachError` to the
@@ -271,9 +339,21 @@ existing error envelope. Expected mappings include validation (`422`),
 not-found/no-disclosure (`404`), stale expected version (`409` with only safe
 `current_version` detail), illegal transition (`409`), idempotency conflict
 (`409`), duplicate constraint (`409`), disabled channel (`409`), invalid
-target/contact (`422`), unavailable/unreviewed taxonomy (existing `422` or
-`409` contract), and cursor/query or cursor/scope mismatch (`409`). No raw
-database exception reaches the response.
+target/contact (`422`), and no raw database exception reaches the response.
+
+The existing WO-2 Buyer taxonomy mapping is route-specific and exact:
+`BUYER_TAXONOMY_UNREVIEWED` is `422` while Candidate Pool or policy creation
+validates a submitted definition, and is `409` while a run reservation resolves
+an otherwise persisted policy. OpenAPI lists the applicable response on each
+route; it does not describe this as "422 or 409".
+
+Cursor failures are deterministic: a malformed token, unsupported cursor
+version, or invalid HMAC signature returns `422 CURSOR_INVALID`; a valid cursor
+whose normalized query hash or resolved Department differs returns `409
+CURSOR_MISMATCH`. Both failures are rejected before the Today projection query
+and reveal neither the expected hash nor scope. Malformed non-Today keyset
+cursors and all repeated/unknown closed query fields use the existing `422
+VALIDATION_ERROR` envelope.
 
 OpenAPI documents routes, methods, closed request bodies, response envelopes,
 enums, required `expected_version` fields, all Today query fields/defaults,
@@ -288,14 +368,18 @@ Focused tests cover:
 - Candidate Pool create/replay/conflict, policy/run reads, MATCH/UNKNOWN
   reads, Viewer masking, Department scope, and Candidate ownership rules.
 - Campaign CRUD, lifecycle/version conflicts, direct typed pair bulk-add,
-  selected-run MATCH/UNKNOWN behavior, wrong-run and duplicate-Influencer
-  rejection, restore, active-member counting, and A1 replay.
+  duplicate direct-Influencer rejection (same and different account), selected-run
+  MATCH/UNKNOWN behavior, wrong-run and duplicate-Influencer rejection, restore,
+  active-member counting, and A1 replay.
+- PUT boundaries: Campaign status is lifecycle-only, and OutreachTarget identity
+  fields cannot be changed through the endpoint update route.
 - Target, Task, transition, history, cross-Department scope/audit, and
   selected-operator target-scope validation.
 - Today eligibility, all filters, exact tag behavior, Huitun metrics null and
   bounds behavior, latest-event warning redaction, weekday boundaries,
   stable ordering, keyset pagination, cursor mismatch/scope binding, 50/100
-  limits, Department isolation, and Viewer masking.
+  limits, Department isolation, Viewer masking, invalid/mismatched cursor
+  mappings, and repeated Today query/header rejection.
 - Projection query-count or query-shape checks proving no per-item Contact,
   Metrics, Event, Campaign, or Member loads.
 - OpenAPI route/parameter/schema/enum/error assertions, including `/today`
