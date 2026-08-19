@@ -35,6 +35,8 @@ export function TodayFilterBar({
   tracks,
   onChange,
   onReset,
+  moreFiltersOpen,
+  onMoreFiltersOpenChange,
 }: {
   filters: TodayFilters;
   operators?: OperatorOption[];
@@ -42,6 +44,8 @@ export function TodayFilterBar({
   tracks?: string[];
   onChange: (changes: Partial<TodayFilters>) => void;
   onReset: () => void;
+  moreFiltersOpen?: boolean;
+  onMoreFiltersOpenChange?: (open: boolean) => void;
 }) {
   const hasFilters = Object.entries(filters).some(
     ([key, value]) =>
@@ -173,7 +177,13 @@ export function TodayFilterBar({
             onChange={(value: string | undefined) => onChange({ track: value })}
           />
         ) : null}
-        <Popover content={moreFilters} trigger="click" placement="bottomLeft">
+        <Popover
+          content={moreFilters}
+          trigger="click"
+          placement="bottomLeft"
+          open={moreFiltersOpen}
+          onOpenChange={onMoreFiltersOpenChange}
+        >
           <Button icon={<FilterOutlined aria-hidden="true" />}>更多筛选</Button>
         </Popover>
         {hasFilters ? (

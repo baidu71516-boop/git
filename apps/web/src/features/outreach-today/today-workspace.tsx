@@ -1,18 +1,15 @@
 "use client";
 
-import { ReloadOutlined } from "@ant-design/icons";
-import { Alert, Button, Card, Space, Typography } from "antd";
+import { Alert } from "antd";
 import { useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 
-import { AppEmpty } from "@/components/ui/app-empty";
 import { PageHeader } from "@/components/ui/page-header";
 import { ApiClientError } from "@/lib/api/client";
 
 import { todayQueryKey } from "./api";
 import { formatAsOf, formatBusinessDate } from "./formatters";
 import { TodayFilterBar } from "./components/today-filter-bar";
-import { TodayTable, TodayTableError } from "./components/today-table";
 import {
   useToday,
   useTodayCampaigns,
@@ -20,20 +17,9 @@ import {
   useTodayTracks,
 } from "./queries";
 import type { TodayFilters } from "./types";
-
-const { Text } = Typography;
+import { TodayResultsPanel, isActiveTodayFilter } from "./today-view";
 
 const initialFilters: TodayFilters = { work_kind: "ALL" };
-
-function isActiveFilter(filters: TodayFilters): boolean {
-  return (
-    filters.work_kind !== "ALL" ||
-    Object.entries(filters).some(
-      ([key, value]) =>
-        key !== "work_kind" && value !== undefined && value !== "",
-    )
-  );
-}
 
 export function TodayWorkspace() {
   const [filters, setFilters] = useState<TodayFilters>(initialFilters);
@@ -50,7 +36,7 @@ export function TodayWorkspace() {
     [pages],
   );
   const firstPage = pages?.[0];
-  const activeFilters = isActiveFilter(filters);
+  const activeFilters = isActiveTodayFilter(filters);
   const operatorOptions = operatorsQuery.isSuccess
     ? operatorsQuery.data
     : undefined;
@@ -126,52 +112,27 @@ export function TodayWorkspace() {
           onClose={() => setNotice(null)}
         />
       ) : null}
-      <Card className="today-list-card" variant="borderless">
-        {todayQuery.isPending ? (
-          <TodayTable loading />
-        ) : todayQuery.isError ? (
-          <TodayTableError onRetry={() => void reloadAfterCursorMismatch()} />
-        ) : items.length === 0 ? (
-          <div className="today-empty-state">
-            <AppEmpty
-              description={
-                activeFilters
-                  ? "没有符合当前筛选条件的任务"
-                  : "今天没有待处理的触达任务"
-              }
-            />
-            {activeFilters ? (
-              <Button onClick={resetFilters}>重置筛选</Button>
-            ) : (
-              <Text type="secondary">
-                当前没有符合条件、需要在今天推进的任务。
-              </Text>
-            )}
-          </div>
-        ) : (
-          <Space orientation="vertical" size={0} className="full-width">
-            <TodayTable
-              items={items}
-              businessDate={firstPage?.business_date}
-              asOf={firstPage?.as_of}
-              operators={operatorOptions}
-            />
-            <div className="today-pagination-footer">
-              {todayQuery.hasNextPage ? (
-                <Button
-                  icon={<ReloadOutlined aria-hidden="true" />}
-                  loading={todayQuery.isFetchingNextPage}
-                  onClick={() => void loadNextPage()}
-                >
-                  加载更多
-                </Button>
-              ) : (
-                <Text type="secondary">已经到底了</Text>
-              )}
-            </div>
-          </Space>
-        )}
-      </Card>
+      <TodayResultsPanel
+        state={
+          todayQuery.isPending
+            ? "loading"
+            : todayQuery.isError
+              ? "error"
+              : items.length === 0
+                ? "empty"
+                : "ready"
+        }
+        items={items}
+        businessDate={firstPage?.business_date}
+        asOf={firstPage?.as_of}
+        operators={operatorOptions}
+        activeFilters={activeFilters}
+        hasNextPage={todayQuery.hasNextPage}
+        loadingMore={todayQuery.isFetchingNextPage}
+        onLoadMore={() => void loadNextPage()}
+        onReset={resetFilters}
+        onRetry={() => void reloadAfterCursorMismatch()}
+      />
     </section>
   );
 }
