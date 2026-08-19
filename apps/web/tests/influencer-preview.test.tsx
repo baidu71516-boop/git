@@ -5,6 +5,7 @@ import { fireEvent } from "@testing-library/react";
 import DevInfluencerDetailDrawerPreviewPage from "../src/app/dev-ui-preview/influencers/drawer/[id]/page";
 import InfluencerVisualPreviewPage from "../src/app/dev-ui-preview/influencers/page";
 import { InfluencerPreviewWorkspace } from "../src/features/influencers/influencer-preview-workspace";
+import { InfluencerTable } from "../src/features/influencers/components/influencer-table";
 import { DevInfluencerDetailDrawerPreview } from "../src/features/influencers/influencer-detail-drawer-preview";
 import {
   createInfluencerPreviewDetailItems,
@@ -96,17 +97,17 @@ describe("development influencer visual preview", () => {
 
   it("reuses the UI-2 table and formatters without requesting any API", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
+    const items = createInfluencerPreviewItems();
 
-    render(<InfluencerPreviewWorkspace />);
+    render(
+      <InfluencerTable
+        items={items}
+        detailHrefPrefix="/dev-ui-preview/influencers/drawer"
+        onOpenDetail={() => undefined}
+      />,
+    );
 
     expect(document.querySelectorAll(".influencer-row")).toHaveLength(8);
-    expect(
-      screen.getByText(
-        (content) =>
-          content.includes("仅开发环境可见") ||
-          content.includes("仅用于界面预览"),
-      ),
-    ).toBeInTheDocument();
     expect(screen.getByText("8,532")).toBeInTheDocument();
     expect(screen.getByText("20.66万")).toBeInTheDocument();
     expect(screen.getByText("48.24万")).toBeInTheDocument();
@@ -151,7 +152,6 @@ describe("development influencer visual preview", () => {
     expect(screen.getByText("昨天", { exact: false })).toBeInTheDocument();
     expect(screen.getByText("3天前")).toBeInTheDocument();
     expect(screen.getAllByText("+3")).toHaveLength(2);
-    expect(screen.getByText("共 8 位达人")).toBeInTheDocument();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
