@@ -127,12 +127,12 @@ def test_strict_bulk_create_assigns_all_ids_with_one_batch_finalize_flush() -> N
                 "metrics": {
                     "current": {
                         "source_updated_at": NOW.isoformat(),
-                        "metrics": {"followers_count": 123},
+                        "metrics": {"followers_count": 123, "notes_7d": 0},
                         "metrics_hash": "c" * 64,
                     },
                     "snapshot": {
                         "source_updated_at": NOW.isoformat(),
-                        "metrics": {"followers_count": 123},
+                        "metrics": {"followers_count": 123, "notes_7d": 0},
                         "metrics_hash": "c" * 64,
                         "snapshot_key": "d" * 64,
                     },
@@ -160,6 +160,16 @@ def test_strict_bulk_create_assigns_all_ids_with_one_batch_finalize_flush() -> N
             InfluencerMetricSnapshot,
         }
         assert all(item.id is not None for item in added)
+        current_metrics = next(item for item in added if isinstance(item, InfluencerCurrentMetrics))
+        metric_snapshot = next(item for item in added if isinstance(item, InfluencerMetricSnapshot))
+        assert (
+            current_metrics.metrics
+            == metric_snapshot.metrics
+            == {
+                "followers_count": 123,
+                "notes_7d": 0,
+            }
+        )
         assert row.matched_influencer_id == influencer.id
         assert row.matched_platform_account_id == account.id
         assert row.committed_action is ImportRowAction.CREATE

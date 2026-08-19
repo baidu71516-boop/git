@@ -7,7 +7,7 @@ from uuid import UUID
 
 from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
-from backend_core.influencers.enums import ContactFilter, CRMStage, Notes60dFilter
+from backend_core.influencers.enums import ContactFilter, CRMStage, Notes7dFilter, Notes60dFilter
 from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
 from backend_core.influencers.repository import InfluencerRepository
 from backend_core.influencers.schemas import (
@@ -43,6 +43,7 @@ LIST_QUERY_PARAMETERS = frozenset(
         "owner_operator_id",
         "crm_stage",
         "contact_filter",
+        "notes_7d_filter",
         "notes_60d_filter",
         "freshness_status",
         "requires_refresh",
@@ -114,6 +115,7 @@ def parse_influencer_list_query(
     owner_operator_id: Annotated[UUID | None, Query()] = None,
     crm_stage: Annotated[CRMStage | None, Query()] = None,
     contact_filter: Annotated[ContactFilter | None, Query()] = None,
+    notes_7d_filter: Annotated[Notes7dFilter | None, Query()] = None,
     notes_60d_filter: Annotated[Notes60dFilter | None, Query()] = None,
     freshness_status: Annotated[FreshnessStatus | None, Query()] = None,
     requires_refresh: Annotated[bool | None, Query()] = None,
@@ -135,6 +137,7 @@ def parse_influencer_list_query(
         owner_operator_id,
         crm_stage,
         contact_filter,
+        notes_7d_filter,
         notes_60d_filter,
         freshness_status,
         requires_refresh,
