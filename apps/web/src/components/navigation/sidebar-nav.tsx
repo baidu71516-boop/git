@@ -6,6 +6,7 @@ import {
   LogoutOutlined,
   MenuOutlined,
   SyncOutlined,
+  ThunderboltOutlined,
   UsergroupAddOutlined,
 } from "@ant-design/icons";
 import { Button, Drawer, Typography } from "antd";
@@ -29,6 +30,11 @@ const navGroups = [
   {
     label: "工作区",
     items: [
+      {
+        label: "今日触达",
+        href: "/outreach/today",
+        icon: <ThunderboltOutlined aria-hidden="true" />,
+      },
       {
         label: "达人库",
         href: "/influencers",

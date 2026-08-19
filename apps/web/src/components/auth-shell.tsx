@@ -22,6 +22,7 @@ import { DataCollectionWorkspace } from "@/features/imports/data-collection-work
 import { ImportJobHistory } from "@/features/imports/import-job-history";
 import { RefreshQueueDetail } from "@/features/refresh-queues/refresh-queue-detail";
 import { RefreshQueueList } from "@/features/refresh-queues/refresh-queue-list";
+import { TodayWorkspace } from "@/features/outreach-today/today-workspace";
 import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
@@ -64,7 +65,11 @@ const roleLabels: Record<Role, string> = {
 };
 
 type AuthWorkspace =
-  "imports" | "import-jobs" | "influencers" | "refresh-queues";
+  | "imports"
+  | "import-jobs"
+  | "influencers"
+  | "refresh-queues"
+  | "outreach-today";
 
 function workspaceRequiresOperator(
   workspace: AuthWorkspace,
@@ -269,9 +274,11 @@ export function AuthShell({
           ? refreshQueueId
             ? "数据更新名单"
             : "数据更新"
-          : influencerId
-            ? "达人详情"
-            : "达人库";
+          : workspace === "outreach-today"
+            ? "今日触达"
+            : influencerId
+              ? "达人详情"
+              : "达人库";
 
   return (
     <AppShell
@@ -310,6 +317,8 @@ export function AuthShell({
             />
           )
         ) : null
+      ) : workspace === "outreach-today" ? (
+        <TodayWorkspace />
       ) : auth.role === "viewer" || auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />
       ) : null}

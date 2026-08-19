@@ -260,6 +260,251 @@ body {
   font-size: 13px;
 }
 
+.today-workspace {
+  display: grid;
+  gap: 16px;
+  width: 100%;
+}
+
+.today-workspace > .app-page-header {
+  align-items: flex-start;
+}
+
+.today-as-of {
+  padding-top: 5px;
+  color: var(--app-text-secondary);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.today-filter-bar {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+}
+
+.today-task-kind {
+  display: inline-flex;
+  width: fit-content;
+  padding: 3px;
+  border-radius: 7px;
+  background: #f1f5f9;
+}
+
+.today-kind-tab {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #53627a;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.today-kind-tab.is-active {
+  background: #fff;
+  color: var(--app-primary-dark);
+  box-shadow: 0 1px 3px rgb(25 42 70 / 12%);
+  font-weight: 600;
+}
+
+.today-filter-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.today-filter-controls .ant-select {
+  min-width: 132px;
+}
+
+.today-filter-controls .ant-input-number {
+  width: 132px;
+}
+
+.today-more-filter-panel {
+  display: grid;
+  width: 280px;
+  gap: 10px;
+}
+
+.today-more-filter-panel .ant-select {
+  width: 100%;
+}
+
+.today-more-filter-panel .ant-input-number {
+  width: 50%;
+}
+
+.today-more-filter-label {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.today-filter-hint {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.today-filter-hint-muted {
+  color: #98a2b3;
+}
+
+.today-query-notice {
+  margin: 0;
+}
+
+.today-list-card {
+  min-width: 0;
+  border: 1px solid var(--app-border);
+  box-shadow: none;
+}
+
+.today-list-card > .ant-card-body {
+  padding: 0;
+}
+
+.today-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  min-height: 280px;
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.today-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.today-table {
+  width: 100%;
+}
+
+.today-table .ant-table-thead > tr > th {
+  height: 44px;
+  padding: 10px 14px;
+  background: #f8fafc;
+  color: #53627a;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.today-table .ant-table-tbody > tr > td {
+  height: 50px;
+  padding: 8px 14px;
+  color: var(--app-text);
+  font-size: 14px;
+  vertical-align: middle;
+  border-bottom-color: #edf1f6;
+}
+
+.today-account-link {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  color: var(--app-text);
+  text-decoration: none;
+}
+
+.today-account-link:hover .today-account-name {
+  color: var(--app-primary);
+}
+
+.today-account-name,
+.today-account-secondary,
+.today-campaign-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.today-account-name {
+  font-weight: 600;
+}
+
+.today-account-secondary {
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.today-campaign-name {
+  display: block;
+  max-width: 140px;
+  white-space: normal;
+  line-height: 1.35;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.today-task-cell {
+  display: grid;
+  gap: 2px;
+}
+
+.today-history-warning {
+  color: #8a6b27;
+  font-size: 12px;
+}
+
+.today-due-overdue {
+  color: #ad6800;
+}
+
+.today-priority-high {
+  border-color: #ffd591;
+  background: #fff7e6;
+  color: #ad4e00;
+}
+
+.today-priority-normal {
+  border-color: #d9e1ec;
+  background: #f8fafc;
+  color: #53627a;
+}
+
+.today-pagination-footer {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 16px;
+  border-top: 1px solid #edf1f6;
+}
+
+.today-table-skeleton {
+  display: grid;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.today-table-skeleton .ant-skeleton {
+  min-height: 42px;
+  padding: 8px 0;
+}
+
+.today-inline-retry {
+  border: 0;
+  background: transparent;
+  color: var(--app-primary);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+@media (max-width: 900px) {
+  .today-table {
+    min-width: 1120px;
+  }
+}
+
 .user-menu-trigger {
   display: inline-flex;
   align-items: center;
@@ -2665,6 +2910,24 @@ body {
 }
 
 @media (max-width: 720px) {
+  .today-as-of {
+    white-space: normal;
+  }
+
+  .today-filter-controls {
+    align-items: stretch;
+  }
+
+  .today-filter-controls .ant-select,
+  .today-filter-controls .ant-input-number {
+    min-width: min(100%, 180px);
+    width: min(100%, 180px);
+  }
+
+  .today-kind-tab {
+    padding-inline: 12px;
+  }
+
   .import-job-history-pagination {
     align-items: flex-start;
     flex-direction: column;
