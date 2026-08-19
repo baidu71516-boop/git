@@ -8,22 +8,19 @@ from backend_core.auth.models import Department, DepartmentPermission, Operator
 from backend_core.auth.security import hash_password
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
-from backend_core.db.base import Base
 from fakeredis.aioredis import FakeRedis
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.fixtures.phase3a_auth_database import database_session
 
 
 def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
     async def scenario() -> None:
         settings = get_settings()
-        engine = create_async_engine("sqlite+aiosqlite://")
-        async with engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-        factory = async_sessionmaker(engine, expire_on_commit=False)
         fake_redis = FakeRedis(decode_responses=True)
 
-        async with factory() as session:
+        async with database_session() as session:
             department = Department(
                 name="HTTP Test",
                 password_hash=hash_password("http-test-password"),
@@ -135,6 +132,5 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                 app.dependency_overrides.clear()
 
         await fake_redis.aclose()
-        await engine.dispose()
 
     asyncio.run(scenario())

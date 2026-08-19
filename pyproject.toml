@@ -50,6 +50,7 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
+pythonpath = ["."]
 testpaths = [
   "packages/backend_core/tests",
   "tests/integration",

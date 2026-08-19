@@ -1,6 +1,4 @@
 import asyncio
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -12,10 +10,11 @@ from backend_core.auth.security import hash_password, hash_token
 from backend_core.auth.service import AuthContext, AuthError, AuthService, BootstrapService
 from backend_core.auth.throttle import FailureState, LoginThrottleProtocol, RedisLoginThrottle
 from backend_core.db import models as database_models  # noqa: F401
-from backend_core.db.base import Base
 from fakeredis.aioredis import FakeRedis
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from tests.fixtures.phase3a_auth_database import database_session
 
 
 class MutableClock:
@@ -54,17 +53,6 @@ class MemoryThrottle(LoginThrottleProtocol):
 
     async def clear(self, department_id: UUID, ip: str) -> None:
         self.failures.pop((department_id, ip), None)
-
-
-@asynccontextmanager
-async def database_session() -> AsyncIterator[AsyncSession]:
-    engine = create_async_engine("sqlite+aiosqlite://")
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
-        yield session
-    await engine.dispose()
 
 
 async def add_department(
