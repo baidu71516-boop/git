@@ -52,7 +52,7 @@ export function TodayTable({
           {
             title: "达人账号",
             key: "account",
-            width: 180,
+            width: 190,
             render: (_, item) => (
               <Link
                 className="today-account-link"
@@ -99,14 +99,16 @@ export function TodayTable({
             title: "渠道",
             dataIndex: "channel",
             key: "channel",
-            width: 105,
-            render: (value: TodayItem["channel"]) => channelLabel(value),
+            width: 115,
+            render: (value: TodayItem["channel"]) => (
+              <span className="today-channel">{channelLabel(value)}</span>
+            ),
           },
           {
             title: "到期时间",
             dataIndex: "due_at",
             key: "due_at",
-            width: 155,
+            width: 160,
             render: (value: string) => {
               const due = formatTodayDueAt(
                 value,
@@ -126,14 +128,20 @@ export function TodayTable({
           {
             title: "联系方式",
             key: "contact",
-            width: 115,
-            render: (_, item) => contactSummary(item),
+            width: 125,
+            render: (_, item) => (
+              <span
+                className={`today-contact-summary ${item.has_email ? "is-email" : item.has_contact ? "is-contact" : "is-empty"}`}
+              >
+                {contactSummary(item)}
+              </span>
+            ),
           },
           {
             title: "优先级",
             dataIndex: "priority",
             key: "priority",
-            width: 85,
+            width: 86,
             render: (value: TodayItem["priority"]) => (
               <Tag
                 className={
@@ -150,7 +158,7 @@ export function TodayTable({
             title: "负责人",
             dataIndex: "assigned_operator_id",
             key: "owner",
-            width: 105,
+            width: 110,
             render: (value: string | null) =>
               value ? (operatorNames.get(value) ?? "—") : "—",
           },
@@ -165,7 +173,7 @@ export function TodayTableError({ onRetry }: { onRetry: () => void }) {
     <Alert
       type="error"
       showIcon
-      message="今日触达加载失败"
+      title="今日触达加载失败"
       description="请稍后重试。"
       action={
         <button className="today-inline-retry" type="button" onClick={onRetry}>

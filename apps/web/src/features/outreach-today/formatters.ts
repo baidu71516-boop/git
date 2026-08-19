@@ -20,9 +20,17 @@ const shanghaiTime = new Intl.DateTimeFormat("zh-CN", {
   minute: "2-digit",
   hour12: false,
 });
+const shanghaiShortDateTime = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
 
 const channelLabels: Record<TodayChannel, string> = {
-  EMAIL: "邮箱",
+  EMAIL: "邮件",
   XIAOHONGSHU_PRIVATE_MESSAGE: "小红书私信",
   DOUYIN_PRIVATE_MESSAGE: "抖音私信",
   WECHAT: "微信",
@@ -96,8 +104,8 @@ export function formatTodayDueAt(
     sameDay && !overdue
       ? `今天 ${shanghaiTime.format(date)}`
       : overdue
-        ? `已逾期 · ${shanghaiDateTime.format(date)}`
-        : shanghaiDateTime.format(date);
+        ? `已逾期 · ${shanghaiShortDateTime.format(date)}`
+        : shanghaiShortDateTime.format(date);
   return { label, overdue, title: shanghaiDateTime.format(date) };
 }
 
@@ -115,9 +123,13 @@ export function contactSummary(
 
 export function preferredAccountSecondary(item: TodayItem): string {
   const account = item.preferred_platform_account;
-  const platform =
-    account.platform === "xiaohongshu" ? "小红书" : account.platform;
+  const platformLabels: Record<string, string> = {
+    xiaohongshu: "小红书",
+    douyin: "抖音",
+    wechat: "微信",
+  };
+  const platform = platformLabels[account.platform] ?? account.platform;
   return account.account_handle
-    ? `${platform} · ${account.account_handle}`
+    ? `${platform} · ${account.account_handle.startsWith("@") ? account.account_handle : `@${account.account_handle}`}`
     : platform;
 }

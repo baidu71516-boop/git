@@ -197,12 +197,6 @@ export function TodayFilterBar({
           </Tooltip>
         ) : null}
       </div>
-      <Space size={8} className="today-filter-hint">
-        <span>可用筛选</span>
-        {!campaigns || !operators || !tracks ? (
-          <span className="today-filter-hint-muted">部分选项暂不可用</span>
-        ) : null}
-      </Space>
     </div>
   );
 }

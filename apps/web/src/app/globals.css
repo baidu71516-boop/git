@@ -262,28 +262,70 @@ body {
 
 .today-workspace {
   display: grid;
-  gap: 16px;
+  gap: 18px;
   width: 100%;
 }
 
 .today-workspace > .app-page-header {
   align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.today-workspace > .app-page-header > div:first-child {
+  min-width: 0;
+}
+
+.today-workspace > .app-page-header .app-page-header-extra {
+  flex-shrink: 0;
 }
 
 .today-as-of {
-  padding-top: 5px;
+  padding-top: 4px;
   color: var(--app-text-secondary);
-  font-size: 14px;
+  font-size: 13px;
   white-space: nowrap;
+}
+
+.today-preview-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 8px 14px;
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.today-preview-toolbar-label {
+  color: #30435c;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.today-preview-scene-select {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+}
+
+.today-preview-scene-select .ant-select {
+  min-width: 230px;
 }
 
 .today-filter-bar {
   display: grid;
-  gap: 12px;
-  padding: 14px 16px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px 16px;
+  padding: 12px 14px;
   border: 1px solid var(--app-border);
   border-radius: 8px;
-  background: var(--app-surface);
+  background: #fbfcfe;
 }
 
 .today-task-kind {
@@ -315,12 +357,13 @@ body {
 .today-filter-controls {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
 }
 
 .today-filter-controls .ant-select {
-  min-width: 132px;
+  min-width: 124px;
 }
 
 .today-filter-controls .ant-input-number {
@@ -346,15 +389,6 @@ body {
   font-size: 12px;
 }
 
-.today-filter-hint {
-  color: var(--app-text-secondary);
-  font-size: 12px;
-}
-
-.today-filter-hint-muted {
-  color: #98a2b3;
-}
-
 .today-query-notice {
   margin: 0;
 }
@@ -362,6 +396,7 @@ body {
 .today-list-card {
   min-width: 0;
   border: 1px solid var(--app-border);
+  border-radius: 10px;
   box-shadow: none;
 }
 
@@ -405,6 +440,10 @@ body {
   border-bottom-color: #edf1f6;
 }
 
+.today-table .ant-table-tbody > tr:hover > td {
+  background: #f8fbff !important;
+}
+
 .today-account-link {
   display: grid;
   gap: 2px;
@@ -427,6 +466,7 @@ body {
 
 .today-account-name {
   font-weight: 600;
+  line-height: 1.35;
 }
 
 .today-account-secondary {
@@ -448,15 +488,33 @@ body {
 .today-task-cell {
   display: grid;
   gap: 2px;
+  line-height: 1.35;
 }
 
 .today-history-warning {
-  color: #8a6b27;
+  color: #9a6700;
   font-size: 12px;
 }
 
 .today-due-overdue {
-  color: #ad6800;
+  color: #9a6700;
+  font-weight: 500;
+}
+
+.today-channel {
+  color: #53627a;
+}
+
+.today-contact-summary {
+  color: #53627a;
+}
+
+.today-contact-summary.is-email {
+  color: #24734a;
+}
+
+.today-contact-summary.is-empty {
+  color: #98a2b3;
 }
 
 .today-priority-high {
@@ -476,7 +534,7 @@ body {
   min-height: 64px;
   align-items: center;
   justify-content: center;
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-top: 1px solid #edf1f6;
 }
 
@@ -500,6 +558,14 @@ body {
 }
 
 @media (max-width: 900px) {
+  .today-filter-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .today-filter-controls {
+    justify-content: flex-start;
+  }
+
   .today-table {
     min-width: 1120px;
   }
@@ -2910,8 +2976,29 @@ body {
 }
 
 @media (max-width: 720px) {
+  .today-workspace > .app-page-header {
+    gap: 8px;
+    flex-direction: column;
+  }
+
   .today-as-of {
     white-space: normal;
+  }
+
+  .today-preview-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .today-preview-scene-select {
+    width: 100%;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .today-preview-scene-select .ant-select {
+    width: 100%;
   }
 
   .today-filter-controls {

@@ -108,7 +108,7 @@ export function TodayWorkspace() {
           type="info"
           showIcon
           closable
-          message={notice}
+          title={notice}
           onClose={() => setNotice(null)}
         />
       ) : null}
