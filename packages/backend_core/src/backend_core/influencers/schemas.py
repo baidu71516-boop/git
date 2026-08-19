@@ -20,11 +20,13 @@ from pydantic import (
 
 from backend_core.auth.enums import OperatorStatus
 from backend_core.influencers.enums import (
+    ContactFilter,
     ContactType,
     ContactValidationStatus,
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes60dFilter,
     Platform,
 )
 from backend_core.influencers.freshness import FreshnessStatus
@@ -106,6 +108,8 @@ class InfluencerListQuery(QueryContract):
     followers_max: QueryInteger | None = Field(default=None, ge=0)
     owner_operator_id: UUID | None = None
     crm_stage: CRMStage | None = None
+    contact_filter: ContactFilter | None = None
+    notes_60d_filter: Notes60dFilter | None = None
     freshness_status: FreshnessStatus | None = None
     requires_refresh: QueryBoolean | None = None
     last_huitun_observed_before: QueryDateTime | None = None

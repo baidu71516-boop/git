@@ -40,7 +40,21 @@ class ContactType(StrEnum):
     OTHER = "other"
 
 
+class ContactFilter(StrEnum):
+    HAS_CONTACT = "has_contact"
+    HAS_EMAIL = "has_email"
+    NO_CONTACT = "no_contact"
+
+
 class ContactValidationStatus(StrEnum):
     VALID = "valid"
     INVALID = "invalid"
     UNVERIFIED = "unverified"
+
+
+class Notes60dFilter(StrEnum):
+    ZERO = "zero"
+    ONE_TO_TWO = "one_to_two"
+    THREE_TO_NINE = "three_to_nine"
+    TEN_OR_MORE = "ten_or_more"
+    MISSING = "missing"

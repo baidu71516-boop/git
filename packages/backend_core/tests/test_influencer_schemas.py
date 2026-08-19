@@ -4,11 +4,13 @@ from uuid import UUID, uuid4
 import pytest
 from backend_core.auth.enums import OperatorStatus
 from backend_core.influencers.enums import (
+    ContactFilter,
     ContactType,
     ContactValidationStatus,
     CRMStage,
     DataSource,
     InfluencerStatus,
+    Notes60dFilter,
     Platform,
 )
 from backend_core.influencers.freshness import FreshnessStatus
@@ -45,6 +47,8 @@ def test_list_query_defaults_and_exact_field_set() -> None:
         "followers_max",
         "owner_operator_id",
         "crm_stage",
+        "contact_filter",
+        "notes_60d_filter",
         "freshness_status",
         "requires_refresh",
         "last_huitun_observed_before",
@@ -117,6 +121,18 @@ def test_list_query_uses_real_uuid_and_crm_stage_enum() -> None:
 
     with pytest.raises(ValidationError):
         InfluencerListQuery(crm_stage="不存在的阶段")  # type: ignore[arg-type]
+
+
+def test_list_query_accepts_only_closed_contact_and_notes_filters() -> None:
+    query = InfluencerListQuery.model_validate(
+        {"contact_filter": "has_email", "notes_60d_filter": "three_to_nine"}
+    )
+
+    assert query.contact_filter is ContactFilter.HAS_EMAIL
+    assert query.notes_60d_filter is Notes60dFilter.THREE_TO_NINE
+    for name, invalid in (("contact_filter", "email"), ("notes_60d_filter", "7d")):
+        with pytest.raises(ValidationError):
+            InfluencerListQuery.model_validate({name: invalid})
 
 
 @pytest.mark.parametrize("status", list(FreshnessStatus))

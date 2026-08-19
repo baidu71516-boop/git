@@ -35,7 +35,13 @@ from backend_core.imports.enums import (
     ImportSourceType,
 )
 from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
-from backend_core.influencers.enums import DataSource, InfluencerStatus
+from backend_core.influencers.enums import (
+    ContactFilter,
+    ContactType,
+    DataSource,
+    InfluencerStatus,
+    Notes60dFilter,
+)
 from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
 from backend_core.influencers.models import (
     Influencer,
@@ -252,6 +258,26 @@ def followers_count_expression(dialect_name: str) -> ColumnElement[Any]:
     )
 
 
+def notes_60d_expression(dialect_name: str) -> ColumnElement[Any]:
+    """Return the shared strict non-coercing current notes_60d projection."""
+
+    if dialect_name == "postgresql":
+        json_value = cast(InfluencerCurrentMetrics.metrics, JSONB)["notes_60d"]
+        text_value = json_value.as_string()
+        valid_integer = and_(
+            func.jsonb_typeof(json_value) == "number",
+            text_value.op("~")(r"^(0|[1-9][0-9]*)$"),
+        )
+        return case((valid_integer, cast(text_value, Numeric())), else_=None)
+    return case(
+        (
+            func.json_type(InfluencerCurrentMetrics.metrics, "$.notes_60d") == "integer",
+            func.json_extract(InfluencerCurrentMetrics.metrics, "$.notes_60d"),
+        ),
+        else_=None,
+    )
+
+
 def _visible_influencer_criteria() -> tuple[ColumnElement[bool], ...]:
     """Backward-compatible private alias for the original Task 7 helper."""
 
@@ -425,6 +451,51 @@ class InfluencerRepository:
             .where(*conditions)
         )
 
+    def _contact_criterion(self, contact_filter: ContactFilter) -> ColumnElement[bool]:
+        conditions: list[ColumnElement[bool]] = [
+            InfluencerContact.influencer_id == Influencer.id,
+            InfluencerContact.is_current.is_(True),
+        ]
+        if contact_filter is ContactFilter.HAS_EMAIL:
+            conditions.append(InfluencerContact.type == ContactType.EMAIL)
+        has_contact = exists(select(1).select_from(InfluencerContact).where(*conditions))
+        return ~has_contact if contact_filter is ContactFilter.NO_CONTACT else has_contact
+
+    def _notes_60d_criterion(self, notes_filter: Notes60dFilter) -> ColumnElement[bool]:
+        value = notes_60d_expression(self._dialect_name)
+        conditions: list[ColumnElement[bool]] = [
+            InfluencerCurrentMetrics.influencer_id == Influencer.id,
+            InfluencerPlatformAccount.is_active.is_(True),
+        ]
+        valid_value = value.is_not(None)
+        if notes_filter is Notes60dFilter.ZERO:
+            conditions.append(value == 0)
+        elif notes_filter is Notes60dFilter.ONE_TO_TWO:
+            conditions.extend((value >= 1, value <= 2))
+        elif notes_filter is Notes60dFilter.THREE_TO_NINE:
+            conditions.extend((value >= 3, value <= 9))
+        elif notes_filter is Notes60dFilter.TEN_OR_MORE:
+            conditions.append(value >= 10)
+        else:
+            conditions.append(valid_value)
+
+        has_matching_metric = exists(
+            select(1)
+            .select_from(InfluencerCurrentMetrics)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == InfluencerCurrentMetrics.platform_account_id,
+                    InfluencerPlatformAccount.influencer_id
+                    == InfluencerCurrentMetrics.influencer_id,
+                ),
+            )
+            .where(*conditions)
+        )
+        return (
+            ~has_matching_metric if notes_filter is Notes60dFilter.MISSING else has_matching_metric
+        )
+
     def _list_criteria(
         self,
         query: InfluencerListQuery,
@@ -443,6 +514,10 @@ class InfluencerRepository:
             criteria.append(Influencer.owner_operator_id == query.owner_operator_id)
         if query.crm_stage is not None:
             criteria.append(Influencer.crm_stage == query.crm_stage)
+        if query.contact_filter is not None:
+            criteria.append(self._contact_criterion(query.contact_filter))
+        if query.notes_60d_filter is not None:
+            criteria.append(self._notes_60d_criterion(query.notes_60d_filter))
         if (
             query.freshness_status is not None
             or query.requires_refresh is not None
@@ -830,6 +905,7 @@ __all__ = [
     "eligible_huitun_freshness",
     "freshness_status_expression",
     "followers_count_expression",
+    "notes_60d_expression",
     "huitun_confirmed_lineage",
     "visible_influencer_criteria",
 ]
