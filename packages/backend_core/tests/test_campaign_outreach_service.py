@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -38,6 +39,7 @@ from backend_core.campaigns.schemas import (
     CampaignUpdateInput,
 )
 from backend_core.campaigns.service import CampaignService
+from backend_core.config.settings import Settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.growth.enums import (
@@ -87,7 +89,7 @@ from backend_core.outreach.schemas import (
     OutreachTaskTransitionInput,
 )
 from backend_core.outreach.service import OutreachService
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -109,6 +111,53 @@ SQLITE_TABLES = (
     "phase3a_idempotency_records",
     "audit_logs",
 )
+
+OUTREACH_FINGERPRINT_TEST_KEY = "phase3a-outreach-fingerprint-test-key"
+OUTREACH_FINGERPRINT_TEST_SETTINGS = Settings(
+    app_env="test",
+    app_master_key=SecretStr(OUTREACH_FINGERPRINT_TEST_KEY),
+    _env_file=None,
+)
+
+
+def test_endpoint_fingerprint_is_keyed_deterministic_and_nonplaintext() -> None:
+    kind = "contact:email"
+    endpoint = "creator@example.invalid"
+    signing_key = OUTREACH_FINGERPRINT_TEST_KEY.encode("utf-8")
+
+    fingerprint = OutreachService._endpoint_fingerprint(signing_key, kind, endpoint)
+
+    assert fingerprint == OutreachService._endpoint_fingerprint(signing_key, kind, endpoint)
+    assert fingerprint != OutreachService._endpoint_fingerprint(
+        signing_key,
+        kind,
+        "other-creator@example.invalid",
+    )
+    assert (
+        fingerprint
+        == hmac.new(
+            signing_key,
+            b"phase3a:outreach:endpoint-fingerprint:v1\x1fcontact:email\x1f"
+            b"creator@example.invalid",
+            hashlib.sha256,
+        ).hexdigest()
+    )
+    assert (
+        fingerprint
+        != hashlib.sha256(b"phase3a:endpoint:v1:contact:email:creator@example.invalid").hexdigest()
+    )
+    assert endpoint not in fingerprint
+
+
+@pytest.mark.parametrize("master_key", (None, "", " \t\n "))
+def test_endpoint_fingerprint_rejects_blank_production_master_key(master_key: str | None) -> None:
+    settings = Settings.model_construct(
+        app_env="production",
+        app_master_key=SecretStr(master_key) if master_key is not None else None,
+    )
+
+    with pytest.raises(ValueError, match="APP_MASTER_KEY.*non-blank"):
+        OutreachService._endpoint_fingerprint_signing_key(settings)
 
 
 def async_test(function: object) -> object:
@@ -196,6 +245,7 @@ async def domain_harness(
                     session,
                     channel_registry=registry,
                     clock=clock,
+                    settings=OUTREACH_FINGERPRINT_TEST_SETTINGS,
                 ),
                 clock=clock,
             )
@@ -1502,12 +1552,23 @@ async def test_task_state_machine_event_replay_and_atomic_rollback() -> None:
         assert event.redacted_target_snapshot is not None
         assert "sent-proof@example.invalid" not in json.dumps(event.redacted_target_snapshot)
         assert "endpoint_fingerprint" in event.redacted_target_snapshot
+        fingerprint = event.redacted_target_snapshot["endpoint_fingerprint"]
         assert (
-            event.redacted_target_snapshot["endpoint_fingerprint"]
-            == hashlib.sha256(
+            fingerprint
+            == hmac.new(
+                OUTREACH_FINGERPRINT_TEST_KEY.encode("utf-8"),
+                b"phase3a:outreach:endpoint-fingerprint:v1\x1fcontact:email\x1f"
+                b"sent-proof@example.invalid",
+                hashlib.sha256,
+            ).hexdigest()
+        )
+        assert (
+            fingerprint
+            != hashlib.sha256(
                 b"phase3a:endpoint:v1:contact:email:sent-proof@example.invalid"
             ).hexdigest()
         )
+        assert "sent-proof@example.invalid" not in fingerprint
 
         with pytest.raises(CampaignOutreachError) as terminal:
             await harness.outreach_service.transition_task(

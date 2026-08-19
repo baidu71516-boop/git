@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from backend_core.common.health import HealthDependencies
 from backend_core.common.logging import configure_logging
@@ -26,6 +27,7 @@ from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
 from app.http.operators import router as operators_router
 from app.http.outreach import router as outreach_router
+from app.http.phase3a_http import apply_phase3a_mutation_openapi_header_requirements
 from app.http.refresh_queues import router as refresh_queues_router
 from app.http.targeting_tasks import TargetingTaskDispatcher
 from app.http.today import today_router
@@ -83,3 +85,14 @@ app.include_router(refresh_queues_router)
 app.include_router(today_router)
 app.include_router(outreach_router)
 register_exception_handlers(app)
+
+_default_openapi = app.openapi
+
+
+def _phase3a_openapi() -> dict[str, Any]:
+    document = _default_openapi()
+    apply_phase3a_mutation_openapi_header_requirements(document)
+    return document
+
+
+app.openapi = _phase3a_openapi  # type: ignore[method-assign]

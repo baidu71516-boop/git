@@ -41,13 +41,18 @@ def test_freshness_thresholds_must_be_strictly_increasing(
         )
 
 
-def test_production_requires_master_key() -> None:
-    try:
-        Settings(app_env="production", _env_file=None)
-    except ValueError as exc:
-        assert "APP_MASTER_KEY" in str(exc)
-    else:
-        raise AssertionError("production configuration accepted without APP_MASTER_KEY")
+@pytest.mark.parametrize(
+    "app_master_key",
+    [None, SecretStr(""), SecretStr(" \t\n ")],
+    ids=["missing", "empty", "whitespace"],
+)
+def test_production_requires_nonblank_master_key(app_master_key: SecretStr | None) -> None:
+    with pytest.raises(ValueError, match="APP_MASTER_KEY"):
+        Settings(
+            app_env="production",
+            app_master_key=app_master_key,
+            _env_file=None,
+        )
 
 
 def test_production_accepts_injected_master_key() -> None:

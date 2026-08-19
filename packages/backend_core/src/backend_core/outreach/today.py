@@ -278,8 +278,8 @@ class TodayCursorCodec:
         if self.settings.app_env == "production":
             secret = self.settings.app_master_key
             value = secret.get_secret_value() if secret is not None else ""
-            if not value:
-                raise ValueError("APP_MASTER_KEY must be non-empty for Today cursor signing")
+            if not value.strip():
+                raise ValueError("APP_MASTER_KEY must be non-blank for Today cursor signing")
             return value.encode("utf-8")
         seed = f"{self.settings.app_name}:{self.settings.app_env}:today-cursor:v1"
         return hashlib.sha256(seed.encode("utf-8")).digest()

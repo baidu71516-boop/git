@@ -15,6 +15,7 @@ from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.auth.service import AuthContext
 from backend_core.campaigns.errors import CampaignOutreachError
+from backend_core.config.settings import Settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.growth.enums import CampaignReviewMode, CampaignStatus, DuplicateHistoryPolicy
@@ -49,6 +50,7 @@ from backend_core.outreach.today import (
     TodayService,
     next_business_day,
 )
+from pydantic import SecretStr
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -740,3 +742,14 @@ def test_today_cursor_codec_rejects_tampering_and_hashes_normalized_defaults() -
     with pytest.raises(CampaignOutreachError) as tampered:
         codec.decode(f"{token[:-1]}x")
     assert (tampered.value.status_code, tampered.value.code) == (422, "CURSOR_INVALID")
+
+
+@pytest.mark.parametrize("master_key", ("", " \t\n "))
+def test_today_cursor_codec_rejects_blank_production_master_key(master_key: str) -> None:
+    settings = Settings.model_construct(
+        app_env="production",
+        app_master_key=SecretStr(master_key),
+    )
+
+    with pytest.raises(ValueError, match="APP_MASTER_KEY.*non-blank"):
+        TodayCursorCodec(settings)

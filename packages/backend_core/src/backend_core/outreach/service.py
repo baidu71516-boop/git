@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -21,6 +22,7 @@ from backend_core.campaigns.channels import ChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.repository import CampaignRepository
 from backend_core.campaigns.service import Clock, MutationResult, SystemClock, _as_utc
+from backend_core.config.settings import Settings, get_settings
 from backend_core.growth.enums import (
     CampaignReviewMode,
     CampaignStatus,
@@ -89,6 +91,7 @@ class OutreachService:
         channel_registry: ChannelEnablementRegistry | None = None,
         clock: Clock | None = None,
         repository: CampaignRepository | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.session = session
         self.repository = repository or CampaignRepository(session)
@@ -98,6 +101,9 @@ class OutreachService:
         self.idempotency = Phase3AIdempotencyRepository(session)
         self.channel_registry = channel_registry or ChannelEnablementRegistry()
         self.clock = clock or SystemClock()
+        self._endpoint_fingerprint_key = self._endpoint_fingerprint_signing_key(
+            settings or get_settings()
+        )
 
     async def get_target(
         self,
@@ -781,6 +787,7 @@ class OutreachService:
                     "validation_status": contact.validation_status.value,
                     "source": contact.source.value,
                     "endpoint_fingerprint": self._endpoint_fingerprint(
+                        self._endpoint_fingerprint_key,
                         f"contact:{contact.type.value}",
                         contact.normalized_value,
                     ),
@@ -807,6 +814,7 @@ class OutreachService:
                 "is_active": account.is_active,
                 "source": account.source.value,
                 "endpoint_fingerprint": self._endpoint_fingerprint(
+                    self._endpoint_fingerprint_key,
                     "platform_account",
                     self._platform_endpoint_identity(account),
                 ),
@@ -1147,10 +1155,30 @@ class OutreachService:
         return "\x1f".join((account.platform.value, canonical_identity or str(account.id)))
 
     @staticmethod
-    def _endpoint_fingerprint(kind: str, endpoint_value: str) -> str:
-        """Hash the canonical endpoint at send time without persisting plaintext."""
+    def _endpoint_fingerprint_signing_key(settings: Settings) -> bytes:
+        """Resolve the existing application signing material for endpoint fingerprints."""
 
-        return hashlib.sha256(f"phase3a:endpoint:v1:{kind}:{endpoint_value}".encode()).hexdigest()
+        secret = settings.app_master_key
+        value = secret.get_secret_value() if secret is not None else ""
+        if value.strip():
+            return value.encode("utf-8")
+        if settings.app_env == "production":
+            raise ValueError("APP_MASTER_KEY must be non-blank for endpoint fingerprinting")
+        seed = f"{settings.app_name}:{settings.app_env}:phase3a:endpoint-fingerprint:v1"
+        return hashlib.sha256(seed.encode("utf-8")).digest()
+
+    @staticmethod
+    def _endpoint_fingerprint(signing_key: bytes, kind: str, normalized_endpoint: str) -> str:
+        """Return a keyed, domain-separated fingerprint without persisting plaintext."""
+
+        payload = b"\x1f".join(
+            (
+                b"phase3a:outreach:endpoint-fingerprint:v1",
+                kind.encode("utf-8"),
+                normalized_endpoint.encode("utf-8"),
+            )
+        )
+        return hmac.new(signing_key, payload, hashlib.sha256).hexdigest()
 
     def _require_channel_enabled(self, channel: OutreachChannel) -> None:
         if channel is OutreachChannel.DOUYIN_PRIVATE_MESSAGE:

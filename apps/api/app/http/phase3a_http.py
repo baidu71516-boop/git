@@ -14,6 +14,45 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from app.http.errors import ApiError
 from app.http.responses import ErrorEnvelope
 
+CSRF_HEADER = "X-CSRF-Token"
+IDEMPOTENCY_HEADER = "Idempotency-Key"
+
+# The runtime guards deliberately bind these headers as optional so missing
+# values retain the established domain error envelopes. FastAPI would otherwise
+# document them as optional, so the API process applies this exact matrix after
+# generating its schema.
+PHASE3A_MUTATION_HEADER_REQUIREMENTS: dict[tuple[str, str], frozenset[str]] = {
+    ("/api/v1/candidate-pools", "post"): frozenset({CSRF_HEADER, IDEMPOTENCY_HEADER}),
+    ("/api/v1/candidate-pools/{pool_id}/policies", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/candidate-pools/{pool_id}/runs", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/campaigns", "post"): frozenset({CSRF_HEADER, IDEMPOTENCY_HEADER}),
+    ("/api/v1/campaigns/{campaign_id}", "put"): frozenset({CSRF_HEADER}),
+    ("/api/v1/campaigns/{campaign_id}/lifecycle", "post"): frozenset({CSRF_HEADER}),
+    ("/api/v1/campaigns/{campaign_id}/members/bulk-add", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/campaigns/{campaign_id}/members/from-candidate-run", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/campaigns/{campaign_id}/members/{member_id}/remove", "post"): frozenset(
+        {CSRF_HEADER}
+    ),
+    ("/api/v1/campaigns/{campaign_id}/outreach-targets", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/outreach-targets/{target_id}", "put"): frozenset({CSRF_HEADER}),
+    ("/api/v1/outreach-targets/{target_id}/tasks", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+    ("/api/v1/outreach-tasks/{task_id}/transitions", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
+}
+
 
 class Phase3AHttpWrite(BaseModel):
     """Strict public write shape; resolved Department is never a body field."""
@@ -28,6 +67,24 @@ def error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
         status_code: {"model": ErrorEnvelope, "description": "Error response"}
         for status_code in status_codes
     }
+
+
+def apply_phase3a_mutation_openapi_header_requirements(document: dict[str, Any]) -> None:
+    """Mark the existing runtime-mandatory Phase 3A headers required in OpenAPI."""
+
+    paths = document["paths"]
+    for (path, method), required_headers in PHASE3A_MUTATION_HEADER_REQUIREMENTS.items():
+        parameters = paths[path][method].get("parameters", [])
+        headers = {
+            parameter["name"]: parameter for parameter in parameters if parameter["in"] == "header"
+        }
+        for header in required_headers:
+            try:
+                headers[header]["required"] = True
+            except KeyError as error:
+                raise RuntimeError(
+                    f"Phase 3A OpenAPI is missing {header} for {method.upper()} {path}"
+                ) from error
 
 
 def closed_query_validation_error(name: str, message: str) -> RequestValidationError:
@@ -127,6 +184,7 @@ def require_single_idempotency_key(request: Request, idempotency_key: str | None
 
 
 __all__ = [
+    "apply_phase3a_mutation_openapi_header_requirements",
     "Phase3AHttpWrite",
     "closed_query_validation_error",
     "decode_keyset_cursor",

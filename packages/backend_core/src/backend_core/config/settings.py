@@ -87,8 +87,12 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime_invariants(self) -> "Settings":
-        if self.app_env == "production" and self.app_master_key is None:
-            raise ValueError("APP_MASTER_KEY is required in production")
+        if self.app_env == "production":
+            master_key = (
+                self.app_master_key.get_secret_value() if self.app_master_key is not None else ""
+            )
+            if not master_key.strip():
+                raise ValueError("APP_MASTER_KEY is required and must be non-blank in production")
         if not (self.freshness_fresh_days < self.freshness_aging_days < self.freshness_stale_days):
             raise ValueError(
                 "FRESHNESS_FRESH_DAYS, FRESHNESS_AGING_DAYS, and FRESHNESS_STALE_DAYS "
