@@ -1,7 +1,7 @@
 "use client";
 
 import { FilterOutlined } from "@ant-design/icons";
-import { Button, InputNumber, Popover, Select, Space, Tooltip } from "antd";
+import { Button, InputNumber, Popover, Select, Space } from "antd";
 
 import { channelLabel, contactFilterLabel, priorityLabel } from "../formatters";
 import type {
@@ -35,6 +35,7 @@ export function TodayFilterBar({
   tracks,
   onChange,
   onReset,
+  showReset = true,
   moreFiltersOpen,
   onMoreFiltersOpenChange,
 }: {
@@ -44,6 +45,7 @@ export function TodayFilterBar({
   tracks?: string[];
   onChange: (changes: Partial<TodayFilters>) => void;
   onReset: () => void;
+  showReset?: boolean;
   moreFiltersOpen?: boolean;
   onMoreFiltersOpenChange?: (open: boolean) => void;
 }) {
@@ -186,15 +188,10 @@ export function TodayFilterBar({
         >
           <Button icon={<FilterOutlined aria-hidden="true" />}>更多筛选</Button>
         </Popover>
-        {hasFilters ? (
-          <Tooltip title="清除全部筛选">
-            <Button
-              type="text"
-              icon={<FilterOutlined />}
-              onClick={onReset}
-              aria-label="重置筛选"
-            />
-          </Tooltip>
+        {hasFilters && showReset ? (
+          <Button type="text" onClick={onReset} aria-label="重置筛选">
+            重置
+          </Button>
         ) : null}
       </div>
     </div>

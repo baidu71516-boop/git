@@ -52,7 +52,7 @@ export function TodayTable({
           {
             title: "达人账号",
             key: "account",
-            width: 190,
+            width: 210,
             render: (_, item) => (
               <Link
                 className="today-account-link"
@@ -71,7 +71,7 @@ export function TodayTable({
             title: "Campaign",
             dataIndex: "campaign_name",
             key: "campaign",
-            width: 160,
+            width: 190,
             render: (value: string) => (
               <Tooltip title={value}>
                 <Text className="today-campaign-name">{value}</Text>
@@ -81,7 +81,7 @@ export function TodayTable({
           {
             title: "当前任务",
             key: "task",
-            width: 130,
+            width: 125,
             render: (_, item) => (
               <div className="today-task-cell">
                 <span>{taskKindLabel(item.kind)}</span>
@@ -99,7 +99,7 @@ export function TodayTable({
             title: "渠道",
             dataIndex: "channel",
             key: "channel",
-            width: 115,
+            width: 132,
             render: (value: TodayItem["channel"]) => (
               <span className="today-channel">{channelLabel(value)}</span>
             ),
@@ -128,7 +128,7 @@ export function TodayTable({
           {
             title: "联系方式",
             key: "contact",
-            width: 125,
+            width: 130,
             render: (_, item) => (
               <span
                 className={`today-contact-summary ${item.has_email ? "is-email" : item.has_contact ? "is-contact" : "is-empty"}`}
@@ -141,7 +141,7 @@ export function TodayTable({
             title: "优先级",
             dataIndex: "priority",
             key: "priority",
-            width: 86,
+            width: 78,
             render: (value: TodayItem["priority"]) => (
               <Tag
                 className={
@@ -158,7 +158,7 @@ export function TodayTable({
             title: "负责人",
             dataIndex: "assigned_operator_id",
             key: "owner",
-            width: 110,
+            width: 100,
             render: (value: string | null) =>
               value ? (operatorNames.get(value) ?? "—") : "—",
           },

@@ -101,6 +101,7 @@ export function TodayWorkspace() {
         tracks={trackOptions}
         onChange={changeFilters}
         onReset={resetFilters}
+        showReset={!todayQuery.isSuccess || items.length > 0}
       />
       {notice ? (
         <Alert

@@ -92,6 +92,7 @@ export function TodayPreviewWorkspace() {
             setFilters((current) => ({ ...current, ...changes }))
           }
           onReset={resetFilters}
+          showReset={scene.state !== "empty"}
           moreFiltersOpen={moreFiltersOpen}
           onMoreFiltersOpenChange={setMoreFiltersOpen}
         />
