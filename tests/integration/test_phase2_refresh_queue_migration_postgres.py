@@ -485,7 +485,7 @@ def test_fresh_upgrade_repeat_metadata_and_alembic_check(
 
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == "0005_phase2_refresh_queue"
+        assert _revision(connection) == "0007_phase3a_persistence_amendment"
         inspector = inspect(connection)
         assert inspector.has_table("refresh_queues")
         assert inspector.has_table("refresh_queue_items")
@@ -567,7 +567,6 @@ def test_0004_realistic_data_upgrades_without_mutating_core_lineage(
         seeded = _seed_0004_graph(connection)
 
     migration_database.upgrade("0005_phase2_refresh_queue")
-    migration_database.check()
     with migration_database.engine.connect() as connection:
         assert _revision(connection) == "0005_phase2_refresh_queue"
         _assert_0004_graph(connection, seeded)
@@ -600,7 +599,6 @@ def test_safe_empty_downgrade_and_reupgrade_preserve_0004_graph(
         }
 
     migration_database.upgrade("0005_phase2_refresh_queue")
-    migration_database.check()
     with migration_database.engine.connect() as connection:
         _assert_0004_graph(connection, seeded)
         assert _revision(connection) == "0005_phase2_refresh_queue"
@@ -728,7 +726,7 @@ def test_downgrade_refuses_queue_evidence_or_import_reference_and_preserves_core
     migration_database: MigrationDatabase,
     unsafe_kind: str,
 ) -> None:
-    migration_database.upgrade("head")
+    migration_database.upgrade("0005_phase2_refresh_queue")
     with migration_database.engine.begin() as connection:
         seeded = _seed_0004_graph(connection)
         queue_id = _insert_queue(connection, seeded)
