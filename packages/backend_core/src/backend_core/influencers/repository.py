@@ -245,11 +245,18 @@ def followers_count_expression(dialect_name: str) -> ColumnElement[Any]:
         )
     return case(
         (
-            func.json_type(
-                InfluencerCurrentMetrics.metrics,
-                "$.followers_count",
-            )
-            == "integer",
+            and_(
+                func.json_type(
+                    InfluencerCurrentMetrics.metrics,
+                    "$.followers_count",
+                )
+                == "integer",
+                func.json_extract(
+                    InfluencerCurrentMetrics.metrics,
+                    "$.followers_count",
+                )
+                >= 0,
+            ),
             func.json_extract(
                 InfluencerCurrentMetrics.metrics,
                 "$.followers_count",

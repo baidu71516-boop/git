@@ -97,27 +97,44 @@ class CampaignMemberAddItem(CampaignWriteContract):
 
 
 class CampaignMemberBulkAddInput(CampaignWriteContract):
-    """Set-oriented Member add request; Campaign identity is a service path argument."""
+    """Direct Member add request; Campaign identity is a service path argument.
+
+    ``source_pool_run_id`` remains in this internal input shape for callers
+    compiled against the WO3 domain contract.  The Phase 3A direct path does
+    not accept provenance; the service rejects a non-null legacy value and
+    callers must use ``CampaignMemberFromCandidateRunBulkAddInput`` instead.
+    The closed HTTP DTO never exposes this compatibility field.
+    """
 
     department_id: UUID | None = None
     source_pool_run_id: UUID | None = None
     members: tuple[CampaignMemberAddItem, ...] = Field(min_length=1, max_length=10_000)
 
     @model_validator(mode="after")
-    def reject_conflicting_duplicate_members(self) -> Self:
-        """Allow exact duplicates for set semantics, but reject ambiguous account choices."""
+    def reject_duplicate_influencers(self) -> Self:
+        """A direct request must select each Influencer exactly once."""
 
-        accounts_by_influencer: dict[UUID, UUID] = {}
+        influencer_ids: set[UUID] = set()
         for member in self.members:
-            existing_account_id = accounts_by_influencer.setdefault(
-                member.influencer_id,
-                member.preferred_platform_account_id,
-            )
-            if existing_account_id != member.preferred_platform_account_id:
+            if member.influencer_id in influencer_ids:
                 raise ValueError(
-                    "one Campaign Member request cannot select multiple preferred accounts "
-                    "for the same influencer"
+                    "one Campaign Member request cannot contain duplicate influencer_id values"
                 )
+            influencer_ids.add(member.influencer_id)
+        return self
+
+
+class CampaignMemberFromCandidateRunBulkAddInput(CampaignWriteContract):
+    """Explicit selected persisted Candidate Pool Members for a provenance-bearing add."""
+
+    department_id: UUID | None = None
+    run_id: UUID
+    member_ids: tuple[UUID, ...] = Field(min_length=1, max_length=10_000)
+
+    @model_validator(mode="after")
+    def require_distinct_member_ids(self) -> Self:
+        if len(set(self.member_ids)) != len(self.member_ids):
+            raise ValueError("member_ids must be distinct")
         return self
 
 
@@ -211,6 +228,36 @@ class CampaignMemberResult(CampaignReadContract):
         return cls.model_validate(model)
 
 
+class CampaignCursor(CampaignReadContract):
+    """The immutable tuple for the Campaign list keyset order."""
+
+    updated_at: datetime
+    id: UUID
+
+
+class CampaignMemberCursor(CampaignReadContract):
+    """A Member-list keyset tuple bound to its resolved scope and Campaign."""
+
+    created_at: datetime
+    id: UUID
+    department_id: UUID
+    campaign_id: UUID
+
+
+class CampaignPage(CampaignReadContract):
+    """Campaign page with an API-adaptable typed keyset continuation."""
+
+    items: tuple[CampaignResult, ...]
+    next_cursor: CampaignCursor | None = None
+
+
+class CampaignMemberPage(CampaignReadContract):
+    """Active Campaign Member page with an API-adaptable typed continuation."""
+
+    items: tuple[CampaignMemberResult, ...]
+    next_cursor: CampaignMemberCursor | None = None
+
+
 def _validate_review_config(
     review_mode: CampaignReviewMode,
     review_count: int | None,
@@ -235,11 +282,16 @@ def _validate_duplicate_policy(
 
 __all__ = [
     "CampaignCreateInput",
+    "CampaignCursor",
     "CampaignMemberAddItem",
     "CampaignMemberBulkAddInput",
     "CampaignMemberBulkAddResult",
+    "CampaignMemberCursor",
+    "CampaignMemberFromCandidateRunBulkAddInput",
+    "CampaignMemberPage",
     "CampaignMemberRemoveInput",
     "CampaignMemberResult",
+    "CampaignPage",
     "CampaignResult",
     "CampaignStatusTransitionInput",
     "CampaignUpdateInput",

@@ -7,7 +7,7 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from backend_core.audit.enums import AuditAction, AuditResult
@@ -23,7 +23,12 @@ from backend_core.growth.enums import (
     CandidateResult,
     Phase3AOperationScope,
 )
-from backend_core.growth.models import CandidatePool, Phase3AIdempotencyRecord
+from backend_core.growth.models import (
+    CandidatePool,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    Phase3AIdempotencyRecord,
+)
 from backend_core.growth.schemas import CandidatePoolCreateInput, TargetingPolicyCreateInput
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
@@ -1549,6 +1554,329 @@ def test_viewer_contact_evidence_is_masked_and_cross_department_is_hidden() -> N
                 with pytest.raises(TargetingError) as hidden:
                     await service.get_pool(other, pool.id)
                 assert hidden.value.status_code == 404
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_scoped_pool_create_keeps_actor_owner_and_target_department_distinct() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                super_context = await _actor(session, role=Role.SUPER_ADMIN)
+                assert super_context.operator is not None
+                same_department_owner = Operator(
+                    department_id=super_context.department.id,
+                    name="Same Department owner",
+                    role=Role.OPERATOR,
+                    status=OperatorStatus.ACTIVE,
+                )
+                inactive_owner = Operator(
+                    department_id=super_context.department.id,
+                    name="Inactive owner",
+                    role=Role.OPERATOR,
+                    status=OperatorStatus.DISABLED,
+                )
+                target_department = Department(
+                    name=f"target-{uuid4().hex}",
+                    password_hash="not-used-by-targeting-tests",
+                    status=DepartmentStatus.ACTIVE,
+                    session_days=30,
+                )
+                session.add_all((same_department_owner, inactive_owner, target_department))
+                await session.flush()
+                target_owner = Operator(
+                    department_id=target_department.id,
+                    name="Target Department owner",
+                    role=Role.OPERATOR,
+                    status=OperatorStatus.ACTIVE,
+                )
+                session.add(target_owner)
+                await session.commit()
+
+                service = _service(session)
+                default_owner = await service.create_pool(
+                    super_context,
+                    CandidatePoolCreateInput(
+                        name="Default owner",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key="candidate-owner-default",
+                )
+                assert default_owner.owner_operator_id == super_context.operator.id
+
+                explicit_owner = await service.create_pool(
+                    super_context,
+                    CandidatePoolCreateInput(
+                        name="Explicit owner",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        owner_operator_id=same_department_owner.id,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key="candidate-owner-explicit",
+                )
+                assert explicit_owner.owner_operator_id == same_department_owner.id
+
+                replay = await service.create_pool(
+                    super_context,
+                    CandidatePoolCreateInput(
+                        name="Explicit owner",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        owner_operator_id=same_department_owner.id,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key="candidate-owner-explicit",
+                )
+                assert replay == explicit_owner
+                with pytest.raises(TargetingError) as changed_owner:
+                    await service.create_pool(
+                        super_context,
+                        CandidatePoolCreateInput(
+                            name="Explicit owner",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            owner_operator_id=super_context.operator.id,
+                            policy=SellerTargetingPolicy(),
+                        ),
+                        idempotency_key="candidate-owner-explicit",
+                    )
+                assert changed_owner.value.status_code == 409
+                assert changed_owner.value.code == "IDEMPOTENCY_KEY_REUSED"
+
+                with pytest.raises(TargetingError) as inactive:
+                    await service.create_pool(
+                        super_context,
+                        CandidatePoolCreateInput(
+                            name="Inactive owner",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            owner_operator_id=inactive_owner.id,
+                            policy=SellerTargetingPolicy(),
+                        ),
+                        idempotency_key="candidate-owner-inactive",
+                    )
+                assert inactive.value.status_code == 404
+                assert inactive.value.code == "OPERATOR_NOT_FOUND"
+
+                with pytest.raises(TargetingError) as missing_cross_owner:
+                    await service.create_pool(
+                        super_context,
+                        CandidatePoolCreateInput(
+                            name="Missing target owner",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            policy=SellerTargetingPolicy(),
+                        ),
+                        department_id=target_department.id,
+                        idempotency_key="candidate-owner-cross-missing",
+                    )
+                assert missing_cross_owner.value.status_code == 409
+                assert missing_cross_owner.value.code == "TARGET_DEPARTMENT_OWNER_REQUIRED"
+
+                with pytest.raises(TargetingError) as wrong_cross_owner:
+                    await service.create_pool(
+                        super_context,
+                        CandidatePoolCreateInput(
+                            name="Wrong target owner",
+                            kind=CandidatePoolKind.POTENTIAL_SELLER,
+                            owner_operator_id=super_context.operator.id,
+                            policy=SellerTargetingPolicy(),
+                        ),
+                        department_id=target_department.id,
+                        idempotency_key="candidate-owner-cross-wrong",
+                    )
+                assert wrong_cross_owner.value.status_code == 404
+                assert wrong_cross_owner.value.code == "OPERATOR_NOT_FOUND"
+
+                cross_department = await service.create_pool(
+                    super_context,
+                    CandidatePoolCreateInput(
+                        name="Target Department pool",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        owner_operator_id=target_owner.id,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    department_id=target_department.id,
+                    idempotency_key="candidate-owner-cross-valid",
+                )
+                assert cross_department.department_id == target_department.id
+                assert cross_department.owner_operator_id == target_owner.id
+
+                own_page = await service.list_pools(
+                    super_context,
+                    cursor=None,
+                    limit=50,
+                )
+                assert {pool.id for pool in own_page.items} == {
+                    default_owner.id,
+                    explicit_owner.id,
+                }
+                target_page = await service.list_pools(
+                    super_context,
+                    cursor=None,
+                    limit=50,
+                    department_id=target_department.id,
+                )
+                assert {pool.id for pool in target_page.items} == {cross_department.id}
+
+                audit = await session.scalar(
+                    select(AuditLog).where(
+                        AuditLog.action == AuditAction.CANDIDATE_POOL_CREATED,
+                        AuditLog.entity_id == cross_department.id,
+                    )
+                )
+                assert audit is not None
+                assert audit.department_id == target_department.id
+                assert audit.operator_id == super_context.operator.id
+                assert audit.after == {
+                    "owner_operator_id": str(target_owner.id),
+                    "status": "ACTIVE",
+                    "version": 2,
+                    "current_policy_id": str(cross_department.current_policy_id),
+                    "cross_department_override": True,
+                }
+
+                non_super = await _actor(session, role=Role.OPERATOR)
+                await session.commit()
+                with pytest.raises(TargetingError) as hidden:
+                    await service.get_pool(
+                        non_super,
+                        cross_department.id,
+                        department_id=target_department.id,
+                    )
+                assert hidden.value.status_code == 404
+                assert hidden.value.code == "RESOURCE_NOT_FOUND"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_immutable_policy_runs_and_members_use_closed_keyset_reads() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                first_account = await _account(session, owner=context.operator)
+                second_account = await _account(session, owner=context.operator)
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Immutable reads",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(),
+                    ),
+                    idempotency_key="candidate-immutable-reads",
+                )
+                assert pool.current_policy_id is not None
+                run_ids = tuple(UUID(int=index) for index in (101, 102, 103))
+                runs = tuple(
+                    CandidatePoolRun(
+                        id=run_id,
+                        pool_id=pool.id,
+                        policy_id=pool.current_policy_id,
+                        as_of=NOW,
+                        input_watermark=None,
+                        status=CandidatePoolRunStatus.COMPLETED,
+                        match_count=1,
+                        unknown_count=1,
+                        not_match_count=0,
+                        error_code=None,
+                        error_message=None,
+                        idempotency_key=f"immutable-read-run-{index}",
+                        request_hash=f"{index:064x}",
+                    )
+                    for index, run_id in zip((101, 102, 103), run_ids, strict=True)
+                )
+                session.add_all(runs)
+                await session.flush()
+                session.add_all(
+                    (
+                        CandidatePoolMember(
+                            id=UUID(int=201),
+                            run_id=run_ids[0],
+                            influencer_id=first_account.influencer_id,
+                            platform_account_id=first_account.id,
+                            result=CandidateResult.MATCH,
+                            reason_codes=[],
+                            redacted_evidence={},
+                            evidence_hash="a" * 64,
+                        ),
+                        CandidatePoolMember(
+                            id=UUID(int=202),
+                            run_id=run_ids[0],
+                            influencer_id=second_account.influencer_id,
+                            platform_account_id=second_account.id,
+                            result=CandidateResult.UNKNOWN,
+                            reason_codes=[],
+                            redacted_evidence={},
+                            evidence_hash="b" * 64,
+                        ),
+                    )
+                )
+                await session.commit()
+
+                policy = await service.get_policy(
+                    context,
+                    pool_id=pool.id,
+                    policy_id=pool.current_policy_id,
+                )
+                assert policy.id == pool.current_policy_id
+                with pytest.raises(TargetingError) as missing_policy:
+                    await service.get_policy(
+                        context,
+                        pool_id=pool.id,
+                        policy_id=UUID(int=999),
+                    )
+                assert missing_policy.value.status_code == 404
+                assert missing_policy.value.code == "TARGETING_POLICY_NOT_FOUND"
+
+                first_run_page = await service.list_runs(
+                    context,
+                    pool_id=pool.id,
+                    cursor=None,
+                    limit=2,
+                )
+                assert [run.id for run in first_run_page.items] == list(run_ids[:2])
+                assert first_run_page.next_cursor == run_ids[1]
+                second_run_page = await service.list_runs(
+                    context,
+                    pool_id=pool.id,
+                    cursor=first_run_page.next_cursor,
+                    limit=2,
+                )
+                assert [run.id for run in second_run_page.items] == [run_ids[2]]
+                assert second_run_page.next_cursor is None
+
+                match_members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run_ids[0],
+                    cursor=None,
+                    limit=50,
+                    result=CandidateResult.MATCH,
+                )
+                assert [member.id for member in match_members.items] == [UUID(int=201)]
+                unknown_members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run_ids[0],
+                    cursor=None,
+                    limit=50,
+                    result=CandidateResult.UNKNOWN,
+                )
+                assert [member.id for member in unknown_members.items] == [UUID(int=202)]
         finally:
             await engine.dispose()
 

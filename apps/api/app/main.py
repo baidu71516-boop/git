@@ -14,6 +14,7 @@ from redis.asyncio import Redis
 
 from app.http.admin import router as admin_router
 from app.http.auth import router as auth_router
+from app.http.campaigns import router as campaigns_router
 from app.http.candidate_pools import router as candidate_pools_router
 from app.http.collection_jobs import router as collection_jobs_router
 from app.http.departments import router as departments_router
@@ -24,8 +25,10 @@ from app.http.import_tasks import ImportTaskDispatcher
 from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
 from app.http.operators import router as operators_router
+from app.http.outreach import router as outreach_router
 from app.http.refresh_queues import router as refresh_queues_router
 from app.http.targeting_tasks import TargetingTaskDispatcher
+from app.http.today import today_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -71,7 +74,12 @@ app.include_router(operators_router)
 app.include_router(admin_router)
 app.include_router(collection_jobs_router)
 app.include_router(candidate_pools_router)
+app.include_router(campaigns_router)
 app.include_router(import_jobs_router)
 app.include_router(influencers_router)
 app.include_router(refresh_queues_router)
+# Register the literal route first so it cannot be captured by the generic UUID
+# detail route in the Outreach router.
+app.include_router(today_router)
+app.include_router(outreach_router)
 register_exception_handlers(app)

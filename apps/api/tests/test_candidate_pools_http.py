@@ -7,13 +7,16 @@ from uuid import UUID, uuid4
 from app.http.candidate_pools import get_candidate_pool_service
 from app.http.dependencies import (
     get_auth_service,
+    get_database_session,
     get_targeting_task_dispatcher,
     require_auth,
 )
+from app.http.phase3a_scope import resolve_phase3a_department_scope
 from app.main import app
 from backend_core.auth import AuthContext, AuthError
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
+from backend_core.campaigns.access import DepartmentScope
 from backend_core.config import get_settings
 from backend_core.growth.enums import (
     CandidatePoolKind,
@@ -27,6 +30,7 @@ from backend_core.growth.schemas import (
     CandidatePoolPage,
     CandidatePoolPublic,
     CandidatePoolRunMemberPage,
+    CandidatePoolRunPage,
     CandidatePoolRunPublic,
     TargetingPolicyCreateInput,
     TargetingPolicyCreateResultPublic,
@@ -210,9 +214,12 @@ class FakeCandidatePoolService:
         idempotency_key: str,
         ip: str,
         user_agent: str,
+        department_id: UUID | None = None,
     ) -> CandidatePoolPublic:
         request = payload.model_dump(mode="json")
-        self.calls.append(("create_pool", (request, idempotency_key, ip, user_agent)))
+        self.calls.append(
+            ("create_pool", (request, idempotency_key, ip, user_agent, department_id))
+        )
         return self._idempotency_replay_or_conflict(
             self.pool_create_requests,
             idempotency_key=idempotency_key,
@@ -229,11 +236,14 @@ class FakeCandidatePoolService:
         idempotency_key: str,
         ip: str,
         user_agent: str,
+        department_id: UUID | None = None,
     ) -> TargetingPolicyCreateResultPublic:
         if pool_id != POOL_ID:
             raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
         request = {"pool_id": str(pool_id), **payload.model_dump(mode="json")}
-        self.calls.append(("append_policy", (request, idempotency_key, ip, user_agent)))
+        self.calls.append(
+            ("append_policy", (request, idempotency_key, ip, user_agent, department_id))
+        )
         return self._idempotency_replay_or_conflict(
             self.policy_create_requests,
             idempotency_key=idempotency_key,
@@ -247,12 +257,19 @@ class FakeCandidatePoolService:
         *,
         cursor: UUID | None,
         limit: int,
+        department_id: UUID | None = None,
     ) -> CandidatePoolPage:
-        self.calls.append(("list_pools", (cursor, limit)))
+        self.calls.append(("list_pools", (cursor, limit, department_id)))
         return CandidatePoolPage(items=(_pool(self.context),), next_cursor=None)
 
-    async def get_pool(self, _context: AuthContext, pool_id: UUID) -> CandidatePoolPublic:
-        self.calls.append(("get_pool", pool_id))
+    async def get_pool(
+        self,
+        _context: AuthContext,
+        pool_id: UUID,
+        *,
+        department_id: UUID | None = None,
+    ) -> CandidatePoolPublic:
+        self.calls.append(("get_pool", (pool_id, department_id)))
         if pool_id != POOL_ID:
             raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
         return _pool(self.context)
@@ -261,8 +278,10 @@ class FakeCandidatePoolService:
         self,
         _context: AuthContext,
         pool_id: UUID,
+        *,
+        department_id: UUID | None = None,
     ) -> tuple[TargetingPolicyPublic, ...]:
-        self.calls.append(("list_policies", pool_id))
+        self.calls.append(("list_policies", (pool_id, department_id)))
         if pool_id != POOL_ID:
             raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
         return (
@@ -279,14 +298,42 @@ class FakeCandidatePoolService:
             ),
         )
 
+    async def get_policy(
+        self,
+        _context: AuthContext,
+        *,
+        pool_id: UUID,
+        policy_id: UUID,
+        department_id: UUID | None = None,
+    ) -> TargetingPolicyPublic:
+        self.calls.append(("get_policy", (pool_id, policy_id, department_id)))
+        if pool_id != POOL_ID or policy_id != POLICY_ID:
+            raise TargetingError(404, "TARGETING_POLICY_NOT_FOUND", "Targeting policy not found")
+        return (await self.list_policies(_context, pool_id, department_id=department_id))[0]
+
+    async def list_runs(
+        self,
+        _context: AuthContext,
+        *,
+        pool_id: UUID,
+        cursor: UUID | None,
+        limit: int,
+        department_id: UUID | None = None,
+    ) -> CandidatePoolRunPage:
+        self.calls.append(("list_runs", (pool_id, cursor, limit, department_id)))
+        if pool_id != POOL_ID:
+            raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
+        return CandidatePoolRunPage(items=(_run(),), next_cursor=None)
+
     async def get_run(
         self,
         _context: AuthContext,
         *,
         pool_id: UUID,
         run_id: UUID,
+        department_id: UUID | None = None,
     ) -> CandidatePoolRunPublic:
-        self.calls.append(("get_run", (pool_id, run_id)))
+        self.calls.append(("get_run", (pool_id, run_id, department_id)))
         if pool_id != POOL_ID or run_id != RUN_ID:
             raise TargetingError(
                 404,
@@ -303,8 +350,12 @@ class FakeCandidatePoolService:
         run_id: UUID,
         cursor: UUID | None,
         limit: int,
+        result: CandidateResult | None = None,
+        department_id: UUID | None = None,
     ) -> CandidatePoolRunMemberPage:
-        self.calls.append(("list_run_members", (pool_id, run_id, cursor, limit)))
+        self.calls.append(
+            ("list_run_members", (pool_id, run_id, cursor, limit, result, department_id))
+        )
         if pool_id != POOL_ID or run_id != RUN_ID:
             raise TargetingError(
                 404,
@@ -337,8 +388,11 @@ class FakeCandidatePoolService:
         idempotency_key: str,
         ip: str,
         user_agent: str,
+        department_id: UUID | None = None,
     ) -> CandidatePoolRunPublic:
-        self.calls.append(("reserve_run", (pool_id, idempotency_key, ip, user_agent)))
+        self.calls.append(
+            ("reserve_run", (pool_id, idempotency_key, ip, user_agent, department_id))
+        )
         if not idempotency_key:
             raise TargetingError(422, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is invalid")
         if pool_id != POOL_ID:
@@ -374,6 +428,10 @@ def _install_overrides(
     app.dependency_overrides[get_auth_service] = FakeAuthService
     app.dependency_overrides[get_candidate_pool_service] = lambda: service
     app.dependency_overrides[get_targeting_task_dispatcher] = lambda: dispatcher
+    app.dependency_overrides[resolve_phase3a_department_scope] = lambda: DepartmentScope(
+        department_id=context.department.id,
+        cross_department_override=False,
+    )
     return dispatcher
 
 
@@ -397,7 +455,10 @@ def test_candidate_pool_read_routes_adapt_closed_service_contracts() -> None:
                 listed = await client.get("/api/v1/candidate-pools?limit=20")
                 assert listed.status_code == 200
                 assert listed.json()["data"]["items"][0]["id"] == str(POOL_ID)
-                assert service.calls[0] == ("list_pools", (None, 20))
+                assert service.calls[0] == (
+                    "list_pools",
+                    (None, 20, context.department.id),
+                )
 
                 closed_query = await client.get("/api/v1/candidate-pools?not_allowed=true")
                 _assert_error(closed_query, status_code=422, code="VALIDATION_ERROR")
@@ -410,18 +471,88 @@ def test_candidate_pool_read_routes_adapt_closed_service_contracts() -> None:
                 assert policies.status_code == 200
                 assert policies.json()["data"][0]["definition"]["policy_type"] == "SELLER_V1"
 
+                policy = await client.get(f"/api/v1/candidate-pools/{POOL_ID}/policies/{POLICY_ID}")
+                assert policy.status_code == 200
+                assert policy.json()["data"]["id"] == str(POLICY_ID)
+
+                runs = await client.get(f"/api/v1/candidate-pools/{POOL_ID}/runs?limit=10")
+                assert runs.status_code == 200
+                assert runs.json()["data"]["items"][0]["id"] == str(RUN_ID)
+
+                closed_runs_query = await client.get(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs?limit=10&limit=11"
+                )
+                _assert_error(closed_runs_query, status_code=422, code="VALIDATION_ERROR")
+
                 run = await client.get(f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}")
                 assert run.status_code == 200
                 assert run.json()["data"]["status"] == "PENDING"
 
                 members = await client.get(
-                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?limit=10"
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?limit=10&result=MATCH"
                 )
                 assert members.status_code == 200
                 assert members.json()["data"]["items"][0]["evidence_hash"] == "d" * 64
 
+                invalid_member_result = await client.get(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?result=NOT_MATCH"
+                )
+                _assert_error(invalid_member_result, status_code=422, code="VALIDATION_ERROR")
+
                 missing = await client.get(f"/api/v1/candidate-pools/{uuid4()}")
                 _assert_error(missing, status_code=404, code="CANDIDATE_POOL_NOT_FOUND")
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
+def test_candidate_pool_scope_header_is_single_valued_and_no_disclosure() -> None:
+    async def scenario() -> None:
+        context = _context()
+        service = FakeCandidatePoolService(context)
+        app.dependency_overrides[require_auth] = lambda: context
+        app.dependency_overrides[get_auth_service] = FakeAuthService
+        app.dependency_overrides[get_candidate_pool_service] = lambda: service
+        # The resolver only needs persistence for an authorized cross-Department
+        # lookup; these focused requests stay in the session Department or fail
+        # before a lookup, so a sentinel makes accidental reads visible.
+        app.dependency_overrides[get_database_session] = lambda: object()
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                omitted = await client.get("/api/v1/candidate-pools")
+                assert omitted.status_code == 200
+                assert service.calls[-1] == (
+                    "list_pools",
+                    (None, 50, context.department.id),
+                )
+
+                own = await client.get(
+                    "/api/v1/candidate-pools",
+                    headers={"X-Department-ID": str(context.department.id)},
+                )
+                assert own.status_code == 200
+                assert service.calls[-1] == (
+                    "list_pools",
+                    (None, 50, context.department.id),
+                )
+
+                cross = await client.get(
+                    "/api/v1/candidate-pools",
+                    headers={"X-Department-ID": str(uuid4())},
+                )
+                _assert_error(cross, status_code=404, code="RESOURCE_NOT_FOUND")
+
+                repeated = await client.get(
+                    "/api/v1/candidate-pools",
+                    headers=[
+                        ("X-Department-ID", str(context.department.id)),
+                        ("X-Department-ID", str(context.department.id)),
+                    ],
+                )
+                _assert_error(repeated, status_code=422, code="VALIDATION_ERROR")
+                assert len(service.calls) == 2
         finally:
             app.dependency_overrides.clear()
 

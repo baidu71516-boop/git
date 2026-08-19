@@ -13,11 +13,12 @@ from datetime import datetime
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import and_, case, func, insert, or_, select, tuple_, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.schema import Table
 
+from backend_core.growth.enums import CandidateResult
 from backend_core.growth.models import (
     Campaign,
     CampaignMember,
@@ -66,11 +67,26 @@ class CampaignMemberRestoreRow:
     added_by_operator_id: UUID
 
 
+@dataclass(frozen=True, slots=True)
+class CampaignRowsPage:
+    """ORM rows and the final returned Campaign keyset tuple."""
+
+    items: tuple[Campaign, ...]
+    next_cursor: tuple[datetime, UUID] | None
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignMemberRowsPage:
+    """Active ORM Member rows and the final returned keyset tuple."""
+
+    items: tuple[CampaignMember, ...]
+    next_cursor: tuple[datetime, UUID] | None
+
+
 class CampaignRepository:
     """Query and lock only the records used by Campaign/Outreach domain services."""
 
     _SINGLE_COLUMN_QUERY_CHUNK_SIZE = 500
-    _PAIR_QUERY_CHUNK_SIZE = 400
     _MEMBER_WRITE_CHUNK_SIZE = 500
     # A restored row needs eight bind values in the portable CASE/CAS UPDATE.
     # Keep SQLite safely below its conservative 999-parameter ceiling.
@@ -90,7 +106,9 @@ class CampaignRepository:
         if department_id is not None:
             statement = statement.where(Campaign.department_id == department_id)
         if for_update:
-            statement = statement.with_for_update()
+            # Refresh a preflighted identity-map row after acquiring the lock;
+            # mutation guards must use the current status/version.
+            statement = statement.execution_options(populate_existing=True).with_for_update()
         return cast(Campaign | None, await self.session.scalar(statement))
 
     async def list_campaigns(self, *, department_id: UUID | None) -> list[Campaign]:
@@ -102,6 +120,36 @@ class CampaignRepository:
                 statement.order_by(Campaign.updated_at.desc(), Campaign.id.desc())
             )
         )
+
+    async def list_campaigns_page(
+        self,
+        *,
+        department_id: UUID,
+        cursor_updated_at: datetime | None,
+        cursor_id: UUID | None,
+        limit: int,
+    ) -> CampaignRowsPage:
+        """Return one Department-scoped Campaign page in the frozen DESC order."""
+
+        statement = select(Campaign).where(Campaign.department_id == department_id)
+        if cursor_updated_at is not None and cursor_id is not None:
+            statement = statement.where(
+                or_(
+                    Campaign.updated_at < cursor_updated_at,
+                    and_(
+                        Campaign.updated_at == cursor_updated_at,
+                        Campaign.id < cursor_id,
+                    ),
+                )
+            )
+        rows = tuple(
+            await self.session.scalars(
+                statement.order_by(Campaign.updated_at.desc(), Campaign.id.desc()).limit(limit + 1)
+            )
+        )
+        items = rows[:limit]
+        next_cursor = (items[-1].updated_at, items[-1].id) if len(rows) > limit and items else None
+        return CampaignRowsPage(items=items, next_cursor=next_cursor)
 
     async def get_member(
         self,
@@ -124,6 +172,41 @@ class CampaignRepository:
         if for_update:
             statement = statement.with_for_update()
         return cast(CampaignMember | None, await self.session.scalar(statement))
+
+    async def list_active_members_page(
+        self,
+        *,
+        campaign_id: UUID,
+        department_id: UUID,
+        cursor_created_at: datetime | None,
+        cursor_id: UUID | None,
+        limit: int,
+    ) -> CampaignMemberRowsPage:
+        """Return active Members in immutable creation order for one scoped Campaign."""
+
+        statement = select(CampaignMember).where(
+            CampaignMember.campaign_id == campaign_id,
+            CampaignMember.department_id == department_id,
+            CampaignMember.removed_at.is_(None),
+        )
+        if cursor_created_at is not None and cursor_id is not None:
+            statement = statement.where(
+                or_(
+                    CampaignMember.created_at > cursor_created_at,
+                    and_(
+                        CampaignMember.created_at == cursor_created_at,
+                        CampaignMember.id > cursor_id,
+                    ),
+                )
+            )
+        rows = tuple(
+            await self.session.scalars(
+                statement.order_by(CampaignMember.created_at, CampaignMember.id).limit(limit + 1)
+            )
+        )
+        items = rows[:limit]
+        next_cursor = (items[-1].created_at, items[-1].id) if len(rows) > limit and items else None
+        return CampaignMemberRowsPage(items=items, next_cursor=next_cursor)
 
     async def list_members_for_influencers(
         self,
@@ -319,63 +402,78 @@ class CampaignRepository:
             statement = statement.with_for_update()
         return cast(InfluencerContact | None, await self.session.scalar(statement))
 
-    async def source_run_department_id(self, source_pool_run_id: UUID) -> UUID | None:
-        return cast(
-            UUID | None,
-            await self.session.scalar(
-                select(CandidatePool.department_id)
-                .join(CandidatePoolRun, CandidatePoolRun.pool_id == CandidatePool.id)
-                .where(CandidatePoolRun.id == source_pool_run_id)
-            ),
-        )
-
     async def get_source_pool_run(
         self,
         source_pool_run_id: UUID,
         *,
         department_id: UUID,
+        for_update: bool = False,
     ) -> CandidatePoolRun | None:
         """Return one Department-owned run without disclosing another Department's row."""
 
+        statement = (
+            select(CandidatePoolRun)
+            .join(CandidatePool, CandidatePoolRun.pool_id == CandidatePool.id)
+            .where(
+                CandidatePoolRun.id == source_pool_run_id,
+                CandidatePool.department_id == department_id,
+            )
+        )
+        if for_update:
+            statement = statement.execution_options(populate_existing=True).with_for_update()
         return cast(
             CandidatePoolRun | None,
-            await self.session.scalar(
-                select(CandidatePoolRun)
-                .join(CandidatePool, CandidatePoolRun.pool_id == CandidatePool.id)
-                .where(
-                    CandidatePoolRun.id == source_pool_run_id,
-                    CandidatePool.department_id == department_id,
-                )
-            ),
+            await self.session.scalar(statement),
         )
 
-    async def list_source_run_member_pairs(
+    async def list_selected_source_run_members(
         self,
+        *,
         source_pool_run_id: UUID,
-        pairs: tuple[tuple[UUID, UUID], ...],
-    ) -> set[tuple[UUID, UUID]]:
-        """Return requested `(influencer_id, platform_account_id)` pairs persisted by a run.
+        member_ids: tuple[UUID, ...],
+    ) -> tuple[CandidatePoolMember, ...]:
+        """Resolve an explicit selected Member-ID set from one completed source run.
 
-        Each pair consumes two bind parameters.  Keep chunks below SQLite's
-        conservative parameter ceiling while remaining equally valid on PostgreSQL.
+        This is one set query for the bounded 10,000-ID public maximum.  The
+        enum predicate is deliberate: only materialized MATCH and UNKNOWN rows
+        may enter the Campaign provenance path.
         """
 
-        if not pairs:
-            return set()
-        persisted: set[tuple[UUID, UUID]] = set()
-        for offset in range(0, len(pairs), self._PAIR_QUERY_CHUNK_SIZE):
-            statement = select(
-                CandidatePoolMember.influencer_id,
-                CandidatePoolMember.platform_account_id,
-            ).where(
+        if not member_ids:
+            return ()
+        statement = (
+            select(CandidatePoolMember)
+            .where(
                 CandidatePoolMember.run_id == source_pool_run_id,
-                tuple_(
-                    CandidatePoolMember.influencer_id,
-                    CandidatePoolMember.platform_account_id,
-                ).in_(pairs[offset : offset + self._PAIR_QUERY_CHUNK_SIZE]),
+                CandidatePoolMember.id.in_(member_ids),
+                CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
             )
-            persisted.update((await self.session.execute(statement)).tuples())
-        return persisted
+            .order_by(CandidatePoolMember.id)
+        )
+        return tuple(await self.session.scalars(statement))
+
+    async def selected_source_run_has_multiple_accounts_per_influencer(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        member_ids: tuple[UUID, ...],
+    ) -> bool:
+        """Perform the no-tie-breaker selection check in SQL over the selected set."""
+
+        if not member_ids:
+            return False
+        statement = (
+            select(CandidatePoolMember.influencer_id)
+            .where(
+                CandidatePoolMember.run_id == source_pool_run_id,
+                CandidatePoolMember.id.in_(member_ids),
+                CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
+            )
+            .group_by(CandidatePoolMember.influencer_id)
+            .having(func.count(func.distinct(CandidatePoolMember.platform_account_id)) > 1)
+            .limit(1)
+        )
+        return await self.session.scalar(statement) is not None
 
     async def list_targets_for_campaign(
         self,
