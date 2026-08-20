@@ -17,9 +17,13 @@ const { Text } = Typography;
 export function CampaignTable({
   items,
   loading,
+  detailHref,
+  onViewCampaign,
 }: {
   items?: Campaign[];
   loading?: boolean;
+  detailHref?: string | ((campaign: Campaign) => string);
+  onViewCampaign?: (campaign: Campaign) => void;
 }) {
   if (loading) {
     return (
@@ -32,16 +36,31 @@ export function CampaignTable({
   }
 
   const columns: ColumnsType<Campaign> = [
-    { title: "活动名称", dataIndex: "name", key: "name", width: 260 },
+    {
+      title: "活动名称",
+      dataIndex: "name",
+      key: "name",
+      width: 340,
+      render: (name: string) => (
+        <div className="campaign-table-name-cell">
+          <span className="campaign-table-name-content" title={name}>
+            {name}
+          </span>
+        </div>
+      ),
+    },
     {
       title: "状态",
       dataIndex: "status",
       key: "status",
-      width: 120,
+      width: 106,
       render: (status: Campaign["status"]) => {
         const presentation = campaignStatusPresentation(status);
         return (
-          <StatusBadge tone={presentation.tone}>
+          <StatusBadge
+            tone={presentation.tone}
+            className="campaign-table-status-badge"
+          >
             {presentation.label}
           </StatusBadge>
         );
@@ -51,9 +70,9 @@ export function CampaignTable({
       title: "负责人",
       dataIndex: "owner",
       key: "owner",
-      width: 180,
+      width: 150,
       render: (owner: Campaign["owner"]) => (
-        <div>
+        <div className="campaign-owner-cell">
           <div>{owner.name}</div>
           {isDisabledCampaignOwner(owner) ? (
             <Text type="secondary" className="campaign-owner-disabled">
@@ -67,18 +86,34 @@ export function CampaignTable({
       title: "更新时间",
       dataIndex: "updated_at",
       key: "updated_at",
-      width: 180,
+      width: 150,
       render: (value: string) => formatCampaignDateTime(value),
     },
     {
       title: "操作",
       key: "action",
-      width: 120,
+      width: 102,
       fixed: "right",
       render: (_, campaign) => (
         <Button
           type="link"
-          href={`/campaigns/${encodeURIComponent(campaign.id)}`}
+          href={(() => {
+            if (onViewCampaign) return undefined;
+            if (typeof detailHref === "function") {
+              return detailHref(campaign);
+            }
+            if (detailHref) {
+              return `${detailHref.replace(/\/$/, "")}/${encodeURIComponent(
+                campaign.id,
+              )}`;
+            }
+            return `/campaigns/${encodeURIComponent(campaign.id)}`;
+          })()}
+          onClick={() => {
+            if (onViewCampaign) {
+              onViewCampaign(campaign);
+            }
+          }}
         >
           查看详情
         </Button>
