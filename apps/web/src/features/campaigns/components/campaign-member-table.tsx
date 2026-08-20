@@ -4,12 +4,10 @@ import { Button, Skeleton, Table, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
 
-import {
-  formatShanghaiDate,
-  platformLabel,
-} from "@/features/influencers/formatters";
+import { platformLabel } from "@/features/influencers/formatters";
 
 import type { CampaignMember } from "../types";
+import { formatCampaignDateTime } from "../formatters";
 
 const { Text } = Typography;
 
@@ -82,7 +80,7 @@ export function CampaignMemberTable({
       dataIndex: "created_at",
       key: "created_at",
       width: 190,
-      render: (value: string) => formatShanghaiDate(value),
+      render: (value: string) => formatCampaignDateTime(value),
     },
   ];
 

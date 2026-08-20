@@ -32,6 +32,7 @@ describe("Campaign member table", () => {
     expect(screen.getByText("抖音 · 小林抖音")).toBeInTheDocument();
     expect(screen.getByText("@xiaolin")).toBeInTheDocument();
     expect(screen.getByText("账号已停用")).toBeInTheDocument();
+    expect(screen.getByText("2026-08-20 09:00")).toBeInTheDocument();
     expect(
       screen.getByRole("columnheader", { name: "操作" }),
     ).toBeInTheDocument();
