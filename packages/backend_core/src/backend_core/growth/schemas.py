@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 
+from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.enums import (
     CandidatePoolKind,
     CandidatePoolRunStatus,
@@ -15,6 +17,10 @@ from backend_core.growth.enums import (
     CandidateResult,
 )
 from backend_core.growth.targeting import TargetingPolicyDefinition, TargetingReasonCode
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 
 
 class TargetingWriteContract(BaseModel):
@@ -45,6 +51,7 @@ class CandidatePoolPublic(TargetingReadContract):
     id: UUID
     department_id: UUID
     owner_operator_id: UUID
+    owner: CampaignOwnerSummary
     name: str
     kind: CandidatePoolKind
     source_collection_job_id: UUID | None
@@ -53,6 +60,32 @@ class CandidatePoolPublic(TargetingReadContract):
     version: int
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def require_matching_owner_projection(self) -> Self:
+        if self.owner.id != self.owner_operator_id:
+            raise ValueError("owner.id must match owner_operator_id")
+        return self
+
+    @classmethod
+    def from_model(cls, model: object, *, owner: CampaignOwnerSummary) -> Self:
+        return cls.model_validate(
+            {
+                field_name: owner if field_name == "owner" else getattr(model, field_name)
+                for field_name in cls.model_fields
+            }
+        )
+
+    @classmethod
+    def from_replay_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        owner: CampaignOwnerSummary,
+    ) -> Self:
+        """Enrich v1 create replays with live canonical owner identity."""
+
+        return cls.model_validate({**payload, "owner": owner})
 
 
 class TargetingPolicyPublic(TargetingReadContract):
@@ -112,6 +145,40 @@ class CandidatePoolMemberPublic(TargetingReadContract):
     evidence_hash: str
     created_at: datetime
     updated_at: datetime
+    influencer: InfluencerIdentitySummary
+    platform_account: PlatformAccountIdentitySummary
+
+    @model_validator(mode="after")
+    def require_consistent_identity_projection(self) -> Self:
+        if self.influencer.id != self.influencer_id:
+            raise ValueError("influencer.id must match influencer_id")
+        if self.platform_account.id != self.platform_account_id:
+            raise ValueError("platform_account.id must match platform_account_id")
+        return self
+
+    @classmethod
+    def from_projection(
+        cls,
+        model: object,
+        *,
+        influencer: InfluencerIdentitySummary,
+        platform_account: PlatformAccountIdentitySummary,
+        reason_codes: tuple[TargetingReasonCode, ...],
+        redacted_evidence: dict[str, Any],
+    ) -> Self:
+        projection = {
+            field_name: getattr(model, field_name)
+            for field_name in cls.model_fields
+            if field_name
+            not in {"influencer", "platform_account", "reason_codes", "redacted_evidence"}
+        }
+        projection.update(
+            influencer=influencer,
+            platform_account=platform_account,
+            reason_codes=reason_codes,
+            redacted_evidence=redacted_evidence,
+        )
+        return cls.model_validate(projection)
 
 
 class CandidatePoolPage(TargetingReadContract):
