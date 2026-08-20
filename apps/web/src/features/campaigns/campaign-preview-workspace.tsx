@@ -17,6 +17,12 @@ import { useSearchParams } from "next/navigation";
 import { AppEmpty } from "@/components/ui/app-empty";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { CampaignDetailView } from "./campaign-detail-view";
+import {
+  buildCampaignMemberPreview,
+  UI2B_SCENE_OPTIONS,
+} from "./campaign-member-preview-fixtures";
+import type { Ui2BSceneKey } from "./campaign-member-preview-fixtures";
 import {
   campaignStatusPresentation,
   formatCampaignDateTime,
@@ -130,7 +136,8 @@ type SceneKey =
   | "edit"
   | "edit-conflict"
   | "closed"
-  | "owner-options-failed";
+  | "owner-options-failed"
+  | Ui2BSceneKey;
 
 type SceneOption = { value: SceneKey; label: string };
 
@@ -144,6 +151,7 @@ const PREVIEW_SCENES: SceneOption[] = [
   { value: "list-empty", label: "拓客活动 · 空状态" },
   { value: "list-load-failed", label: "拓客活动 · 加载失败" },
   { value: "owner-options-failed", label: "拓客活动 · 负责人选项加载失败" },
+  ...UI2B_SCENE_OPTIONS,
 ];
 
 const PREVIEW_SCENE_KEYS: SceneKey[] = [
@@ -157,6 +165,7 @@ const PREVIEW_SCENE_KEYS: SceneKey[] = [
   "edit-conflict",
   "closed",
   "owner-options-failed",
+  ...UI2B_SCENE_OPTIONS.map((option) => option.value),
 ];
 
 const PREVIEW_SCENE_LABELS = new Map(
@@ -182,11 +191,23 @@ function sceneCampaignId(scene: SceneKey): string {
     case "detail-disabled-owner":
       return "campaign-paused-disabled";
     case "closed":
+    case "member-closed":
       return "campaign-closed";
+    case "member-disabled":
+      return "campaign-paused-disabled";
     case "owner-options-failed":
       return "campaign-paused-disabled";
     case "edit":
     case "edit-conflict":
+      return "campaign-active";
+    case "member-list":
+    case "member-add":
+    case "member-selected":
+    case "member-multi-account":
+    case "member-remove":
+    case "member-conflict":
+    case "member-empty":
+    case "member-error":
       return "campaign-active";
     default:
       return "campaign-draft";
@@ -228,6 +249,12 @@ export function CampaignPreviewWorkspace() {
   const createScene = scene === "create" || scene === "owner-options-failed";
   const sceneIsOwnerOptionFailed = scene === "owner-options-failed";
   const hasNextCursor = scene === "list";
+  const isUi2BScene = UI2B_SCENE_OPTIONS.some(
+    (option) => option.value === scene,
+  );
+  const ui2bPreview = isUi2BScene
+    ? buildCampaignMemberPreview(currentCampaign, scene as Ui2BSceneKey)
+    : null;
 
   const operatorsWithCurrent = useMemo(() => {
     const currentOwner = currentCampaign.owner;
@@ -345,10 +372,20 @@ export function CampaignPreviewWorkspace() {
           </span>
         </div>
 
-        {scene.includes("detail") ||
-        scene === "edit" ||
-        scene === "edit-conflict" ||
-        scene === "closed" ? (
+        {isUi2BScene ? (
+          ui2bPreview ? (
+            <CampaignDetailView
+              key={scene}
+              campaignId={currentCampaign.id}
+              role={ui2bPreview.role}
+              hasSelectedOperator={ui2bPreview.hasSelectedOperator}
+              preview={ui2bPreview.detail}
+            />
+          ) : null
+        ) : scene.includes("detail") ||
+          scene === "edit" ||
+          scene === "edit-conflict" ||
+          scene === "closed" ? (
           <section className="campaign-preview-detail-workspace">
             {closedScene ? (
               <Alert

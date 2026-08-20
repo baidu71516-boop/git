@@ -10,6 +10,7 @@ import { ApiClientError } from "@/lib/api/client";
 
 import { AddCampaignMembersDrawer } from "./add-campaign-members-drawer";
 import { CampaignMemberTable } from "./campaign-member-table";
+import { CampaignMembersPreviewSection } from "./campaign-members-preview-section";
 import {
   campaignQueryKeys,
   useBulkAddCampaignMembersMutation,
@@ -24,6 +25,7 @@ import type {
   CampaignRole,
   CampaignScope,
 } from "../types";
+import type { CampaignMembersPreview } from "../preview-types";
 
 const { Text } = Typography;
 
@@ -40,7 +42,15 @@ function mutationError(error: unknown, fallback: string): string {
   return error.code && messages[error.code] ? messages[error.code] : fallback;
 }
 
-export function CampaignMembersSection({
+type CampaignMembersSectionProps = {
+  campaign: Campaign;
+  role: CampaignRole;
+  hasSelectedOperator: boolean;
+  scope?: CampaignScope;
+  preview?: CampaignMembersPreview;
+};
+
+function RemoteCampaignMembersSection({
   campaign,
   role,
   hasSelectedOperator,
@@ -163,7 +173,14 @@ export function CampaignMembersSection({
       <Card
         className="campaign-detail-card campaign-members-card"
         variant="borderless"
-        title="活动达人"
+        title={
+          <div className="campaign-members-heading">
+            <div className="campaign-members-title">活动达人</div>
+            <Text type="secondary">
+              管理当前活动中的达人及其使用的平台账号。
+            </Text>
+          </div>
+        }
         extra={
           canMutate ? (
             <Button
@@ -253,4 +270,14 @@ export function CampaignMembersSection({
       </Modal>
     </>
   );
+}
+
+export function CampaignMembersSection({
+  preview,
+  ...props
+}: CampaignMembersSectionProps) {
+  if (preview) {
+    return <CampaignMembersPreviewSection {...props} preview={preview} />;
+  }
+  return <RemoteCampaignMembersSection {...props} />;
 }

@@ -27,6 +27,7 @@ import {
 } from "./formatters";
 import { useCampaignDetail } from "./queries";
 import type { Campaign, CampaignRole, CampaignScope } from "./types";
+import type { CampaignDetailPreview } from "./preview-types";
 
 const { Text } = Typography;
 
@@ -41,7 +42,15 @@ function ownerContent(campaign: Campaign) {
   );
 }
 
-export function CampaignDetailView({
+type CampaignDetailViewProps = {
+  campaignId: string;
+  role: CampaignRole;
+  hasSelectedOperator: boolean;
+  scope?: CampaignScope;
+  preview?: CampaignDetailPreview;
+};
+
+function RemoteCampaignDetailView({
   campaignId,
   role,
   hasSelectedOperator,
@@ -222,4 +231,81 @@ export function CampaignDetailView({
       ) : null}
     </section>
   );
+}
+
+function PreviewCampaignDetailView({
+  role,
+  hasSelectedOperator,
+  preview,
+}: {
+  role: CampaignRole;
+  hasSelectedOperator: boolean;
+  preview: CampaignDetailPreview;
+}) {
+  const [activeTab, setActiveTab] = useState(preview.activeTab ?? "members");
+  const campaign = preview.campaign;
+  const status = campaignStatusPresentation(campaign.status);
+
+  return (
+    <section className="campaign-workspace" aria-label="拓客活动详情">
+      <PageHeader title={campaign.name} />
+      <div className="campaign-detail-summary">
+        <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+        <Text>负责人：{ownerContent(campaign)}</Text>
+        <Text type="secondary">
+          更新于：{formatCampaignDateTime(campaign.updated_at)}
+        </Text>
+      </div>
+      <Tabs
+        activeKey={activeTab}
+        items={[
+          {
+            key: "basic",
+            label: "基本信息",
+            children: (
+              <Card className="campaign-detail-card" variant="borderless">
+                <Descriptions column={1} size="middle">
+                  <Descriptions.Item label="活动名称">
+                    {campaign.name}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="状态">
+                    <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="负责人">
+                    {ownerContent(campaign)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="创建时间">
+                    {formatCampaignDateTime(campaign.created_at)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="更新时间">
+                    {formatCampaignDateTime(campaign.updated_at)}
+                  </Descriptions.Item>
+                </Descriptions>
+              </Card>
+            ),
+          },
+          {
+            key: "members",
+            label: "活动达人",
+            children: (
+              <CampaignMembersSection
+                campaign={campaign}
+                role={role}
+                hasSelectedOperator={hasSelectedOperator}
+                preview={preview.members}
+              />
+            ),
+          },
+        ]}
+        onChange={(key) => setActiveTab(key as "basic" | "members")}
+      />
+    </section>
+  );
+}
+
+export function CampaignDetailView(props: CampaignDetailViewProps) {
+  if (props.preview) {
+    return <PreviewCampaignDetailView {...props} preview={props.preview} />;
+  }
+  return <RemoteCampaignDetailView {...props} />;
 }
