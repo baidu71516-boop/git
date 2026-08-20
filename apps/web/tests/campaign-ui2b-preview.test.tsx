@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -89,13 +90,28 @@ describe("Campaign UI-2B development preview", () => {
     renderPreview();
 
     const dialog = await waitFor(() => screen.getByRole("dialog"));
-    expect(within(dialog).getByText("已选择 2 位达人")).toBeInTheDocument();
+    expect(within(dialog).getByText("已选择 1 位达人")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("活动账号 · 小红书 · 数码老李"),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText("@shumaolaoli")).toBeInTheDocument();
     expect(
       within(dialog).getByPlaceholderText("搜索达人昵称或平台账号名称"),
     ).toBeDisabled();
-    expect(
-      within(dialog).getByRole("button", { name: "返回搜索结果" }),
-    ).toBeInTheDocument();
+    const returnToSearch = within(dialog).getByRole("button", {
+      name: "返回搜索结果",
+    });
+    fireEvent.click(returnToSearch);
+    const viewSelected = await waitFor(() =>
+      within(dialog).getByRole("button", { name: "查看已选" }),
+    );
+    fireEvent.click(viewSelected);
+    await waitFor(() =>
+      expect(
+        within(dialog).getByText("活动账号 · 小红书 · 数码老李"),
+      ).toBeInTheDocument(),
+    );
+    expect(within(dialog).getByText("@shumaolaoli")).toBeInTheDocument();
   });
 
   it("distinguishes multiple platform accounts in the drawer", async () => {
@@ -103,10 +119,18 @@ describe("Campaign UI-2B development preview", () => {
     renderPreview();
 
     const dialog = await waitFor(() => screen.getByRole("dialog"));
-    expect(within(dialog).getByText("小红书 · 科技小王")).toBeInTheDocument();
-    expect(within(dialog).getByText("@techwang")).toBeInTheDocument();
-    expect(within(dialog).getByText("抖音 · 科技小王")).toBeInTheDocument();
-    expect(within(dialog).getByText("@techwang_dy")).toBeInTheDocument();
+    expect(within(dialog).getByText("小红书 · 数码老李")).toBeInTheDocument();
+    expect(within(dialog).getByText("@shumaolaoli")).toBeInTheDocument();
+    expect(within(dialog).getByText("抖音 · 数码老李")).toBeInTheDocument();
+    expect(within(dialog).getByText("@shumaolaoli_dy")).toBeInTheDocument();
+    const multiAccountRow = Array.from(
+      dialog.querySelectorAll(".campaign-member-candidate"),
+    ).find((row) => row.textContent?.includes("抖音 · 数码老李"));
+    expect(multiAccountRow).toBeDefined();
+    expect(multiAccountRow).not.toHaveTextContent("科技小王");
+    expect(
+      within(dialog).queryByText("小红书 · 科技小王"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps CLOSED read-only and shows the member conflict modal locally", async () => {

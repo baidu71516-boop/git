@@ -130,6 +130,12 @@ const liAccount = account(
   "数码老李",
   "shumaolaoli",
 );
+const liDouyinAccount = account(
+  "account-li-dy",
+  "douyin",
+  "数码老李",
+  "shumaolaoli_dy",
+);
 const noHandleAccount = account(
   "account-no-handle-dy",
   "douyin",
@@ -144,16 +150,21 @@ const disabledAccount = account(
   false,
 );
 
-const singleCandidate = candidate("candidate-single", "科技小王", [
-  techAccount,
-]);
-const multiCandidate = candidate("candidate-multi", "数码老李", [
-  account("account-multi-xhs", "xiaohongshu", "科技小王", "techwang"),
-  account("account-multi-dy", "douyin", "科技小王", "techwang_dy"),
+const techCandidate = candidate("candidate-tech", "科技小王", [techAccount]);
+const singleLiCandidate = candidate("influencer-li", "数码老李", [liAccount]);
+const multiLiCandidate = candidate("influencer-li", "数码老李", [
+  liAccount,
+  liDouyinAccount,
 ]);
 const unavailableCandidate = candidate("candidate-none", "暂无账号达人", []);
 
-const CANDIDATES = [singleCandidate, multiCandidate, unavailableCandidate];
+function candidatesForScene(scene: Ui2BSceneKey): InfluencerListItem[] {
+  return [
+    scene === "member-multi-account" ? multiLiCandidate : singleLiCandidate,
+    techCandidate,
+    unavailableCandidate,
+  ];
+}
 
 function activeMembers(campaignId: string): CampaignMember[] {
   return [
@@ -204,15 +215,17 @@ function membersPreview(
   scene: Ui2BSceneKey,
 ): CampaignMembersPreview {
   const base = activeMembers(campaign.id);
+  const candidates = candidatesForScene(scene);
+  const primaryCandidate = candidates[0]!;
   const addDrawer = {
-    candidates: CANDIDATES,
+    candidates,
     initialSelectedIds:
       scene === "member-selected"
-        ? [singleCandidate.id, multiCandidate.id]
+        ? [primaryCandidate.id]
         : scene === "member-multi-account"
-          ? [multiCandidate.id]
+          ? [primaryCandidate.id]
           : scene === "member-add"
-            ? [singleCandidate.id]
+            ? [primaryCandidate.id]
             : [],
     initialSelectedOnly: scene === "member-selected",
   };
@@ -271,7 +284,7 @@ function membersPreview(
         items: base,
         nextCursor: "preview-next-cursor",
         addDrawer: {
-          candidates: CANDIDATES,
+          candidates,
           initialSelectedIds: [],
         },
       };
