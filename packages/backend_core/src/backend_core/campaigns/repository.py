@@ -27,7 +27,11 @@ from backend_core.growth.models import (
     CandidatePoolMember,
     CandidatePoolRun,
 )
-from backend_core.influencers.models import InfluencerContact, InfluencerPlatformAccount
+from backend_core.influencers.models import (
+    Influencer,
+    InfluencerContact,
+    InfluencerPlatformAccount,
+)
 from backend_core.outreach.enums import OutreachChannel, OutreachEventType
 from backend_core.outreach.models import (
     MessageTemplate,
@@ -86,10 +90,19 @@ class CampaignOwnerRecord:
 
 @dataclass(frozen=True, slots=True)
 class CampaignMemberRowsPage:
-    """Active ORM Member rows and the final returned keyset tuple."""
+    """Active Member display-projection rows and the final keyset tuple."""
 
-    items: tuple[CampaignMember, ...]
+    items: tuple[CampaignMemberProjectionRecord, ...]
     next_cursor: tuple[datetime, UUID] | None
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignMemberProjectionRecord:
+    """One Member with its canonical current, non-Contact display identity."""
+
+    member: CampaignMember
+    influencer: Influencer
+    preferred_platform_account: InfluencerPlatformAccount
 
 
 class CampaignRepository:
@@ -213,6 +226,8 @@ class CampaignRepository:
         department_id: UUID | None,
         for_update: bool = False,
     ) -> CampaignMember | None:
+        """Return the raw Member for non-display domain workflows."""
+
         statement = (
             select(CampaignMember)
             .where(
@@ -227,6 +242,53 @@ class CampaignRepository:
             statement = statement.with_for_update()
         return cast(CampaignMember | None, await self.session.scalar(statement))
 
+    async def get_member_projection(
+        self,
+        member_id: UUID,
+        *,
+        campaign_id: UUID,
+        department_id: UUID,
+        for_update: bool = False,
+    ) -> CampaignMemberProjectionRecord | None:
+        """Return one scoped Member with its current, non-Contact display identity."""
+
+        statement = (
+            select(CampaignMember, Influencer, InfluencerPlatformAccount)
+            .select_from(CampaignMember)
+            .join(
+                Campaign,
+                and_(
+                    Campaign.id == CampaignMember.campaign_id,
+                    Campaign.department_id == CampaignMember.department_id,
+                ),
+            )
+            .join(Influencer, Influencer.id == CampaignMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CampaignMember.preferred_platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CampaignMember.influencer_id,
+                ),
+            )
+            .where(
+                CampaignMember.id == member_id,
+                CampaignMember.campaign_id == campaign_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        statement = statement.where(CampaignMember.department_id == department_id)
+        if for_update:
+            statement = statement.with_for_update(of=CampaignMember)
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        member, influencer, preferred_platform_account = row
+        return CampaignMemberProjectionRecord(
+            member=member,
+            influencer=influencer,
+            preferred_platform_account=preferred_platform_account,
+        )
+
     async def list_active_members_page(
         self,
         *,
@@ -238,10 +300,29 @@ class CampaignRepository:
     ) -> CampaignMemberRowsPage:
         """Return active Members in immutable creation order for one scoped Campaign."""
 
-        statement = select(CampaignMember).where(
-            CampaignMember.campaign_id == campaign_id,
-            CampaignMember.department_id == department_id,
-            CampaignMember.removed_at.is_(None),
+        statement = (
+            select(CampaignMember, Influencer, InfluencerPlatformAccount)
+            .select_from(CampaignMember)
+            .join(
+                Campaign,
+                and_(
+                    Campaign.id == CampaignMember.campaign_id,
+                    Campaign.department_id == CampaignMember.department_id,
+                ),
+            )
+            .join(Influencer, Influencer.id == CampaignMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CampaignMember.preferred_platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CampaignMember.influencer_id,
+                ),
+            )
+            .where(
+                CampaignMember.campaign_id == campaign_id,
+                CampaignMember.department_id == department_id,
+                CampaignMember.removed_at.is_(None),
+            )
         )
         if cursor_created_at is not None and cursor_id is not None:
             statement = statement.where(
@@ -254,12 +335,23 @@ class CampaignRepository:
                 )
             )
         rows = tuple(
-            await self.session.scalars(
+            await self.session.execute(
                 statement.order_by(CampaignMember.created_at, CampaignMember.id).limit(limit + 1)
             )
         )
-        items = rows[:limit]
-        next_cursor = (items[-1].created_at, items[-1].id) if len(rows) > limit and items else None
+        items = tuple(
+            CampaignMemberProjectionRecord(
+                member=member,
+                influencer=influencer,
+                preferred_platform_account=preferred_platform_account,
+            )
+            for member, influencer, preferred_platform_account in rows[:limit]
+        )
+        next_cursor = (
+            (items[-1].member.created_at, items[-1].member.id)
+            if len(rows) > limit and items
+            else None
+        )
         return CampaignMemberRowsPage(items=items, next_cursor=next_cursor)
 
     async def list_members_for_influencers(

@@ -20,6 +20,7 @@ from backend_core.campaigns.channels import ChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.repository import (
     CampaignMemberInsertRow,
+    CampaignMemberProjectionRecord,
     CampaignMemberRestoreRow,
     CampaignOwnerRecord,
     CampaignRepository,
@@ -53,6 +54,10 @@ from backend_core.growth.idempotency import (
 )
 from backend_core.growth.models import Campaign, Phase3AIdempotencyRecord
 from backend_core.influencers.enums import ContactType, ContactValidationStatus, Platform
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 from backend_core.outreach.enums import OutreachChannel
 
 
@@ -164,16 +169,16 @@ class CampaignService:
         department_id: UUID | None = None,
     ) -> CampaignMemberResult:
         scope = await self.access.resolve_read_scope(context, department_id)
-        member = await self.repository.get_member(
+        projection = await self.repository.get_member_projection(
             member_id,
             campaign_id=campaign_id,
             department_id=scope.department_id,
         )
-        if member is None:
+        if projection is None:
             raise CampaignOutreachError(
                 404, "CAMPAIGN_MEMBER_NOT_FOUND", "Campaign member not found"
             )
-        return CampaignMemberResult.from_model(member)
+        return self._member_result_from_projection(projection)
 
     async def list_members(
         self,
@@ -218,7 +223,7 @@ class CampaignService:
                 campaign_id=campaign.id,
             )
         return CampaignMemberPage(
-            items=tuple(CampaignMemberResult.from_model(item) for item in page.items),
+            items=tuple(self._member_result_from_projection(item) for item in page.items),
             next_cursor=next_cursor,
         )
 
@@ -642,18 +647,19 @@ class CampaignService:
         try:
             campaign = await self._locked_campaign(campaign_id, scope)
             self._require_campaign_open_for_mutation(campaign)
-            member = await self.repository.get_member(
+            projection = await self.repository.get_member_projection(
                 member_id,
                 campaign_id=campaign.id,
                 department_id=scope.department_id,
                 for_update=True,
             )
-            if member is None:
+            if projection is None:
                 raise CampaignOutreachError(
                     404,
                     "CAMPAIGN_MEMBER_NOT_FOUND",
                     "Campaign member not found",
                 )
+            member = projection.member
             self._require_expected_version(
                 member.version,
                 remove_input.expected_version,
@@ -671,7 +677,7 @@ class CampaignService:
             member.version += 1
             await self.session.flush()
             await self.session.refresh(member)
-            result = CampaignMemberResult.from_model(member)
+            result = self._member_result_from_projection(projection)
             self.audit.add(
                 action=AuditAction.CAMPAIGN_MEMBERS_REMOVED,
                 result=AuditResult.SUCCESS,
@@ -746,6 +752,29 @@ class CampaignService:
         return CampaignResult.from_model(
             record.campaign,
             owner=CampaignOwnerSummary.model_validate(record.owner),
+        )
+
+    @staticmethod
+    def _member_result_from_projection(
+        record: CampaignMemberProjectionRecord,
+    ) -> CampaignMemberResult:
+        """Build the one safe Member response from the repository's joined graph."""
+
+        member = record.member
+        influencer = record.influencer
+        preferred_platform_account = record.preferred_platform_account
+        if preferred_platform_account.influencer_id != member.influencer_id:
+            raise CampaignOutreachError(
+                500,
+                "CAMPAIGN_MEMBER_PROJECTION_INVALID",
+                "Campaign member preferred account projection is invalid",
+            )
+        return CampaignMemberResult.from_projection(
+            member,
+            influencer=InfluencerIdentitySummary.model_validate(influencer),
+            preferred_platform_account=PlatformAccountIdentitySummary.model_validate(
+                preferred_platform_account
+            ),
         )
 
     async def _campaign_result(self, campaign: Campaign) -> CampaignResult:

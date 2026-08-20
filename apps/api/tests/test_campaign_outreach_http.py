@@ -34,6 +34,11 @@ from backend_core.growth.enums import (
     CampaignStatus,
     DuplicateHistoryPolicy,
 )
+from backend_core.influencers.enums import InfluencerStatus, Platform
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 from backend_core.outreach.enums import (
     OutreachActorType,
     OutreachChannel,
@@ -137,6 +142,20 @@ def _member(context: AuthContext) -> CampaignMemberResult:
         version=2,
         created_at=NOW,
         updated_at=NOW,
+        influencer=InfluencerIdentitySummary(
+            id=INFLUENCER_ID,
+            display_name="Campaign member influencer",
+            status=InfluencerStatus.ACTIVE,
+        ),
+        preferred_platform_account=PlatformAccountIdentitySummary(
+            id=ACCOUNT_ID,
+            platform=Platform.XIAOHONGSHU,
+            platform_account_id="campaign-member-account",
+            account_name="Campaign member account",
+            account_handle="campaign-member-handle",
+            is_active=True,
+        ),
+        is_active=True,
     )
 
 
@@ -325,7 +344,9 @@ class FakeCampaignService:
         **kwargs: object,
     ) -> CampaignMemberResult:
         self.calls.append(("remove_member", (campaign_id, member_id, payload, kwargs)))
-        return _member(self.context)
+        return _member(self.context).model_copy(
+            update={"removed_at": NOW, "version": 3, "is_active": False}
+        )
 
     async def get_member(
         self,
@@ -581,6 +602,16 @@ def test_campaign_and_outreach_http_adapt_closed_domain_routes() -> None:
 
                 members = await client.get(f"/api/v1/campaigns/{CAMPAIGN_ID}/members?limit=1")
                 assert members.status_code == 200
+                member_data = members.json()["data"]["items"][0]
+                assert member_data["influencer"] == {
+                    "id": str(INFLUENCER_ID),
+                    "display_name": "Campaign member influencer",
+                    "status": "active",
+                }
+                assert member_data["preferred_platform_account"]["id"] == str(ACCOUNT_ID)
+                assert member_data["is_active"] is True
+                assert "contacts" not in member_data
+                assert "total" not in members.json()["data"]
                 member_cursor = members.json()["data"]["next_cursor"]
                 cursor_mismatch = await client.get(
                     f"/api/v1/campaigns/{OTHER_CAMPAIGN_ID}/members?cursor={member_cursor}"
@@ -595,6 +626,10 @@ def test_campaign_and_outreach_http_adapt_closed_domain_routes() -> None:
                     headers={"X-CSRF-Token": "campaign-csrf"},
                 )
                 assert removed.status_code == 200
+                removed_data = removed.json()["data"]
+                assert removed_data["influencer"]["id"] == str(INFLUENCER_ID)
+                assert removed_data["preferred_platform_account"]["id"] == str(ACCOUNT_ID)
+                assert removed_data["is_active"] is False
 
                 target_created = await client.post(
                     f"/api/v1/campaigns/{CAMPAIGN_ID}/outreach-targets",
@@ -748,3 +783,21 @@ def test_campaign_outreach_openapi_is_typed_and_keeps_public_mutation_boundaries
     campaign_result = document["components"]["schemas"]["CampaignResult"]
     assert "owner" in campaign_result["required"]
     assert campaign_result["properties"]["owner"]["$ref"].endswith("/CampaignOwnerSummary")
+
+    member_result = document["components"]["schemas"]["CampaignMemberResult"]
+    assert {"influencer", "preferred_platform_account", "is_active"} <= set(
+        member_result["required"]
+    )
+    assert member_result["properties"]["influencer"]["$ref"].endswith("/InfluencerIdentitySummary")
+    assert member_result["properties"]["preferred_platform_account"]["$ref"].endswith(
+        "/PlatformAccountIdentitySummary"
+    )
+    account_identity = document["components"]["schemas"]["PlatformAccountIdentitySummary"]
+    assert set(account_identity["required"]) == {
+        "id",
+        "platform",
+        "platform_account_id",
+        "account_name",
+        "account_handle",
+        "is_active",
+    }

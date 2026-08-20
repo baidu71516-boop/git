@@ -158,15 +158,28 @@ class OwnerSummary(ReadContract):
     status: OperatorStatus
 
 
-class PlatformAccountSummary(ReadContract):
+class InfluencerIdentitySummary(ReadContract):
+    """Canonical public identity shared by read domains without Contact data."""
+
+    id: UUID
+    display_name: str
+    status: InfluencerStatus
+
+
+class PlatformAccountIdentitySummary(ReadContract):
+    """Canonical public platform-account identity shared by read domains."""
+
     id: UUID
     platform: Platform
     platform_account_id: str | None
     account_name: str
     account_handle: str | None
+    is_active: bool
+
+
+class PlatformAccountSummary(PlatformAccountIdentitySummary):
     profile_url: str | None
     source: DataSource
-    is_active: bool
     source_tags: list[str] = Field(default_factory=list)
     last_huitun_observed_at: datetime | None = None
     last_huitun_imported_at: datetime | None = None
@@ -191,10 +204,7 @@ class CurrentContactSummary(ReadContract):
     possible_duplicate_contact: bool
 
 
-class InfluencerListItem(ReadContract):
-    id: UUID
-    display_name: str
-    status: InfluencerStatus
+class InfluencerListItem(InfluencerIdentitySummary):
     crm_stage: CRMStage
     owner: OwnerSummary | None = None
     platform_accounts: list[PlatformAccountSummary] = Field(default_factory=list)
@@ -273,10 +283,7 @@ class CurrentMetricsDetail(ReadContract):
     last_import_row_id: UUID
 
 
-class InfluencerDetail(ReadContract):
-    id: UUID
-    display_name: str
-    status: InfluencerStatus
+class InfluencerDetail(InfluencerIdentitySummary):
     crm_stage: CRMStage
     owner: OwnerSummary | None = None
     created_at: datetime
@@ -321,6 +328,7 @@ __all__ = [
     "InfluencerContactDetail",
     "InfluencerDetail",
     "InfluencerFilterOptions",
+    "InfluencerIdentitySummary",
     "InfluencerListItem",
     "InfluencerListPage",
     "InfluencerListQuery",
@@ -331,6 +339,7 @@ __all__ = [
     "MetricsDocument",
     "OwnerSummary",
     "PlatformAccountDetail",
+    "PlatformAccountIdentitySummary",
     "PlatformAccountSummary",
     "SourceIdentityDetail",
     "SourceStateDetail",

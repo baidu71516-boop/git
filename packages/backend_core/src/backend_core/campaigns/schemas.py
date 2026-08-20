@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Protocol, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
@@ -15,10 +15,30 @@ from backend_core.growth.enums import (
     CampaignStatus,
     DuplicateHistoryPolicy,
 )
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 
 type PositiveStrictInt = Annotated[StrictInt, Field(ge=1)]
 type NonnegativeStrictInt = Annotated[StrictInt, Field(ge=0)]
 type CampaignName = Annotated[StrictStr, Field(min_length=1, max_length=200)]
+
+
+class CampaignMemberProjectionModel(Protocol):
+    """ORM attributes required to build the public Member read projection."""
+
+    id: UUID
+    department_id: UUID
+    campaign_id: UUID
+    influencer_id: UUID
+    preferred_platform_account_id: UUID
+    source_pool_run_id: UUID | None
+    added_by_operator_id: UUID
+    removed_at: datetime | None
+    version: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class CampaignWriteContract(BaseModel):
@@ -239,7 +259,7 @@ class CampaignMemberBulkAddResult(CampaignReadContract):
 
 
 class CampaignMemberResult(CampaignReadContract):
-    """Safe Member metadata; no Contact or account display values are included."""
+    """Safe Member metadata with canonical identity display projections only."""
 
     id: UUID
     department_id: UUID
@@ -252,10 +272,48 @@ class CampaignMemberResult(CampaignReadContract):
     version: int
     created_at: datetime
     updated_at: datetime
+    influencer: InfluencerIdentitySummary
+    preferred_platform_account: PlatformAccountIdentitySummary
+    is_active: bool
 
     @classmethod
-    def from_model(cls, model: object) -> Self:
-        return cls.model_validate(model)
+    def from_projection(
+        cls,
+        model: CampaignMemberProjectionModel,
+        *,
+        influencer: InfluencerIdentitySummary,
+        preferred_platform_account: PlatformAccountIdentitySummary,
+    ) -> Self:
+        return cls.model_validate(
+            {
+                "id": model.id,
+                "department_id": model.department_id,
+                "campaign_id": model.campaign_id,
+                "influencer_id": model.influencer_id,
+                "preferred_platform_account_id": model.preferred_platform_account_id,
+                "source_pool_run_id": model.source_pool_run_id,
+                "added_by_operator_id": model.added_by_operator_id,
+                "removed_at": model.removed_at,
+                "version": model.version,
+                "created_at": model.created_at,
+                "updated_at": model.updated_at,
+                "influencer": influencer,
+                "preferred_platform_account": preferred_platform_account,
+                "is_active": model.removed_at is None,
+            }
+        )
+
+    @model_validator(mode="after")
+    def require_consistent_display_projection(self) -> Self:
+        if self.influencer.id != self.influencer_id:
+            raise ValueError("influencer.id must match influencer_id")
+        if self.preferred_platform_account.id != self.preferred_platform_account_id:
+            raise ValueError(
+                "preferred_platform_account.id must match preferred_platform_account_id"
+            )
+        if self.is_active != (self.removed_at is None):
+            raise ValueError("is_active must match whether removed_at is null")
+        return self
 
 
 class CampaignCursor(CampaignReadContract):
