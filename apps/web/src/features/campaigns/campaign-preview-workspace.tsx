@@ -358,37 +358,40 @@ export function CampaignPreviewWorkspace() {
             ) : null}
             <section className="campaign-preview-detail-head">
               <div className="campaign-preview-head-main">
-                <h2>{currentCampaign.name}</h2>
-                <StatusBadge
-                  tone={status.tone}
-                  className="campaign-preview-detail-status"
-                >
-                  {status.label}
-                </StatusBadge>
-              </div>
-              <div className="campaign-preview-meta">
-                <span>负责人：{ownerLabel}</span>
-                <span>·</span>
-                <span>
-                  更新于：{formatCampaignDateTime(currentCampaign.updated_at)}
-                </span>
-                {isOwnerDisabled ? (
-                  <Tag className="campaign-owner-status-tag">已停用</Tag>
+                <div className="campaign-preview-head-primary">
+                  <h2>{currentCampaign.name}</h2>
+                  <StatusBadge
+                    tone={status.tone}
+                    className="campaign-preview-detail-status"
+                  >
+                    {status.label}
+                  </StatusBadge>
+                  <div className="campaign-preview-meta">
+                    <span>负责人：{ownerLabel}</span>
+                    <span>·</span>
+                    <span>
+                      更新于：
+                      {formatCampaignDateTime(currentCampaign.updated_at)}
+                    </span>
+                    {isOwnerDisabled ? (
+                      <Tag className="campaign-owner-status-tag">已停用</Tag>
+                    ) : null}
+                  </div>
+                </div>
+                {!closedScene ? (
+                  <Button
+                    type="primary"
+                    className="campaign-preview-edit-button"
+                    onClick={() =>
+                      setScene(
+                        currentCampaign.status === "CLOSED" ? "closed" : "edit",
+                      )
+                    }
+                  >
+                    编辑活动
+                  </Button>
                 ) : null}
               </div>
-              {!closedScene ? (
-                <Button
-                  type="primary"
-                  className="campaign-preview-edit-button"
-                  onClick={() =>
-                    setScene(
-                      currentCampaign.status === "CLOSED" ? "closed" : "edit",
-                    )
-                  }
-                >
-                  编辑活动
-                </Button>
-              ) : null}
             </section>
             <section className="campaign-preview-detail-basic">
               <Descriptions column={1} size="middle">

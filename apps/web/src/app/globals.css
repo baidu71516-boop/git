@@ -87,6 +87,13 @@
 
 .campaign-preview-head-main {
   display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.campaign-preview-head-primary {
+  display: flex;
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
