@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
+from backend_core.auth.enums import OperatorStatus
 from backend_core.growth.enums import (
     CampaignReviewMode,
     CampaignStatus,
@@ -145,12 +146,21 @@ class CampaignMemberRemoveInput(CampaignWriteContract):
     expected_version: PositiveStrictInt
 
 
+class CampaignOwnerSummary(CampaignReadContract):
+    """Canonical, Department-local business-owner display projection."""
+
+    id: UUID
+    name: str
+    status: OperatorStatus
+
+
 class CampaignResult(CampaignReadContract):
     """Safe Campaign result and version-1 create replay payload."""
 
     id: UUID
     department_id: UUID
     owner_operator_id: UUID
+    owner: CampaignOwnerSummary
     created_by_operator_id: UUID
     name: str
     status: CampaignStatus
@@ -162,9 +172,22 @@ class CampaignResult(CampaignReadContract):
     created_at: datetime
     updated_at: datetime
 
+    @model_validator(mode="after")
+    def require_matching_owner_projection(self) -> Self:
+        if self.owner.id != self.owner_operator_id:
+            raise ValueError("owner.id must match owner_operator_id")
+        return self
+
     @classmethod
-    def from_model(cls, model: object) -> Self:
-        return cls.model_validate(model)
+    def from_model(cls, model: object, *, owner: CampaignOwnerSummary) -> Self:
+        """Build the closed response from the Campaign and its joined owner."""
+
+        return cls.model_validate(
+            {
+                field_name: owner if field_name == "owner" else getattr(model, field_name)
+                for field_name in cls.model_fields
+            }
+        )
 
     def to_replay_payload(self) -> dict[str, Any]:
         """Return the redacted, versioned value stored by CAMPAIGN_CREATE."""
@@ -172,8 +195,15 @@ class CampaignResult(CampaignReadContract):
         return self.model_dump(mode="json")
 
     @classmethod
-    def from_replay_payload(cls, payload: Mapping[str, object]) -> Self:
-        return cls.model_validate(payload)
+    def from_replay_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        owner: CampaignOwnerSummary,
+    ) -> Self:
+        """Enrich legacy create-replay payloads that predate owner projection."""
+
+        return cls.model_validate({**payload, "owner": owner})
 
 
 class CampaignMemberBulkAddResult(CampaignReadContract):

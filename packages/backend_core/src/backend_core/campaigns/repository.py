@@ -18,6 +18,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.schema import Table
 
+from backend_core.auth.models import Operator
 from backend_core.growth.enums import CandidateResult
 from backend_core.growth.models import (
     Campaign,
@@ -71,8 +72,16 @@ class CampaignMemberRestoreRow:
 class CampaignRowsPage:
     """ORM rows and the final returned Campaign keyset tuple."""
 
-    items: tuple[Campaign, ...]
+    items: tuple[CampaignOwnerRecord, ...]
     next_cursor: tuple[datetime, UUID] | None
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignOwnerRecord:
+    """One Campaign with its required, Department-local owner projection source."""
+
+    campaign: Campaign
+    owner: Operator
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +120,35 @@ class CampaignRepository:
             statement = statement.execution_options(populate_existing=True).with_for_update()
         return cast(Campaign | None, await self.session.scalar(statement))
 
+    async def get_campaign_with_owner(
+        self,
+        campaign_id: UUID,
+        *,
+        department_id: UUID,
+    ) -> CampaignOwnerRecord | None:
+        """Return one scoped Campaign and its owner without filtering disabled owners."""
+
+        row = (
+            await self.session.execute(
+                select(Campaign, Operator)
+                .join(
+                    Operator,
+                    and_(
+                        Operator.id == Campaign.owner_operator_id,
+                        Operator.department_id == Campaign.department_id,
+                    ),
+                )
+                .where(
+                    Campaign.id == campaign_id,
+                    Campaign.department_id == department_id,
+                )
+            )
+        ).first()
+        if row is None:
+            return None
+        campaign, owner = row
+        return CampaignOwnerRecord(campaign=campaign, owner=owner)
+
     async def list_campaigns(self, *, department_id: UUID | None) -> list[Campaign]:
         statement = select(Campaign)
         if department_id is not None:
@@ -131,7 +169,17 @@ class CampaignRepository:
     ) -> CampaignRowsPage:
         """Return one Department-scoped Campaign page in the frozen DESC order."""
 
-        statement = select(Campaign).where(Campaign.department_id == department_id)
+        statement = (
+            select(Campaign, Operator)
+            .join(
+                Operator,
+                and_(
+                    Operator.id == Campaign.owner_operator_id,
+                    Operator.department_id == Campaign.department_id,
+                ),
+            )
+            .where(Campaign.department_id == department_id)
+        )
         if cursor_updated_at is not None and cursor_id is not None:
             statement = statement.where(
                 or_(
@@ -143,12 +191,18 @@ class CampaignRepository:
                 )
             )
         rows = tuple(
-            await self.session.scalars(
+            await self.session.execute(
                 statement.order_by(Campaign.updated_at.desc(), Campaign.id.desc()).limit(limit + 1)
             )
         )
-        items = rows[:limit]
-        next_cursor = (items[-1].updated_at, items[-1].id) if len(rows) > limit and items else None
+        items = tuple(
+            CampaignOwnerRecord(campaign=campaign, owner=owner) for campaign, owner in rows[:limit]
+        )
+        next_cursor = (
+            (items[-1].campaign.updated_at, items[-1].campaign.id)
+            if len(rows) > limit and items
+            else None
+        )
         return CampaignRowsPage(items=items, next_cursor=next_cursor)
 
     async def get_member(

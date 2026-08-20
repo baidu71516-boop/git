@@ -23,6 +23,7 @@ from backend_core.campaigns.schemas import (
     CampaignMemberFromCandidateRunBulkAddInput,
     CampaignMemberPage,
     CampaignMemberResult,
+    CampaignOwnerSummary,
     CampaignPage,
     CampaignResult,
 )
@@ -104,6 +105,11 @@ def _campaign(context: AuthContext, *, campaign_id: UUID = CAMPAIGN_ID) -> Campa
         id=campaign_id,
         department_id=context.department.id,
         owner_operator_id=context.operator.id,
+        owner=CampaignOwnerSummary(
+            id=context.operator.id,
+            name=context.operator.name,
+            status=context.operator.status,
+        ),
         created_by_operator_id=context.operator.id,
         name="Autumn launch",
         status=CampaignStatus.DRAFT,
@@ -736,3 +742,9 @@ def test_campaign_outreach_openapi_is_typed_and_keeps_public_mutation_boundaries
     assert department_header["in"] == "header"
     assert department_header["required"] is False
     assert "Super Admin" in department_header["description"]
+
+    owner_summary = document["components"]["schemas"]["CampaignOwnerSummary"]
+    assert owner_summary["required"] == ["id", "name", "status"]
+    campaign_result = document["components"]["schemas"]["CampaignResult"]
+    assert "owner" in campaign_result["required"]
+    assert campaign_result["properties"]["owner"]["$ref"].endswith("/CampaignOwnerSummary")
