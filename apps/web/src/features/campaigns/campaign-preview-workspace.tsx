@@ -132,17 +132,18 @@ type SceneKey =
   | "closed"
   | "owner-options-failed";
 
-type SceneOption = { key: SceneKey; label: string };
+type SceneOption = { value: SceneKey; label: string };
 
 const PREVIEW_SCENES: SceneOption[] = [
-  { key: "list", label: "拓客活动 · 列表" },
-  { key: "create", label: "拓客活动 · 新建活动" },
-  { key: "detail", label: "拓客活动 · 详情" },
-  { key: "detail-disabled-owner", label: "拓客活动 · 停用负责人" },
-  { key: "edit", label: "拓客活动 · 编辑活动" },
-  { key: "edit-conflict", label: "拓客活动 · 编辑冲突" },
-  { key: "list-empty", label: "拓客活动 · 空状态" },
-  { key: "list-load-failed", label: "拓客活动 · 加载失败" },
+  { value: "list", label: "拓客活动 · 列表" },
+  { value: "create", label: "拓客活动 · 新建活动" },
+  { value: "detail", label: "拓客活动 · 详情" },
+  { value: "detail-disabled-owner", label: "拓客活动 · 停用负责人" },
+  { value: "edit", label: "拓客活动 · 编辑活动" },
+  { value: "edit-conflict", label: "拓客活动 · 编辑冲突" },
+  { value: "list-empty", label: "拓客活动 · 空状态" },
+  { value: "list-load-failed", label: "拓客活动 · 加载失败" },
+  { value: "owner-options-failed", label: "拓客活动 · 负责人选项加载失败" },
 ];
 
 const PREVIEW_SCENE_KEYS: SceneKey[] = [
@@ -160,7 +161,7 @@ const PREVIEW_SCENE_KEYS: SceneKey[] = [
 
 const PREVIEW_SCENE_LABELS = new Map(
   PREVIEW_SCENE_KEYS.map((key) => {
-    const option = PREVIEW_SCENES.find((item) => item.key === key);
+    const option = PREVIEW_SCENES.find((item) => item.value === key);
     return [key, option?.label ?? `拓客活动 · ${key}`] as const;
   }),
 );
