@@ -33,7 +33,8 @@ function response(data: unknown) {
 }
 
 function renderAuthenticatedShell(
-  workspace: "imports" | "import-jobs" | "influencers" | "refresh-queues",
+  workspace:
+    "imports" | "import-jobs" | "influencers" | "refresh-queues" | "campaigns",
   influencerId?: string,
 ) {
   const queryClient = new QueryClient({
@@ -47,6 +48,41 @@ function renderAuthenticatedShell(
 }
 
 describe("AuthShell", () => {
+  it("keeps Campaign reading available without a selected Operator", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "拓展部",
+              status: "active",
+            },
+            operator: null,
+            role: "operator",
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/campaigns?limit=50")) {
+          return response({ items: [], next_cursor: null });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("campaigns");
+
+    expect(await screen.findByText("暂无拓客活动")).toBeInTheDocument();
+    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新建活动" })).toBeDisabled();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/operators"),
+      ),
+    ).toBe(false);
+  });
+
   it("renders the Department login form for an unauthenticated user", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(

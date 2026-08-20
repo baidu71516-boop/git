@@ -18,6 +18,7 @@ export class ApiClientError extends Error {
     message: string,
     public readonly status: number,
     public readonly code: string | null,
+    public readonly details: unknown = null,
   ) {
     super(message);
     this.name = "ApiClientError";
@@ -68,6 +69,7 @@ function errorFromEnvelope(
     response.status === 413
       ? "FILE_TOO_LARGE"
       : (payload?.error?.code ?? "INVALID_RESPONSE"),
+    payload?.error?.details ?? null,
   );
 }
 

@@ -23,6 +23,8 @@ import { ImportJobHistory } from "@/features/imports/import-job-history";
 import { RefreshQueueDetail } from "@/features/refresh-queues/refresh-queue-detail";
 import { RefreshQueueList } from "@/features/refresh-queues/refresh-queue-list";
 import { TodayWorkspace } from "@/features/outreach-today/today-workspace";
+import { CampaignDetailView } from "@/features/campaigns/campaign-detail-view";
+import { CampaignListView } from "@/features/campaigns/campaign-list-view";
 import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
@@ -69,7 +71,8 @@ type AuthWorkspace =
   | "import-jobs"
   | "influencers"
   | "refresh-queues"
-  | "outreach-today";
+  | "outreach-today"
+  | "campaigns";
 
 function workspaceRequiresOperator(
   workspace: AuthWorkspace,
@@ -85,10 +88,12 @@ export function AuthShell({
   workspace = "imports",
   influencerId,
   refreshQueueId,
+  campaignId,
 }: {
   workspace?: AuthWorkspace;
   influencerId?: string;
   refreshQueueId?: string;
+  campaignId?: string;
 }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -276,9 +281,13 @@ export function AuthShell({
             : "数据更新"
           : workspace === "outreach-today"
             ? "今日触达"
-            : influencerId
-              ? "达人详情"
-              : "达人库";
+            : workspace === "campaigns"
+              ? campaignId
+                ? "拓客活动详情"
+                : "拓客活动"
+              : influencerId
+                ? "达人详情"
+                : "达人库";
 
   return (
     <AppShell
@@ -319,6 +328,19 @@ export function AuthShell({
         ) : null
       ) : workspace === "outreach-today" ? (
         <TodayWorkspace />
+      ) : workspace === "campaigns" ? (
+        campaignId ? (
+          <CampaignDetailView
+            campaignId={campaignId}
+            role={auth.role}
+            hasSelectedOperator={auth.operator !== null}
+          />
+        ) : (
+          <CampaignListView
+            role={auth.role}
+            hasSelectedOperator={auth.operator !== null}
+          />
+        )
       ) : auth.role === "viewer" || auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />
       ) : null}

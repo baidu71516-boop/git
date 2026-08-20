@@ -2,6 +2,7 @@
 
 import {
   DatabaseOutlined,
+  FlagOutlined,
   HistoryOutlined,
   LogoutOutlined,
   MenuOutlined,
@@ -34,6 +35,11 @@ const navGroups = [
         label: "今日触达",
         href: "/outreach/today",
         icon: <ThunderboltOutlined aria-hidden="true" />,
+      },
+      {
+        label: "拓客活动",
+        href: "/campaigns",
+        icon: <FlagOutlined aria-hidden="true" />,
       },
       {
         label: "达人库",
