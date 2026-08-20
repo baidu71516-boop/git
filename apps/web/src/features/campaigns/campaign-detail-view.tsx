@@ -6,17 +6,20 @@ import {
   Card,
   Descriptions,
   Skeleton,
+  Tabs,
   Tooltip,
   Typography,
   message,
 } from "antd";
 import { useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { ApiClientError } from "@/lib/api/client";
 
 import { EditCampaignModal } from "./components/edit-campaign-modal";
+import { CampaignMembersSection } from "./components/campaign-members-section";
 import {
   campaignStatusPresentation,
   formatCampaignDateTime,
@@ -50,6 +53,9 @@ export function CampaignDetailView({
   scope?: CampaignScope;
 }) {
   const [messageApi, contextHolder] = message.useMessage();
+  const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [editingCampaign, setEditingCampaign] = useState<Campaign | null>(null);
   const detailQuery = useCampaignDetail(campaignId, scope);
   const campaign = detailQuery.data;
@@ -119,6 +125,7 @@ export function CampaignDetailView({
   }
 
   if (!campaign) return null;
+  const activeTab = searchParams.get("tab") === "members" ? "members" : "basic";
   const status = campaignStatusPresentation(campaign.status);
   const editAction = canEdit ? (
     canMutate ? (
@@ -145,29 +152,51 @@ export function CampaignDetailView({
           更新于：{formatCampaignDateTime(campaign.updated_at)}
         </Text>
       </div>
-      <Card
-        className="campaign-detail-card"
-        variant="borderless"
-        title="基本信息"
-      >
-        <Descriptions column={1} size="middle">
-          <Descriptions.Item label="活动名称">
-            {campaign.name}
-          </Descriptions.Item>
-          <Descriptions.Item label="状态">
-            <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-          </Descriptions.Item>
-          <Descriptions.Item label="负责人">
-            {ownerContent(campaign)}
-          </Descriptions.Item>
-          <Descriptions.Item label="创建时间">
-            {formatCampaignDateTime(campaign.created_at)}
-          </Descriptions.Item>
-          <Descriptions.Item label="更新时间">
-            {formatCampaignDateTime(campaign.updated_at)}
-          </Descriptions.Item>
-        </Descriptions>
-      </Card>
+      <Tabs
+        activeKey={activeTab}
+        items={[
+          {
+            key: "basic",
+            label: "基本信息",
+            children: (
+              <Card className="campaign-detail-card" variant="borderless">
+                <Descriptions column={1} size="middle">
+                  <Descriptions.Item label="活动名称">
+                    {campaign.name}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="状态">
+                    <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="负责人">
+                    {ownerContent(campaign)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="创建时间">
+                    {formatCampaignDateTime(campaign.created_at)}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="更新时间">
+                    {formatCampaignDateTime(campaign.updated_at)}
+                  </Descriptions.Item>
+                </Descriptions>
+              </Card>
+            ),
+          },
+          {
+            key: "members",
+            label: "活动达人",
+            children: (
+              <CampaignMembersSection
+                campaign={campaign}
+                role={role}
+                hasSelectedOperator={hasSelectedOperator}
+                scope={scope}
+              />
+            ),
+          },
+        ]}
+        onChange={(key) =>
+          router.push(key === "members" ? `${pathname}?tab=members` : pathname)
+        }
+      />
       {editingCampaign ? (
         <EditCampaignModal
           open

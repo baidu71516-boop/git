@@ -52,6 +52,7 @@ const shanghaiTooltipDateTime = new Intl.DateTimeFormat("zh-CN", {
 
 const platformLabels: Record<string, string> = {
   xiaohongshu: "小红书",
+  douyin: "抖音",
 };
 
 const contactTypeLabels: Record<string, string> = {
@@ -125,7 +126,7 @@ export function formatExactFollowers(value: number): string {
 }
 
 export function platformLabel(value: string): string {
-  return platformLabels[value] ?? value;
+  return platformLabels[value] ?? "未知平台";
 }
 
 export function contactTypeLabel(value: string): string {

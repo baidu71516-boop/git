@@ -325,6 +325,63 @@
   flex-direction: column;
 }
 
+.campaign-members-card .ant-card-head {
+  min-height: 62px;
+}
+
+.campaign-members-card .ant-card-head-title {
+  padding: 18px 0;
+}
+
+.campaign-member-table .ant-table-tbody > tr > td {
+  vertical-align: middle;
+}
+
+.campaign-member-account {
+  display: grid;
+  gap: 2px;
+}
+
+.campaign-member-drawer-content {
+  display: grid;
+  gap: 18px;
+}
+
+.campaign-member-drawer-toolbar,
+.campaign-member-drawer-footer,
+.campaign-member-drawer-pagination {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.campaign-member-drawer-toolbar .ant-input {
+  max-width: 520px;
+}
+
+.campaign-member-drawer-footer,
+.campaign-member-drawer-pagination {
+  justify-content: space-between;
+}
+
+.campaign-member-drawer-loading {
+  display: grid;
+  min-height: 240px;
+  place-items: center;
+}
+
+.campaign-member-candidate-list {
+  display: grid;
+  border-top: 1px solid var(--app-border);
+}
+
+.campaign-member-candidate {
+  display: grid;
+  gap: 10px;
+  padding: 16px 4px;
+  border-bottom: 1px solid var(--app-border);
+}
+
 .campaign-table .ant-table-tbody > tr > td {
   height: 50px;
   padding: 10px 14px;
