@@ -440,6 +440,7 @@ export function CandidateRunDetailView({
   previewSelectedMembers,
   previewEvidence,
   previewModalOpen = false,
+  previewSelectionAttempted = false,
   previewState,
 }: {
   poolId: string;
@@ -450,6 +451,7 @@ export function CandidateRunDetailView({
   previewSelectedMembers?: CandidateMember[];
   previewEvidence?: CandidateMember | null;
   previewModalOpen?: boolean;
+  previewSelectionAttempted?: boolean;
   previewState?: "error";
 }) {
   const activePolling = !previewMode;
@@ -493,6 +495,15 @@ export function CandidateRunDetailView({
     const timer = window.setTimeout(() => setEvidence(previewEvidence), 0);
     return () => window.clearTimeout(timer);
   }, [previewEvidence, previewMode]);
+  useEffect(() => {
+    if (!previewMode || !previewSelectionAttempted) return;
+    const timer = window.setTimeout(() => {
+      void messageApi.warning(
+        "同一达人只能选择一个平台账号，请先取消已选账号。",
+      );
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [messageApi, previewMode, previewSelectionAttempted]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
   const policy = policies.data?.find((item) => item.id === run?.policy_id);
@@ -778,7 +789,14 @@ export function CandidateRunDetailView({
               平台账号：
               <Account member={evidence} />
             </p>
-            <p>结果：{candidateResultPresentation(evidence.result).label}</p>
+            <p>
+              结果：{" "}
+              <StatusBadge
+                tone={candidateResultPresentation(evidence.result).tone}
+              >
+                {candidateResultPresentation(evidence.result).label}
+              </StatusBadge>
+            </p>
             <p>
               判断原因：
               {evidence.reason_codes.map(candidateReasonLabel).join("、")}

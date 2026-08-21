@@ -236,9 +236,11 @@ function PolicyHistory({
 function RunHistory({
   poolId,
   previewMode = false,
+  onCreate,
 }: {
   poolId: string;
   previewMode?: boolean;
+  onCreate?: () => void;
 }) {
   const query = useCandidateRuns(poolId, true);
   const runs = useMemo(
@@ -293,6 +295,14 @@ function RunHistory({
       className="candidate-detail-card campaign-detail-card"
       variant="borderless"
     >
+      <div className="candidate-run-history-header">
+        <Text strong>生成记录</Text>
+        {onCreate ? (
+          <Button type="primary" onClick={onCreate}>
+            生成候选结果
+          </Button>
+        ) : null}
+      </div>
       {query.isPending ? (
         <Skeleton active paragraph={{ rows: 7 }} />
       ) : query.isError ? (
@@ -511,16 +521,15 @@ export function CandidatePoolDetailView({
             label: "生成记录",
             children:
               tab === "runs" ? (
-                <RunHistory poolId={poolId} previewMode={previewMode} />
+                <RunHistory
+                  poolId={poolId}
+                  previewMode={previewMode}
+                  onCreate={showCreate ? () => setOpen(true) : undefined}
+                />
               ) : null,
           },
         ]}
       />
-      {showCreate ? (
-        <Button type="primary" onClick={() => setOpen(true)}>
-          生成候选结果
-        </Button>
-      ) : null}
       <Modal
         title="生成新的候选结果？"
         open={open}

@@ -12,8 +12,9 @@ export function StatusBadge({
   tone = "default",
   className,
 }: StatusBadgeProps) {
+  const color = tone === "danger" ? "red" : tone;
   return (
-    <Tag color={tone === "default" ? undefined : tone} className={className}>
+    <Tag color={color === "default" ? undefined : color} className={className}>
       {children}
     </Tag>
   );

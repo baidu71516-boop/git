@@ -188,6 +188,7 @@ function PreviewContent({ scene }: { scene: Scene }) {
         scene === "seller-evidence" || buyerEvidence ? previewEvidence : null
       }
       previewModalOpen={scene === "campaign-selector"}
+      previewSelectionAttempted={scene === "multi-account"}
     />
   );
 }

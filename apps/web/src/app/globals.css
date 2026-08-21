@@ -448,6 +448,15 @@
   margin: 0;
 }
 
+.candidate-run-history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 0 18px;
+  border-bottom: 1px solid #eef2f6;
+}
+
 .candidate-summary-band {
   padding: 0;
 }
