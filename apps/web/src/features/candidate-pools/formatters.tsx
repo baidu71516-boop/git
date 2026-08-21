@@ -25,7 +25,7 @@ const reasons: Record<string, string> = {
   ACTIVITY_MISSING: "活跃数据缺失",
   AMBIGUOUS_CLASSIFICATION: "分类信息不明确",
   CATEGORY_ALIGNED: "分类方向一致",
-  CATEGORY_MISMATCH: "分类方向不一致",
+  CATEGORY_MISMATCH: "分类方向不匹配",
   CLASSIFICATION_STALE: "分类信息已过期",
   COLLECTION_CATEGORY_UNMAPPED: "采集分类未映射",
   COLLECTION_CONTEXT_MISSING: "采集上下文缺失",

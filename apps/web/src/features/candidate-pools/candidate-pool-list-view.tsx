@@ -29,23 +29,31 @@ function Owner({ pool }: { pool: CandidatePool }) {
   );
 }
 
-export function CandidatePoolListView() {
+export function CandidatePoolListView({
+  previewState,
+  previewMode = false,
+}: {
+  previewState?: "empty" | "error";
+  previewMode?: boolean;
+}) {
   const query = useCandidatePoolList();
   const pools = useMemo(
     () => query.data?.pages.flatMap((page) => page.items) ?? [],
     [query.data],
   );
   const columns = [
-    { title: "候选池名称", dataIndex: "name", key: "name" },
+    { title: "候选池名称", dataIndex: "name", key: "name", width: 250 },
     {
       title: "类型",
       key: "kind",
+      width: 128,
       render: (_: unknown, pool: CandidatePool) =>
         candidatePoolKindLabel(pool.kind),
     },
     {
       title: "状态",
       key: "status",
+      width: 110,
       render: (_: unknown, pool: CandidatePool) => {
         const status = candidatePoolStatus(pool.status);
         return <StatusBadge tone={status.tone}>{status.label}</StatusBadge>;
@@ -54,34 +62,46 @@ export function CandidatePoolListView() {
     {
       title: "负责人",
       key: "owner",
+      width: 160,
       render: (_: unknown, pool: CandidatePool) => <Owner pool={pool} />,
     },
     {
       title: "更新时间",
       key: "updated_at",
+      width: 168,
       render: (_: unknown, pool: CandidatePool) =>
         candidateDateTime(pool.updated_at),
     },
     {
       title: "操作",
       key: "action",
+      width: 104,
       render: (_: unknown, pool: CandidatePool) => (
-        <Link href={`/candidate-pools/${encodeURIComponent(pool.id)}`}>
+        <Link
+          className="candidate-table-action"
+          href={`/candidate-pools/${encodeURIComponent(pool.id)}`}
+        >
           查看详情
         </Link>
       ),
     },
   ];
   return (
-    <section className="campaign-workspace" aria-label="候选池">
+    <section
+      className="candidate-pool-workspace campaign-workspace"
+      aria-label="候选池"
+    >
       <div>
         <h2 className="page-title">候选池</h2>
         <Text type="secondary">查看用于筛选目标达人的候选池。</Text>
       </div>
-      <Card className="campaign-list-card" variant="borderless">
+      <Card
+        className="candidate-pool-list-card campaign-list-card"
+        variant="borderless"
+      >
         {query.isPending ? (
           <Skeleton active paragraph={{ rows: 7 }} />
-        ) : query.isError ? (
+        ) : query.isError || previewState === "error" ? (
           <Alert
             type="error"
             showIcon
@@ -91,7 +111,7 @@ export function CandidatePoolListView() {
               <Button onClick={() => void query.refetch()}>重新加载</Button>
             }
           />
-        ) : pools.length === 0 ? (
+        ) : previewState === "empty" || pools.length === 0 ? (
           <div className="campaign-empty-state">
             <AppEmpty description="暂无候选池" />
             <Text type="secondary">当前没有可查看的候选池。</Text>
@@ -100,7 +120,7 @@ export function CandidatePoolListView() {
           <>
             <div className="campaign-table-shell">
               <Table<CandidatePool>
-                className="campaign-table"
+                className="candidate-pool-table campaign-table"
                 rowKey="id"
                 columns={columns}
                 dataSource={pools}
@@ -111,8 +131,10 @@ export function CandidatePoolListView() {
               {query.hasNextPage ? (
                 <Button
                   icon={<ReloadOutlined aria-hidden="true" />}
-                  loading={query.isFetchingNextPage}
-                  onClick={() => void query.fetchNextPage()}
+                  loading={previewMode ? false : query.isFetchingNextPage}
+                  onClick={() => {
+                    if (!previewMode) void query.fetchNextPage();
+                  }}
                 >
                   加载更多
                 </Button>

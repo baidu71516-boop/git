@@ -322,6 +322,189 @@
   margin-bottom: 16px;
 }
 
+.candidate-pool-preview-workspace {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.candidate-pool-preview-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 46px;
+  padding: 9px 12px;
+  border: 1px solid #dbe5f1;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.candidate-pool-preview-toolbar-label {
+  color: #30435c;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.candidate-pool-preview-toolbar .ant-select {
+  min-width: 230px;
+}
+
+.candidate-preview-ready-state {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--app-text-secondary);
+}
+
+.candidate-pool-workspace,
+.candidate-pool-detail-workspace,
+.candidate-run-detail-workspace {
+  min-width: 0;
+}
+
+.candidate-pool-list-card,
+.candidate-detail-card,
+.candidate-summary-band,
+.candidate-results-card {
+  border: 1px solid var(--app-border);
+  box-shadow: none;
+}
+
+.candidate-pool-list-card > .ant-card-body,
+.candidate-detail-card > .ant-card-body,
+.candidate-summary-band > .ant-card-body,
+.candidate-results-card > .ant-card-body {
+  padding: 0;
+}
+
+.candidate-pool-table .ant-table {
+  table-layout: fixed;
+}
+
+.candidate-pool-table .ant-table-thead > tr > th {
+  height: 42px;
+  padding: 9px 12px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.candidate-pool-table .ant-table-tbody > tr > td {
+  height: 50px;
+  padding: 9px 12px;
+  color: var(--app-text);
+  font-size: 13px;
+  vertical-align: middle;
+}
+
+.candidate-pool-table .ant-table-tbody > tr:hover > td {
+  background: #f8fbff;
+}
+
+.candidate-pool-table .ant-table-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.candidate-table-action {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.candidate-current-policy {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border: 1px solid #cfe0d2;
+  border-radius: 999px;
+  color: #4d7c57;
+  background: #f2f8f3;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.candidate-results-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 58px;
+  padding: 0 18px;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.candidate-results-toolbar .ant-tabs {
+  min-width: 0;
+}
+
+.candidate-results-toolbar .ant-tabs-nav {
+  margin: 0;
+}
+
+.candidate-summary-band {
+  padding: 0;
+}
+
+.candidate-summary-band .ant-space {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px !important;
+  padding: 15px 18px;
+  color: #30435c;
+  font-size: 13px;
+}
+
+.candidate-evidence-row {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.candidate-evidence-row:last-child {
+  border-bottom: 0;
+}
+
+.candidate-campaign-list {
+  display: grid;
+  margin-top: 14px;
+  border-top: 1px solid var(--app-border);
+}
+
+.candidate-campaign-option {
+  display: grid !important;
+  grid-template-columns: auto minmax(150px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.candidate-campaign-option .ant-radio {
+  align-self: center;
+}
+
+@media (max-width: 760px) {
+  .candidate-results-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 8px 12px;
+  }
+
+  .candidate-pool-table .ant-table {
+    min-width: 820px;
+  }
+}
+
 .campaign-detail-summary {
   display: flex;
   flex-wrap: wrap;

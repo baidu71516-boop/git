@@ -247,6 +247,7 @@ function CampaignSelector({
   onClose,
   onSuccess,
   onInvalidSelection,
+  previewMode = false,
 }: {
   open: boolean;
   selected: CandidateMember[];
@@ -254,6 +255,7 @@ function CampaignSelector({
   onClose: () => void;
   onSuccess: () => void;
   onInvalidSelection: () => void;
+  previewMode?: boolean;
 }) {
   const campaigns = useInfiniteQuery({
     queryKey: ["candidate-pools", "campaign-selector"],
@@ -284,6 +286,10 @@ function CampaignSelector({
   ).length;
   async function submit() {
     if (!campaignId) return;
+    if (previewMode) {
+      onSuccess();
+      return;
+    }
     const selectedCampaignId = campaignId;
     const memberIds = selected.map((member) => member.id);
     const payload = JSON.stringify({ campaignId, memberIds });
@@ -333,7 +339,7 @@ function CampaignSelector({
       title="加入拓客活动"
       open={open}
       width={680}
-      okText="加入活动"
+      okText="加入拓客活动"
       cancelText="取消"
       confirmLoading={mutation.isPending}
       okButtonProps={{ disabled: !campaignId }}
@@ -396,10 +402,7 @@ function CampaignSelector({
                 >
                   <span>{campaign.name}</span>
                   <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                  <Text type="secondary">
-                    负责人：{campaign.owner.name}
-                    {disabled ? " · 已关闭" : ""}
-                  </Text>
+                  <Text type="secondary">负责人：{campaign.owner.name}</Text>
                 </Radio>
               );
             })}
@@ -408,8 +411,10 @@ function CampaignSelector({
             <div className="campaign-pagination-footer">
               <Button
                 icon={<ReloadOutlined aria-hidden="true" />}
-                loading={campaigns.isFetchingNextPage}
-                onClick={() => void campaigns.fetchNextPage()}
+                loading={previewMode ? false : campaigns.isFetchingNextPage}
+                onClick={() => {
+                  if (!previewMode) void campaigns.fetchNextPage();
+                }}
               >
                 加载更多活动
               </Button>
@@ -426,13 +431,23 @@ export function CandidateRunDetailView({
   runId,
   role,
   hasSelectedOperator,
+  previewMode = false,
+  previewSelectedMembers,
+  previewEvidence,
+  previewModalOpen = false,
+  previewState,
 }: {
   poolId: string;
   runId: string;
   role: CandidatePoolRole;
   hasSelectedOperator: boolean;
+  previewMode?: boolean;
+  previewSelectedMembers?: CandidateMember[];
+  previewEvidence?: CandidateMember | null;
+  previewModalOpen?: boolean;
+  previewState?: "error";
 }) {
-  const activePolling = true;
+  const activePolling = !previewMode;
   const runQuery = useCandidateRun(poolId, runId, activePolling);
   const policies = useCandidatePolicies(poolId, Boolean(runQuery.data));
   const [filter, setFilter] = useState<"all" | "MATCH" | "UNKNOWN">("all");
@@ -442,17 +457,25 @@ export function CandidateRunDetailView({
     filter === "all" ? undefined : filter,
     runQuery.data?.status === "COMPLETED",
   );
-  const [selected, setSelected] = useState<Record<string, CandidateMember>>({});
-  const [evidence, setEvidence] = useState<CandidateMember | null>(null);
-  const [modalOpen, setModalOpen] = useState(false);
+  const [selected, setSelected] = useState<Record<string, CandidateMember>>(
+    () =>
+      Object.fromEntries(
+        (previewSelectedMembers ?? []).map((item) => [item.id, item]),
+      ),
+  );
+  const [evidence, setEvidence] = useState<CandidateMember | null>(
+    previewEvidence ?? null,
+  );
+  const [modalOpen, setModalOpen] = useState(previewModalOpen);
   const [messageApi, holder] = message.useMessage();
   useEffect(() => {
+    if (previewMode) return;
     function visible() {
       if (!document.hidden) void runQuery.refetch();
     }
     document.addEventListener("visibilitychange", visible);
     return () => document.removeEventListener("visibilitychange", visible);
-  }, [runQuery]);
+  }, [previewMode, runQuery]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
   const policy = policies.data?.find((item) => item.id === run?.policy_id);
@@ -504,6 +527,19 @@ export function CandidateRunDetailView({
         />
       </section>
     );
+  if (previewState === "error") {
+    return (
+      <section className="candidate-run-detail-workspace campaign-workspace">
+        <Alert
+          type="error"
+          showIcon
+          title="候选结果加载失败"
+          description="请稍后重试。"
+          action={<Button onClick={() => undefined}>重新加载</Button>}
+        />
+      </section>
+    );
+  }
   if (!run) return null;
   const status = candidateRunStatus(run.status);
   const terminal = run.status === "COMPLETED" || run.status === "FAILED";
@@ -573,7 +609,10 @@ export function CandidateRunDetailView({
         ? "暂无信息不足的候选达人"
         : "暂无候选结果";
   return (
-    <section className="campaign-workspace" aria-label="候选结果">
+    <section
+      className="candidate-run-detail-workspace campaign-workspace"
+      aria-label="候选结果"
+    >
       {holder}
       <div>
         <h2 className="page-title">
@@ -611,14 +650,20 @@ export function CandidateRunDetailView({
         />
       ) : (
         <>
-          <Card className="campaign-detail-card" variant="borderless">
+          <Card
+            className="candidate-summary-band campaign-detail-card"
+            variant="borderless"
+          >
             <Space size="large">
               <span>符合条件 {run.match_count}</span>
               <span>信息不足 {run.unknown_count}</span>
               <span>不符合条件 {run.not_match_count}</span>
             </Space>
           </Card>
-          <Card className="campaign-detail-card" variant="borderless">
+          <Card
+            className="candidate-results-card campaign-detail-card"
+            variant="borderless"
+          >
             <div className="candidate-results-toolbar">
               <Tabs
                 activeKey={filter}
@@ -673,7 +718,7 @@ export function CandidateRunDetailView({
               <>
                 <div className="campaign-table-shell">
                   <Table<CandidateMember>
-                    className="campaign-table"
+                    className="candidate-pool-table candidate-results-table campaign-table"
                     rowKey="id"
                     columns={columns}
                     dataSource={members}
@@ -684,8 +729,12 @@ export function CandidateRunDetailView({
                   {membersQuery.hasNextPage ? (
                     <Button
                       icon={<ReloadOutlined aria-hidden="true" />}
-                      loading={membersQuery.isFetchingNextPage}
-                      onClick={() => void membersQuery.fetchNextPage()}
+                      loading={
+                        previewMode ? false : membersQuery.isFetchingNextPage
+                      }
+                      onClick={() => {
+                        if (!previewMode) void membersQuery.fetchNextPage();
+                      }}
                     >
                       加载更多
                     </Button>
@@ -741,6 +790,7 @@ export function CandidateRunDetailView({
           setSelected({});
         }}
         onInvalidSelection={() => setSelected({})}
+        previewMode={previewMode}
       />
     </section>
   );

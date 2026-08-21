@@ -109,10 +109,7 @@ function PolicyDefinition({
       </Descriptions.Item>
       <Descriptions.Item label="别名">
         {taxonomy.aliases
-          ?.map(
-            (item: { label: string; category_id: string }) =>
-              `${item.label} → ${item.category_id}`,
-          )
+          ?.map((item: { label: string }) => item.label)
           .join("；") || "—"}
       </Descriptions.Item>
       <Descriptions.Item label="允许的新鲜度">
@@ -131,6 +128,13 @@ function PolicyHistory({
 }) {
   const query = useCandidatePolicies(poolId, true);
   const [policy, setPolicy] = useState<TargetingPolicy | null>(null);
+  const policies = useMemo(
+    () =>
+      (query.data ?? [])
+        .slice()
+        .sort((left, right) => left.version - right.version),
+    [query.data],
+  );
   const columns = [
     {
       title: "版本",
@@ -139,7 +143,7 @@ function PolicyHistory({
         <span>
           版本 {item.version}
           {item.id === currentPolicyId ? (
-            <Text type="secondary"> · 当前规则</Text>
+            <span className="candidate-current-policy">当前规则</span>
           ) : null}
         </span>
       ),
@@ -150,8 +154,8 @@ function PolicyHistory({
       render: (_: unknown, item: TargetingPolicy) =>
         item.definition.schema_version === 1 && policyType(item.definition)
           ? item.definition.policy_type === "SELLER_V1"
-            ? "卖家筛选规则"
-            : "买家筛选规则"
+            ? "卖家规则"
+            : "买家规则"
           : "未知规则类型",
     },
     {
@@ -171,7 +175,10 @@ function PolicyHistory({
     },
   ];
   return (
-    <Card className="campaign-detail-card" variant="borderless">
+    <Card
+      className="candidate-detail-card campaign-detail-card"
+      variant="borderless"
+    >
       {query.isPending ? (
         <Skeleton active paragraph={{ rows: 5 }} />
       ) : query.isError ? (
@@ -188,7 +195,7 @@ function PolicyHistory({
         <Table<TargetingPolicy>
           rowKey="id"
           columns={columns}
-          dataSource={query.data ?? []}
+          dataSource={policies}
           pagination={false}
         />
       )}
@@ -212,9 +219,9 @@ function PolicyHistory({
               </Descriptions.Item>
               <Descriptions.Item label="规则类型">
                 {policyType(policy.definition) === "SELLER_V1"
-                  ? "卖家筛选规则"
+                  ? "卖家规则"
                   : policyType(policy.definition) === "BUYER_V1"
-                    ? "买家筛选规则"
+                    ? "买家规则"
                     : "未知规则类型"}
               </Descriptions.Item>
             </Descriptions>
@@ -226,7 +233,13 @@ function PolicyHistory({
   );
 }
 
-function RunHistory({ poolId }: { poolId: string }) {
+function RunHistory({
+  poolId,
+  previewMode = false,
+}: {
+  poolId: string;
+  previewMode?: boolean;
+}) {
   const query = useCandidateRuns(poolId, true);
   const runs = useMemo(
     () => query.data?.pages.flatMap((page) => page.items) ?? [],
@@ -276,7 +289,10 @@ function RunHistory({ poolId }: { poolId: string }) {
     },
   ];
   return (
-    <Card className="campaign-detail-card" variant="borderless">
+    <Card
+      className="candidate-detail-card campaign-detail-card"
+      variant="borderless"
+    >
       {query.isPending ? (
         <Skeleton active paragraph={{ rows: 7 }} />
       ) : query.isError ? (
@@ -297,7 +313,7 @@ function RunHistory({ poolId }: { poolId: string }) {
         <>
           <div className="campaign-table-shell">
             <Table<CandidatePoolRun>
-              className="campaign-table"
+              className="candidate-pool-table campaign-table"
               rowKey="id"
               columns={columns}
               dataSource={runs}
@@ -308,8 +324,10 @@ function RunHistory({ poolId }: { poolId: string }) {
             {query.hasNextPage ? (
               <Button
                 icon={<ReloadOutlined aria-hidden="true" />}
-                loading={query.isFetchingNextPage}
-                onClick={() => void query.fetchNextPage()}
+                loading={previewMode ? false : query.isFetchingNextPage}
+                onClick={() => {
+                  if (!previewMode) void query.fetchNextPage();
+                }}
               >
                 加载更多
               </Button>
@@ -325,10 +343,14 @@ export function CandidatePoolDetailView({
   poolId,
   role,
   hasSelectedOperator,
+  previewMode = false,
+  previewTab,
 }: {
   poolId: string;
   role: CandidatePoolRole;
   hasSelectedOperator: boolean;
+  previewMode?: boolean;
+  previewTab?: "basic" | "policies" | "runs";
 }) {
   const query = useCandidatePool(poolId);
   const router = useRouter();
@@ -340,15 +362,20 @@ export function CandidatePoolDetailView({
   const mutation = useCreateCandidateRunMutation();
   const [messageApi, holder] = message.useMessage();
   const tab =
-    params.get("tab") === "policies"
+    previewTab ??
+    (params.get("tab") === "policies"
       ? "policies"
       : params.get("tab") === "runs"
         ? "runs"
-        : "basic";
+        : "basic");
   const pool = query.data;
   const canMutate = role !== "viewer" && hasSelectedOperator;
   async function start(attempt?: CreateAttempt) {
     if (!pool || !canMutate) return;
+    if (previewMode) {
+      setOpen(false);
+      return;
+    }
     const next = attempt ?? { key: attemptKey() };
     setError(null);
     try {
@@ -399,7 +426,10 @@ export function CandidatePoolDetailView({
   const showCreate =
     canMutate && pool.status === "ACTIVE" && currentPolicyUsable;
   return (
-    <section className="campaign-workspace" aria-label="候选池详情">
+    <section
+      className="candidate-pool-detail-workspace campaign-workspace"
+      aria-label="候选池详情"
+    >
       {holder}
       <div>
         <h2 className="page-title">
@@ -423,15 +453,20 @@ export function CandidatePoolDetailView({
       ) : null}
       <Tabs
         activeKey={tab}
-        onChange={(key) =>
-          router.push(key === "basic" ? pathname : `${pathname}?tab=${key}`)
-        }
+        onChange={(key) => {
+          if (!previewMode) {
+            router.push(key === "basic" ? pathname : `${pathname}?tab=${key}`);
+          }
+        }}
         items={[
           {
             key: "basic",
             label: "基本信息",
             children: (
-              <Card className="campaign-detail-card" variant="borderless">
+              <Card
+                className="candidate-detail-card campaign-detail-card"
+                variant="borderless"
+              >
                 <Descriptions column={1}>
                   <Descriptions.Item label="候选池名称">
                     {pool.name}
@@ -469,7 +504,10 @@ export function CandidatePoolDetailView({
           {
             key: "runs",
             label: "生成记录",
-            children: tab === "runs" ? <RunHistory poolId={poolId} /> : null,
+            children:
+              tab === "runs" ? (
+                <RunHistory poolId={poolId} previewMode={previewMode} />
+              ) : null,
           },
         ]}
       />
