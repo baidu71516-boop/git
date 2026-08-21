@@ -202,7 +202,7 @@ function PolicyHistory({
       <Drawer
         title="筛选规则"
         open={Boolean(policy)}
-        width={640}
+        size={640}
         onClose={() => setPolicy(null)}
       >
         {policy ? (
@@ -452,12 +452,17 @@ export function CandidatePoolDetailView({
         </Text>
       ) : null}
       <Tabs
-        activeKey={tab}
-        onChange={(key) => {
-          if (!previewMode) {
-            router.push(key === "basic" ? pathname : `${pathname}?tab=${key}`);
-          }
-        }}
+        activeKey={previewMode ? undefined : tab}
+        defaultActiveKey={previewMode ? tab : undefined}
+        onChange={
+          previewMode
+            ? undefined
+            : (key) => {
+                router.push(
+                  key === "basic" ? pathname : `${pathname}?tab=${key}`,
+                );
+              }
+        }
         items={[
           {
             key: "basic",
@@ -529,7 +534,7 @@ export function CandidatePoolDetailView({
           <Alert
             type="error"
             showIcon
-            message={error}
+            title={error}
             className="campaign-modal-alert"
           />
         ) : null}

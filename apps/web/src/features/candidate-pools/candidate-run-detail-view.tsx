@@ -138,15 +138,20 @@ function EvidenceContent({
     return <Text type="secondary">该判断依据版本暂不支持完整展示。</Text>;
   if (type === "SELLER_V1") {
     const criteria = Array.isArray(evidence.criteria)
-      ? evidence.criteria.filter(
-          (item): item is Record<string, unknown> =>
-            Boolean(item) && typeof item === "object" && !Array.isArray(item),
-        )
+      ? evidence.criteria
+          .filter(
+            (item): item is Record<string, unknown> =>
+              Boolean(item) && typeof item === "object" && !Array.isArray(item),
+          )
+          .map((item, index) => ({
+            ...item,
+            __preview_key: `criterion-${index}`,
+          }))
       : [];
     return (
       <Table<Record<string, unknown>>
         size="small"
-        rowKey={(_, index) => String(index)}
+        rowKey="__preview_key"
         pagination={false}
         columns={[
           {
@@ -352,7 +357,7 @@ function CampaignSelector({
         <Alert
           type="warning"
           showIcon
-          message={`其中 ${unknownCount} 位候选达人信息不足，请确认后再加入。`}
+          title={`其中 ${unknownCount} 位候选达人信息不足，请确认后再加入。`}
           className="campaign-modal-alert"
         />
       ) : null}
@@ -360,7 +365,7 @@ function CampaignSelector({
         <Alert
           type="error"
           showIcon
-          message={error}
+          title={error}
           className="campaign-modal-alert"
         />
       ) : null}
@@ -464,9 +469,11 @@ export function CandidateRunDetailView({
       ),
   );
   const [evidence, setEvidence] = useState<CandidateMember | null>(
-    previewEvidence ?? null,
+    previewMode ? null : (previewEvidence ?? null),
   );
-  const [modalOpen, setModalOpen] = useState(previewModalOpen);
+  const [modalOpen, setModalOpen] = useState(
+    previewMode ? false : previewModalOpen,
+  );
   const [messageApi, holder] = message.useMessage();
   useEffect(() => {
     if (previewMode) return;
@@ -476,6 +483,16 @@ export function CandidateRunDetailView({
     document.addEventListener("visibilitychange", visible);
     return () => document.removeEventListener("visibilitychange", visible);
   }, [previewMode, runQuery]);
+  useEffect(() => {
+    if (!previewMode || !previewModalOpen) return;
+    const timer = window.setTimeout(() => setModalOpen(true), 0);
+    return () => window.clearTimeout(timer);
+  }, [previewMode, previewModalOpen]);
+  useEffect(() => {
+    if (!previewMode || !previewEvidence) return;
+    const timer = window.setTimeout(() => setEvidence(previewEvidence), 0);
+    return () => window.clearTimeout(timer);
+  }, [previewEvidence, previewMode]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
   const policy = policies.data?.find((item) => item.id === run?.policy_id);
@@ -748,7 +765,7 @@ export function CandidateRunDetailView({
       <Drawer
         title="候选判断依据"
         open={Boolean(evidence)}
-        width={640}
+        size={640}
         onClose={() => setEvidence(null)}
       >
         {evidence ? (
@@ -772,7 +789,7 @@ export function CandidateRunDetailView({
               <Alert
                 type="info"
                 showIcon
-                message="该候选池用于查找分类方向可能发生变化的账号，因此分类不匹配属于当前规则的命中条件。"
+                title="该候选池用于查找分类方向可能发生变化的账号，因此分类不匹配属于当前规则的命中条件。"
               />
             ) : null}
             <h3>判断依据</h3>

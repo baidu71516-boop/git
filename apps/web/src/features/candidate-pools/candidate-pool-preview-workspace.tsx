@@ -84,7 +84,7 @@ function seedPreviewQueries(client: QueryClient) {
       );
       client.setQueryData(
         candidatePoolQueryKeys.members(run.pool_id, run.id, result),
-        infiniteData(items),
+        infiniteData(items, "preview-members-next"),
       );
     }
   }
