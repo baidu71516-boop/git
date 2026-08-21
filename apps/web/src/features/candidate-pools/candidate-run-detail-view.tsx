@@ -43,6 +43,7 @@ import {
   useCandidateRun,
 } from "./queries";
 import type {
+  CandidateCampaignAddResult,
   CandidateMember,
   CandidatePoolRole,
   TargetingPolicy,
@@ -51,6 +52,28 @@ import type {
 const { Text } = Typography;
 const attemptKey = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+
+export function CandidateCampaignSuccessFeedback({
+  campaignId,
+  result,
+}: {
+  campaignId: string;
+  result: CandidateCampaignAddResult;
+}) {
+  return (
+    <span>
+      <span>
+        候选达人已加入拓客活动：新增 {result.added_count} · 重新加入{" "}
+        {result.restored_count} · 已在活动中 {result.already_active_count}
+        {result.already_active_count > 0 ? "。已在活动中的达人未做修改。" : ""}
+      </span>
+      <br />
+      <Link href={`/campaigns/${encodeURIComponent(campaignId)}?tab=members`}>
+        查看拓客活动
+      </Link>
+    </span>
+  );
+}
 
 function Identity({ member }: { member: CandidateMember }) {
   const disabled = member.influencer.status === "disabled";
@@ -261,6 +284,7 @@ function CampaignSelector({
   ).length;
   async function submit() {
     if (!campaignId) return;
+    const selectedCampaignId = campaignId;
     const memberIds = selected.map((member) => member.id);
     const payload = JSON.stringify({ campaignId, memberIds });
     const current =
@@ -274,13 +298,10 @@ function CampaignSelector({
         idempotencyKey: current.key,
       });
       void messageApi.success(
-        <span>
-          候选达人已加入拓客活动：新增 {result.added_count} · 重新加入{" "}
-          {result.restored_count} · 已在活动中 {result.already_active_count}
-          {result.already_active_count > 0
-            ? "。已在活动中的达人未做修改。"
-            : ""}
-        </span>,
+        <CandidateCampaignSuccessFeedback
+          campaignId={selectedCampaignId}
+          result={result}
+        />,
       );
       setRetry(null);
       onSuccess();
