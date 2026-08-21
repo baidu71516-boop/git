@@ -7,7 +7,10 @@ import { useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 
-import { CandidatePoolDetailView } from "./candidate-pool-detail-view";
+import {
+  CandidatePoolDetailView,
+  type CandidatePoolDetailTab,
+} from "./candidate-pool-detail-view";
 import { CandidatePoolListView } from "./candidate-pool-list-view";
 import { CandidateRunDetailView } from "./candidate-run-detail-view";
 import { candidatePoolQueryKeys } from "./queries";
@@ -48,6 +51,12 @@ export const PREVIEW_SCENE_OPTIONS = [
 ] as const;
 
 type Scene = (typeof PREVIEW_SCENE_OPTIONS)[number][0];
+
+const previewSceneForDetailTab: Record<CandidatePoolDetailTab, Scene> = {
+  basic: "basic",
+  policies: "policies",
+  runs: "runs",
+};
 
 function parseScene(value: string | null): Scene {
   return PREVIEW_SCENE_OPTIONS.some(([key]) => key === value)
@@ -98,7 +107,13 @@ function selectedMembers(ids: string[]) {
   return PREVIEW_MEMBERS.filter((member) => ids.includes(member.id));
 }
 
-function PreviewContent({ scene }: { scene: Scene }) {
+function PreviewContent({
+  scene,
+  onSceneChange,
+}: {
+  scene: Scene;
+  onSceneChange: (scene: Scene) => void;
+}) {
   if (scene === "list") return <CandidatePoolListView previewMode />;
   if (scene === "empty")
     return (
@@ -141,6 +156,9 @@ function PreviewContent({ scene }: { scene: Scene }) {
         hasSelectedOperator
         previewMode
         previewTab={tab}
+        onPreviewTabChange={(nextTab) =>
+          onSceneChange(previewSceneForDetailTab[nextTab])
+        }
       />
     );
   }
@@ -244,7 +262,16 @@ function PreviewFrame() {
             />
             <Text type="secondary">{label}</Text>
           </div>
-          <PreviewContent scene={scene} />
+          <PreviewContent
+            scene={scene}
+            onSceneChange={(nextScene) => {
+              if (nextScene !== scene) {
+                router.replace(
+                  `/dev-ui-preview/candidate-pools?scene=${nextScene}`,
+                );
+              }
+            }}
+          />
         </div>
       </AppShell>
     </QueryClientProvider>

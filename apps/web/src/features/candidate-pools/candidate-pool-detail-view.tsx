@@ -46,8 +46,19 @@ import type {
 
 const { Text } = Typography;
 type CreateAttempt = { key: string };
+export const CANDIDATE_POOL_DETAIL_TABS = [
+  "basic",
+  "policies",
+  "runs",
+] as const;
+export type CandidatePoolDetailTab =
+  (typeof CANDIDATE_POOL_DETAIL_TABS)[number];
 const attemptKey = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+
+function candidatePoolDetailTab(value: string | null): CandidatePoolDetailTab {
+  return value === "policies" || value === "runs" ? value : "basic";
+}
 
 function Owner({ name, status }: { name: string; status: string }) {
   return (
@@ -355,12 +366,14 @@ export function CandidatePoolDetailView({
   hasSelectedOperator,
   previewMode = false,
   previewTab,
+  onPreviewTabChange,
 }: {
   poolId: string;
   role: CandidatePoolRole;
   hasSelectedOperator: boolean;
   previewMode?: boolean;
-  previewTab?: "basic" | "policies" | "runs";
+  previewTab?: CandidatePoolDetailTab;
+  onPreviewTabChange?: (tab: CandidatePoolDetailTab) => void;
 }) {
   const query = useCandidatePool(poolId);
   const router = useRouter();
@@ -371,13 +384,7 @@ export function CandidatePoolDetailView({
   const [retry, setRetry] = useState<CreateAttempt | null>(null);
   const mutation = useCreateCandidateRunMutation();
   const [messageApi, holder] = message.useMessage();
-  const tab =
-    previewTab ??
-    (params.get("tab") === "policies"
-      ? "policies"
-      : params.get("tab") === "runs"
-        ? "runs"
-        : "basic");
+  const tab = previewTab ?? candidatePoolDetailTab(params.get("tab"));
   const pool = query.data;
   const canMutate = role !== "viewer" && hasSelectedOperator;
   async function start(attempt?: CreateAttempt) {
@@ -462,17 +469,18 @@ export function CandidatePoolDetailView({
         </Text>
       ) : null}
       <Tabs
-        activeKey={previewMode ? undefined : tab}
-        defaultActiveKey={previewMode ? tab : undefined}
-        onChange={
-          previewMode
-            ? undefined
-            : (key) => {
-                router.push(
-                  key === "basic" ? pathname : `${pathname}?tab=${key}`,
-                );
-              }
-        }
+        activeKey={tab}
+        onChange={(key) => {
+          const nextTab = candidatePoolDetailTab(key);
+          if (nextTab === tab) return;
+          if (previewMode) {
+            onPreviewTabChange?.(nextTab);
+            return;
+          }
+          router.push(
+            nextTab === "basic" ? pathname : `${pathname}?tab=${nextTab}`,
+          );
+        }}
         items={[
           {
             key: "basic",
