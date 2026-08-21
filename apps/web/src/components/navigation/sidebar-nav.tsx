@@ -6,6 +6,7 @@ import {
   HistoryOutlined,
   LogoutOutlined,
   MenuOutlined,
+  ProfileOutlined,
   SyncOutlined,
   ThunderboltOutlined,
   UsergroupAddOutlined,
@@ -40,6 +41,11 @@ const navGroups = [
         label: "拓客活动",
         href: "/campaigns",
         icon: <FlagOutlined aria-hidden="true" />,
+      },
+      {
+        label: "候选池",
+        href: "/candidate-pools",
+        icon: <ProfileOutlined aria-hidden="true" />,
       },
       {
         label: "达人库",
