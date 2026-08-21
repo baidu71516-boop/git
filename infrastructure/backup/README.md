@@ -1,4 +1,6 @@
 # Backup Infrastructure
 
-数据库备份、恢复脚本和恢复演练将在 Phase 5 按确认的生产存储目标实现。
-
+`influencer-outreach-backup` 是生产 PostgreSQL 的 custom-format 备份模板。
+它在容器内使用 `pg_restore --list` 校验已完成的备份，生成 SHA-256 sidecar，
+并保留 30 天。systemd service/timer 模板位于 `../systemd/`；安装、测试和恢复
+列表检查步骤见 `../../docs/runbooks/production-deployment.md`。

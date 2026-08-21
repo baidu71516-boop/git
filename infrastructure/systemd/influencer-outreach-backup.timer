@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Influencer Outreach PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 Asia/Shanghai
+Persistent=true
+Unit=influencer-outreach-backup.service
+
+[Install]
+WantedBy=timers.target

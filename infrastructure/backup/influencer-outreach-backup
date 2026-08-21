@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+backup_dir="${BACKUP_DIR:-/home/ubuntu/backups/influencer-outreach}"
+postgres_container="${POSTGRES_CONTAINER:-influencer-outreach-postgres-1}"
+postgres_database="${POSTGRES_DATABASE:-outreach}"
+postgres_user="${POSTGRES_USER:-outreach}"
+timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+archive_name="outreach-${timestamp}.dump"
+archive_path="${backup_dir}/${archive_name}"
+verification_path="/tmp/${archive_name}"
+
+umask 077
+mkdir -p "$backup_dir"
+temporary_archive="$(mktemp "${backup_dir}/.outreach-backup.XXXXXX")"
+
+cleanup() {
+  rm -f "$temporary_archive"
+  docker exec "$postgres_container" rm -f "$verification_path" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+docker exec "$postgres_container" pg_dump --username "$postgres_user" --format=custom --dbname "$postgres_database" > "$temporary_archive"
+chmod 600 "$temporary_archive"
+mv "$temporary_archive" "$archive_path"
+
+# Avoid a pipe under pipefail: copy the completed archive, then ask PostgreSQL's
+# container to list it directly. A nonzero pg_restore result leaves the archive
+# in place for investigation and causes this unit to fail.
+docker cp "$archive_path" "${postgres_container}:${verification_path}"
+docker exec "$postgres_container" pg_restore --list "$verification_path" >/dev/null
+docker exec "$postgres_container" rm -f "$verification_path"
+
+sha256sum "$archive_path" > "${archive_path}.sha256"
+find "$backup_dir" -maxdepth 1 -type f -name 'outreach-*.dump' -mtime +30 -delete
+find "$backup_dir" -maxdepth 1 -type f -name 'outreach-*.dump.sha256' -mtime +30 -delete

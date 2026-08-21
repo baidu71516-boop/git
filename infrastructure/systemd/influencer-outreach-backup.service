@@ -1,0 +1,14 @@
+[Unit]
+Description=Influencer Outreach PostgreSQL backup
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+Environment=BACKUP_DIR=/home/ubuntu/backups/influencer-outreach
+Environment=POSTGRES_CONTAINER=influencer-outreach-postgres-1
+Environment=POSTGRES_DATABASE=outreach
+Environment=POSTGRES_USER=outreach
+ExecStart=/usr/local/sbin/influencer-outreach-backup

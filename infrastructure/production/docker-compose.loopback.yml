@@ -1,0 +1,11 @@
+services:
+  nginx:
+    ports: !override
+      - name: loopback-http
+        target: 80
+        published: "18080"
+        host_ip: "127.0.0.1"
+        protocol: tcp
+        app_protocol: http
+    volumes: !override
+      - ./infrastructure/nginx/loopback-proxy.conf:/etc/nginx/conf.d/default.conf:ro
