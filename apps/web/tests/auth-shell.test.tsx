@@ -120,6 +120,9 @@ describe("AuthShell", () => {
     expect(screen.getByLabelText("部门")).toBeInTheDocument();
     expect(screen.getByLabelText("密码")).toBeInTheDocument();
     expect(screen.getByText("30 天内保持登录")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "鄂ICP备2026044999号" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("INTERNAL")).not.toBeInTheDocument();
   });
 
@@ -158,6 +161,9 @@ describe("AuthShell", () => {
     });
     expect(
       within(screen.getByRole("complementary")).getByText("待选择"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "鄂ICP备2026044999号" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
     expect(

@@ -29,6 +29,7 @@ import { CandidatePoolDetailView } from "@/features/candidate-pools/candidate-po
 import { CandidatePoolListView } from "@/features/candidate-pools/candidate-pool-list-view";
 import { CandidateRunDetailView } from "@/features/candidate-pools/candidate-run-detail-view";
 import { AppShell } from "@/components/app-shell";
+import { ComplianceFooter } from "@/components/compliance-footer";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
 const { Paragraph, Title } = Typography;
@@ -224,56 +225,59 @@ export function AuthShell({
   if (!auth) {
     return (
       <main className="auth-shell">
-        <Card className="login-card" bordered={false}>
-          <Space direction="vertical" size="large" className="full-width">
-            <div>
-              <Title level={2}>达人智能触达系统</Title>
-              <Paragraph type="secondary">请使用部门密码登录。</Paragraph>
-            </div>
-            {error ? <Alert type="error" showIcon message={error} /> : null}
-            <Form<LoginValues>
-              layout="vertical"
-              initialValues={{ remember_me: false }}
-              onFinish={(values) => void handleLogin(values)}
-            >
-              <Form.Item
-                label="部门"
-                name="department_id"
-                rules={[{ required: true, message: "请选择部门" }]}
+        <div className="auth-shell-content">
+          <Card className="login-card" bordered={false}>
+            <Space direction="vertical" size="large" className="full-width">
+              <div>
+                <Title level={2}>达人智能触达系统</Title>
+                <Paragraph type="secondary">请使用部门密码登录。</Paragraph>
+              </div>
+              {error ? <Alert type="error" showIcon message={error} /> : null}
+              <Form<LoginValues>
+                layout="vertical"
+                initialValues={{ remember_me: false }}
+                onFinish={(values) => void handleLogin(values)}
               >
-                <Select
-                  placeholder="选择部门"
-                  options={departments.map((department) => ({
-                    label: department.name,
-                    value: department.id,
-                  }))}
-                  suffixIcon={<TeamOutlined />}
-                />
-              </Form.Item>
-              <Form.Item
-                label="密码"
-                name="password"
-                rules={[{ required: true, message: "请输入密码" }]}
-              >
-                <Input.Password
-                  prefix={<LockOutlined />}
-                  autoComplete="current-password"
-                />
-              </Form.Item>
-              <Form.Item name="remember_me" valuePropName="checked">
-                <Checkbox>30 天内保持登录</Checkbox>
-              </Form.Item>
-              <Button
-                type="primary"
-                htmlType="submit"
-                block
-                loading={submitting}
-              >
-                登录
-              </Button>
-            </Form>
-          </Space>
-        </Card>
+                <Form.Item
+                  label="部门"
+                  name="department_id"
+                  rules={[{ required: true, message: "请选择部门" }]}
+                >
+                  <Select
+                    placeholder="选择部门"
+                    options={departments.map((department) => ({
+                      label: department.name,
+                      value: department.id,
+                    }))}
+                    suffixIcon={<TeamOutlined />}
+                  />
+                </Form.Item>
+                <Form.Item
+                  label="密码"
+                  name="password"
+                  rules={[{ required: true, message: "请输入密码" }]}
+                >
+                  <Input.Password
+                    prefix={<LockOutlined />}
+                    autoComplete="current-password"
+                  />
+                </Form.Item>
+                <Form.Item name="remember_me" valuePropName="checked">
+                  <Checkbox>30 天内保持登录</Checkbox>
+                </Form.Item>
+                <Button
+                  type="primary"
+                  htmlType="submit"
+                  block
+                  loading={submitting}
+                >
+                  登录
+                </Button>
+              </Form>
+            </Space>
+          </Card>
+          <ComplianceFooter />
+        </div>
       </main>
     );
   }

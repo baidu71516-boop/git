@@ -3,6 +3,7 @@
 import { ConfigProvider } from "antd";
 import type { ReactNode } from "react";
 
+import { ComplianceFooter } from "@/components/compliance-footer";
 import { SidebarNav } from "@/components/navigation/sidebar-nav";
 import { PageHeader } from "@/components/ui/page-header";
 import { UserMenu } from "@/components/ui/user-menu";
@@ -78,6 +79,7 @@ export function AppShell({
             ) : null}
             {children}
           </main>
+          <ComplianceFooter />
         </div>
       </div>
     </ConfigProvider>
