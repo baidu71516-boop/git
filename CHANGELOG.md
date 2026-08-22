@@ -37,6 +37,18 @@
 - Browser E2E 覆盖 Viewer read-only、Contact `***` masking、Department isolation、URL/query/back/direct-detail/refresh、production preview 404，以及长昵称、多标签、两个 PlatformAccount、null owner/contact、unknown/stale/very-stale、中文“万”、manual review 与 error。
 - 没有新增 Migration、没有前端重算 Freshness/Screening/Merge/Refresh Return/Queue completion/Confirm idempotency，也没有实现仍待产品裁决的 per-file replace。
 
+### UI-6 — Collection Screening Rule Editor
+
+#### Added
+
+- “数据采集 → 当前采集任务”新增真实筛选规则摘要与 600px 查看/编辑 Modal，展示小红书平台、来源标签 exact-any、可空粉丝范围和规则 revision；Viewer 保持只读。
+- 保存使用真实 `PUT /collection-jobs/{id}/screening-rules` 完整 CAS body，并沿用 Session、selected Operator、CSRF 与 Department scope；409 revision conflict 只允许用户手动重新加载最新规则，不自动重试或覆盖。
+- `preview_ready` 保存前显示预览失效提示；成功后只 invalidate/refetch Collection Job 与当前 Import Job，继续复用后端 `preview_stale` UI，不自动重建 Preview 或 Confirm。
+
+#### Verification
+
+- Web 189 tests、Prettier、ESLint、TypeScript、Next production build 与 `git diff --check` 通过。
+
 ### Phase 2 Task 9 — Refresh Return Reconciliation
 
 #### Added

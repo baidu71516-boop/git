@@ -2,9 +2,13 @@
 
 import {
   DatabaseOutlined,
+  FlagOutlined,
+  HistoryOutlined,
   LogoutOutlined,
   MenuOutlined,
+  ProfileOutlined,
   SyncOutlined,
+  ThunderboltOutlined,
   UsergroupAddOutlined,
 } from "@ant-design/icons";
 import { Button, Drawer, Typography } from "antd";
@@ -29,6 +33,21 @@ const navGroups = [
     label: "工作区",
     items: [
       {
+        label: "今日触达",
+        href: "/outreach/today",
+        icon: <ThunderboltOutlined aria-hidden="true" />,
+      },
+      {
+        label: "拓客活动",
+        href: "/campaigns",
+        icon: <FlagOutlined aria-hidden="true" />,
+      },
+      {
+        label: "候选池",
+        href: "/candidate-pools",
+        icon: <ProfileOutlined aria-hidden="true" />,
+      },
+      {
         label: "达人库",
         href: "/influencers",
         icon: <UsergroupAddOutlined aria-hidden="true" />,
@@ -42,6 +61,11 @@ const navGroups = [
         label: "数据采集",
         href: "/",
         icon: <DatabaseOutlined aria-hidden="true" />,
+      },
+      {
+        label: "导入记录",
+        href: "/import-jobs",
+        icon: <HistoryOutlined aria-hidden="true" />,
       },
       {
         label: "数据更新",

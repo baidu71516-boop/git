@@ -17,6 +17,7 @@ from backend_core.auth import AuthContext, AuthError
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.campaigns.access import DepartmentScope
+from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.config import get_settings
 from backend_core.growth.enums import (
     CandidatePoolKind,
@@ -38,6 +39,11 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.service import TargetingError
 from backend_core.growth.targeting import SellerTargetingPolicy
+from backend_core.influencers.enums import InfluencerStatus, Platform
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 from httpx import ASGITransport, AsyncClient, Response
 
 NOW = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
@@ -93,6 +99,11 @@ def _pool(context: AuthContext) -> CandidatePoolPublic:
         id=POOL_ID,
         department_id=context.department.id,
         owner_operator_id=context.operator.id,
+        owner=CampaignOwnerSummary(
+            id=context.operator.id,
+            name=context.operator.name,
+            status=context.operator.status,
+        ),
         name="Seller prospects",
         kind=CandidatePoolKind.POTENTIAL_SELLER,
         source_collection_job_id=None,
@@ -375,6 +386,19 @@ class FakeCandidatePoolService:
                     evidence_hash="d" * 64,
                     created_at=NOW,
                     updated_at=NOW,
+                    influencer=InfluencerIdentitySummary(
+                        id=INFLUENCER_ID,
+                        display_name="Candidate identity",
+                        status=InfluencerStatus.ACTIVE,
+                    ),
+                    platform_account=PlatformAccountIdentitySummary(
+                        id=ACCOUNT_ID,
+                        platform=Platform.XIAOHONGSHU,
+                        platform_account_id=None,
+                        account_name="Candidate account",
+                        account_handle=None,
+                        is_active=True,
+                    ),
                 ),
             ),
             next_cursor=None,
@@ -505,6 +529,34 @@ def test_candidate_pool_read_routes_adapt_closed_service_contracts() -> None:
             app.dependency_overrides.clear()
 
     asyncio.run(scenario())
+
+
+def test_candidate_pool_openapi_requires_canonical_identity_and_owner_projections() -> None:
+    document = app.openapi()
+    schemas = document["components"]["schemas"]
+    pool = schemas["CandidatePoolPublic"]
+    member = schemas["CandidatePoolMemberPublic"]
+    account = schemas["PlatformAccountIdentitySummary"]
+
+    assert "owner" in pool["required"]
+    assert pool["properties"]["owner"]["$ref"].endswith("/CampaignOwnerSummary")
+    assert "influencer" in member["required"]
+    assert "platform_account" in member["required"]
+    assert member["properties"]["influencer"]["$ref"].endswith("/InfluencerIdentitySummary")
+    assert member["properties"]["platform_account"]["$ref"].endswith(
+        "/PlatformAccountIdentitySummary"
+    )
+    assert set(account["required"]) == {
+        "id",
+        "platform",
+        "platform_account_id",
+        "account_name",
+        "account_handle",
+        "is_active",
+    }
+    assert account["properties"]["platform_account_id"]["anyOf"][1]["type"] == "null"
+    assert account["properties"]["account_handle"]["anyOf"][1]["type"] == "null"
+    assert not ({"email", "phone", "wechat", "contact"} & set(member["properties"]))
 
 
 def test_candidate_pool_scope_header_is_single_valued_and_no_disclosure() -> None:

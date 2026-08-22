@@ -17,6 +17,7 @@ import {
   retryBulkImportJob,
   updateBulkImportFileMapping,
   updateBulkImportFileSourceAcquiredAt,
+  updateCollectionJobScreeningRules,
   uploadBulkImportFile,
 } from "./api";
 import type {
@@ -189,6 +190,26 @@ export function useCreateCollectionJobMutation() {
       );
       void queryClient.invalidateQueries({
         queryKey: bulkImportQueryKeys.collections(),
+      });
+    },
+  });
+}
+
+export function useUpdateCollectionJobScreeningRulesMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: updateCollectionJobScreeningRules,
+    retry: false,
+    onSuccess: (collection, input) => {
+      queryClient.setQueryData(
+        bulkImportQueryKeys.collection(collection.id),
+        collection,
+      );
+      void queryClient.invalidateQueries({
+        queryKey: bulkImportQueryKeys.collection(input.collectionJobId),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: bulkImportQueryKeys.job(input.importJobId),
       });
     },
   });

@@ -27,6 +27,7 @@ from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.auth.service import AuthContext
 from backend_core.campaigns.channels import StaticChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError
+from backend_core.campaigns.repository import CampaignMemberProjectionRecord
 from backend_core.campaigns.schemas import (
     CampaignCreateInput,
     CampaignCursor,
@@ -35,6 +36,7 @@ from backend_core.campaigns.schemas import (
     CampaignMemberBulkAddResult,
     CampaignMemberFromCandidateRunBulkAddInput,
     CampaignMemberRemoveInput,
+    CampaignMemberResult,
     CampaignStatusTransitionInput,
     CampaignUpdateInput,
 )
@@ -74,6 +76,10 @@ from backend_core.influencers.models import (
     InfluencerContact,
     InfluencerPlatformAccount,
 )
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 from backend_core.outreach.enums import (
     OutreachChannel,
     OutreachEventType,
@@ -90,7 +96,7 @@ from backend_core.outreach.schemas import (
 )
 from backend_core.outreach.service import OutreachService
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 SQLITE_TABLES = (
@@ -551,6 +557,259 @@ def test_task_create_input_requires_timezone_aware_due_at() -> None:
         OutreachTaskCreateInput(due_at=datetime(2026, 8, 18, 12, 0))
 
 
+def test_canonical_member_identity_summaries_keep_required_nullable_contracts() -> None:
+    influencer = InfluencerIdentitySummary.model_validate(
+        {"id": uuid4(), "display_name": "Identity", "status": "active"}
+    )
+    account = PlatformAccountIdentitySummary.model_validate(
+        {
+            "id": uuid4(),
+            "platform": "xiaohongshu",
+            "platform_account_id": None,
+            "account_name": "Account identity",
+            "account_handle": None,
+            "is_active": False,
+        }
+    )
+    assert influencer.status is InfluencerStatus.ACTIVE
+    assert account.platform is Platform.XIAOHONGSHU
+    assert account.platform_account_id is None
+    assert account.account_handle is None
+    with pytest.raises(ValidationError):
+        InfluencerIdentitySummary.model_validate({"id": uuid4(), "display_name": "Identity"})
+    with pytest.raises(ValidationError):
+        PlatformAccountIdentitySummary.model_validate(
+            {
+                "id": uuid4(),
+                "platform": "xiaohongshu",
+                "platform_account_id": None,
+                "account_name": None,
+                "account_handle": None,
+                "is_active": True,
+            }
+        )
+
+
+@async_test
+async def test_campaign_member_display_projection_is_joined_and_retains_historical_identity() -> (
+    None
+):
+    async with domain_harness() as harness:
+        first_fixture = await seed_influencer(harness.session, harness.context)
+        second_fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        first_member = await add_member(harness, campaign_id, first_fixture)
+        await add_member(harness, campaign_id, second_fixture)
+
+        influencer = await harness.session.get(Influencer, first_fixture.influencer_id)
+        account = await harness.session.get(InfluencerPlatformAccount, first_fixture.account_id)
+        assert influencer is not None and account is not None
+        influencer.status = InfluencerStatus.DISABLED
+        influencer.deleted_at = harness.clock.now()
+        account.is_active = False
+        await harness.session.commit()
+
+        statements: list[str] = []
+        assert harness.session.bind is not None
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            page = await harness.campaign_service.list_members(
+                harness.context,
+                campaign_id,
+                cursor=None,
+                limit=50,
+            )
+        finally:
+            event.remove(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+
+        projected = next(item for item in page.items if item.id == first_member.id)
+        assert len(page.items) == 2
+        assert projected.influencer.id == projected.influencer_id == first_fixture.influencer_id
+        assert projected.influencer.display_name == influencer.display_name
+        assert projected.influencer.status is InfluencerStatus.DISABLED
+        assert projected.preferred_platform_account.id == first_fixture.account_id
+        assert projected.preferred_platform_account.is_active is False
+        assert projected.is_active is True
+        assert "contacts" not in projected.model_dump()
+        assert len(statements) == 2
+        joined_statement = next(
+            statement for statement in statements if "campaign_members" in statement
+        )
+        assert "JOIN campaigns" in joined_statement
+        assert "JOIN influencers" in joined_statement
+        assert "JOIN influencer_platform_accounts" in joined_statement
+        assert "influencer_contacts" not in joined_statement
+
+        detail = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            first_member.id,
+        )
+        assert detail == projected
+
+        removed = await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            first_member.id,
+            CampaignMemberRemoveInput(expected_version=detail.version),
+            ip="127.0.0.1",
+            user_agent="campaign-member-display-test",
+        )
+        assert removed.removed_at is not None
+        assert removed.is_active is False
+        assert removed.influencer.status is InfluencerStatus.DISABLED
+        assert removed.preferred_platform_account.is_active is False
+        removed_detail = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            first_member.id,
+        )
+        assert removed_detail == removed
+        with pytest.raises(CampaignOutreachError) as stale_remove:
+            await harness.campaign_service.remove_member(
+                harness.context,
+                campaign_id,
+                first_member.id,
+                CampaignMemberRemoveInput(expected_version=detail.version),
+                ip="127.0.0.1",
+                user_agent="campaign-member-display-test",
+            )
+        assert stale_remove.value.code == "VERSION_CONFLICT"
+
+        influencer.status = InfluencerStatus.ACTIVE
+        influencer.deleted_at = None
+        account.is_active = True
+        await harness.session.commit()
+        assert harness.context.operator is not None
+        await harness.session.refresh(harness.context.operator)
+        await harness.session.refresh(harness.context.department)
+
+        restored = await harness.campaign_service.bulk_add_members(
+            harness.context,
+            campaign_id,
+            CampaignMemberBulkAddInput(
+                members=(
+                    CampaignMemberAddItem(
+                        influencer_id=first_fixture.influencer_id,
+                        preferred_platform_account_id=first_fixture.account_id,
+                    ),
+                )
+            ),
+            idempotency_key="member-display-restore",
+            ip="127.0.0.1",
+            user_agent="campaign-member-display-test",
+        )
+        restored_detail = await harness.campaign_service.get_member(
+            harness.context,
+            campaign_id,
+            first_member.id,
+        )
+        assert restored.result.restored_count == 1
+        assert restored_detail.id == first_member.id
+        assert restored_detail.created_at == detail.created_at
+        assert restored_detail.version == removed.version + 1
+        assert restored_detail.is_active is True
+        assert restored_detail.influencer.status is InfluencerStatus.ACTIVE
+        assert restored_detail.preferred_platform_account.is_active is True
+
+        member_model = await harness.session.get(CampaignMember, first_member.id)
+        other_account = await harness.session.get(
+            InfluencerPlatformAccount, second_fixture.account_id
+        )
+        assert member_model is not None and other_account is not None
+        invalid_projection = CampaignMemberProjectionRecord(
+            member=member_model,
+            influencer=influencer,
+            preferred_platform_account=other_account,
+        )
+        with pytest.raises(CampaignOutreachError) as invalid_relation:
+            harness.campaign_service._member_result_from_projection(invalid_projection)
+        assert invalid_relation.value.code == "CAMPAIGN_MEMBER_PROJECTION_INVALID"
+
+        invalid_influencer = {
+            **restored_detail.model_dump(),
+            "influencer": {**restored_detail.influencer.model_dump(), "id": uuid4()},
+        }
+        with pytest.raises(ValidationError):
+            CampaignMemberResult.model_validate(invalid_influencer)
+        with pytest.raises(ValidationError):
+            CampaignMemberResult.model_validate(
+                {**restored_detail.model_dump(), "is_active": False}
+            )
+
+
+@async_test
+async def test_campaign_member_projection_keeps_read_scope_and_viewer_boundary() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        member = await add_member(harness, campaign_id, fixture)
+        viewer = AuthContext(
+            department=harness.context.department,
+            operator=None,
+            role=Role.VIEWER,
+            auth_session=harness.context.auth_session,
+        )
+
+        page = await harness.campaign_service.list_members(
+            viewer,
+            campaign_id,
+            cursor=None,
+            limit=50,
+        )
+        assert [item.id for item in page.items] == [member.id]
+        assert (
+            await harness.campaign_service.get_member(viewer, campaign_id, member.id)
+        ).influencer.id == fixture.influencer_id
+        with pytest.raises(CampaignOutreachError) as viewer_mutation:
+            await harness.campaign_service.remove_member(
+                viewer,
+                campaign_id,
+                member.id,
+                CampaignMemberRemoveInput(expected_version=member.version),
+                ip="127.0.0.1",
+                user_agent="campaign-member-display-test",
+            )
+        assert viewer_mutation.value.status_code == 403
+        assert viewer_mutation.value.code == "PERMISSION_DENIED"
+
+        other_context = await seed_context(harness.session)
+        await harness.session.commit()
+        with pytest.raises(CampaignOutreachError) as hidden_list:
+            await harness.campaign_service.list_members(
+                other_context,
+                campaign_id,
+                cursor=None,
+                limit=50,
+                department_id=harness.context.department.id,
+            )
+        assert hidden_list.value.status_code == 404
+        assert hidden_list.value.code == "RESOURCE_NOT_FOUND"
+        with pytest.raises(CampaignOutreachError) as hidden_detail:
+            await harness.campaign_service.get_member(
+                other_context,
+                campaign_id,
+                member.id,
+                department_id=harness.context.department.id,
+            )
+        assert hidden_detail.value.status_code == 404
+        assert hidden_detail.value.code == "RESOURCE_NOT_FOUND"
+
+
 @async_test
 async def test_campaign_create_shared_idempotency_replays_and_conflicts_without_second_audit() -> (
     None
@@ -593,7 +852,7 @@ async def test_campaign_create_shared_idempotency_replays_and_conflicts_without_
 
 
 @async_test
-async def test_campaign_create_replay_ignores_owner_state_after_initial_success() -> None:
+async def test_campaign_create_replay_enriches_owner_state_after_initial_success() -> None:
     async with domain_harness() as harness:
         assert harness.context.operator is not None
         owner = Operator(
@@ -616,6 +875,17 @@ async def test_campaign_create_replay_ignores_owner_state_after_initial_success(
             user_agent="campaign-outreach-domain-test",
         )
 
+        record = await harness.session.scalar(
+            select(Phase3AIdempotencyRecord).where(
+                Phase3AIdempotencyRecord.operation_scope == Phase3AOperationScope.CAMPAIGN_CREATE,
+                Phase3AIdempotencyRecord.idempotency_key == "campaign-owner-state-key",
+            )
+        )
+        assert record is not None
+        record.result_payload = {
+            key: value for key, value in record.result_payload.items() if key != "owner"
+        }
+
         owner.status = OperatorStatus.DISABLED
         await harness.session.commit()
 
@@ -627,9 +897,293 @@ async def test_campaign_create_replay_ignores_owner_state_after_initial_success(
             user_agent="campaign-outreach-domain-test",
         )
         assert replay.replayed
-        assert replay.result == first.result
+        assert replay.result.model_dump(exclude={"owner"}) == first.result.model_dump(
+            exclude={"owner"}
+        )
+        assert replay.result.owner.id == owner.id
+        assert replay.result.owner.name == owner.name
+        assert replay.result.owner.status is OperatorStatus.DISABLED
         assert await count_rows(harness.session, Campaign) == 1
         assert await count_audits(harness.session, AuditAction.CAMPAIGN_CREATED) == 1
+
+
+@async_test
+async def test_campaign_owner_projection_and_disabled_owner_full_put_preservation() -> None:
+    async with domain_harness() as harness:
+        created = await harness.campaign_service.create_campaign(
+            harness.context,
+            CampaignCreateInput(name="Campaign owner projection"),
+            idempotency_key="campaign-owner-projection",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert harness.context.operator is not None
+        assert created.result.owner.id == created.result.owner_operator_id
+        assert created.result.owner.name == harness.context.operator.name
+        assert created.result.owner.status is OperatorStatus.ACTIVE
+
+        detail = await harness.campaign_service.get_campaign(harness.context, created.result.id)
+        listed = await harness.campaign_service.list_campaigns(
+            harness.context,
+            cursor=None,
+            limit=50,
+        )
+        assert detail.owner == created.result.owner
+        assert listed.items[0].owner == created.result.owner
+
+        harness.context.operator.status = OperatorStatus.DISABLED
+        await harness.session.commit()
+
+        disabled_detail = await harness.campaign_service.get_campaign(
+            harness.context,
+            created.result.id,
+        )
+        disabled_list = await harness.campaign_service.list_campaigns(
+            harness.context,
+            cursor=None,
+            limit=50,
+        )
+        assert disabled_detail.owner.name == harness.context.operator.name
+        assert disabled_detail.owner.status is OperatorStatus.DISABLED
+        assert disabled_list.items[0].owner.status is OperatorStatus.DISABLED
+
+        preserved = await harness.campaign_service.update_campaign(
+            harness.context,
+            created.result.id,
+            CampaignUpdateInput(
+                name="Campaign owner projection renamed",
+                owner_operator_id=created.result.owner_operator_id,
+                review_mode=created.result.review_mode,
+                review_count=created.result.review_count,
+                duplicate_history_policy=created.result.duplicate_history_policy,
+                duplicate_window_days=created.result.duplicate_window_days,
+                expected_version=created.result.version,
+            ),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert preserved.owner.id == created.result.owner_operator_id
+        assert preserved.owner.status is OperatorStatus.DISABLED
+
+
+@async_test
+async def test_campaign_list_owner_projection_uses_one_joined_query() -> None:
+    async with domain_harness() as harness:
+        await create_campaign(harness, name="First owner projection")
+        await create_campaign(harness, name="Second owner projection")
+        statements: list[str] = []
+        assert harness.session.bind is not None
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            page = await harness.campaign_service.list_campaigns(
+                harness.context,
+                cursor=None,
+                limit=50,
+            )
+        finally:
+            event.remove(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+
+        assert len(page.items) == 2
+        assert len(statements) == 1
+        assert "JOIN operators" in statements[0]
+
+
+@async_test
+async def test_campaign_changed_owner_must_be_active_in_the_resolved_department() -> None:
+    async with domain_harness() as harness:
+        campaign_id = await create_campaign(harness)
+        campaign = await harness.campaign_service.get_campaign(harness.context, campaign_id)
+        disabled_owner = Operator(
+            department_id=harness.context.department.id,
+            name=f"Disabled Campaign Owner {uuid4().hex}",
+            role=Role.OPERATOR,
+            status=OperatorStatus.DISABLED,
+        )
+        active_owner = Operator(
+            department_id=harness.context.department.id,
+            name=f"Active Campaign Owner {uuid4().hex}",
+            role=Role.OPERATOR,
+            status=OperatorStatus.ACTIVE,
+        )
+        harness.session.add_all((disabled_owner, active_owner))
+        await harness.session.commit()
+        disabled_owner_id = disabled_owner.id
+        active_owner_id = active_owner.id
+
+        def update(owner_id: UUID, expected_version: int) -> CampaignUpdateInput:
+            return CampaignUpdateInput(
+                name="Changed Campaign Owner",
+                owner_operator_id=owner_id,
+                review_mode=campaign.review_mode,
+                review_count=campaign.review_count,
+                duplicate_history_policy=campaign.duplicate_history_policy,
+                duplicate_window_days=campaign.duplicate_window_days,
+                expected_version=expected_version,
+            )
+
+        with pytest.raises(CampaignOutreachError) as disabled:
+            await harness.campaign_service.update_campaign(
+                harness.context,
+                campaign_id,
+                update(disabled_owner_id, campaign.version),
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert disabled.value.code == "OPERATOR_NOT_FOUND"
+        await refresh_context_after_rollback(harness)
+
+        changed = await harness.campaign_service.update_campaign(
+            harness.context,
+            campaign_id,
+            update(active_owner_id, campaign.version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert changed.owner.id == active_owner_id
+        assert changed.owner.status is OperatorStatus.ACTIVE
+
+
+@async_test
+async def test_campaign_full_put_keeps_matching_version_closed_semantics() -> None:
+    async with domain_harness() as harness:
+        campaign_id = await create_campaign(harness)
+        campaign = await harness.campaign_service.get_campaign(harness.context, campaign_id)
+        stored = await harness.session.get(Campaign, campaign_id)
+        assert stored is not None
+        stored.status = CampaignStatus.CLOSED
+        await harness.session.commit()
+
+        with pytest.raises(CampaignOutreachError) as closed:
+            await harness.campaign_service.update_campaign(
+                harness.context,
+                campaign_id,
+                CampaignUpdateInput(
+                    name="Closed Campaign",
+                    owner_operator_id=campaign.owner_operator_id,
+                    review_mode=campaign.review_mode,
+                    review_count=campaign.review_count,
+                    duplicate_history_policy=campaign.duplicate_history_policy,
+                    duplicate_window_days=campaign.duplicate_window_days,
+                    expected_version=campaign.version,
+                ),
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert closed.value.code == "CAMPAIGN_CLOSED"
+
+
+@async_test
+async def test_super_admin_cross_department_campaign_owner_projection_and_validation() -> None:
+    async with domain_harness() as harness:
+        assert harness.context.operator is not None
+        target_department = Department(
+            name=f"Target Campaign Department {uuid4().hex}",
+            password_hash="not-used-by-domain-test",
+            status=DepartmentStatus.ACTIVE,
+            session_days=30,
+        )
+        third_department = Department(
+            name=f"Third Campaign Department {uuid4().hex}",
+            password_hash="not-used-by-domain-test",
+            status=DepartmentStatus.ACTIVE,
+            session_days=30,
+        )
+        harness.session.add_all((target_department, third_department))
+        await harness.session.flush()
+        target_owner = Operator(
+            department_id=target_department.id,
+            name="Target Campaign Owner",
+            role=Role.OPERATOR,
+            status=OperatorStatus.ACTIVE,
+        )
+        replacement_owner = Operator(
+            department_id=target_department.id,
+            name="Target Campaign Replacement",
+            role=Role.OPERATOR,
+            status=OperatorStatus.ACTIVE,
+        )
+        third_owner = Operator(
+            department_id=third_department.id,
+            name="Third Campaign Owner",
+            role=Role.OPERATOR,
+            status=OperatorStatus.ACTIVE,
+        )
+        harness.session.add_all((target_owner, replacement_owner, third_owner))
+        await harness.session.commit()
+        target_department_id = target_department.id
+        target_owner_id = target_owner.id
+        replacement_owner_id = replacement_owner.id
+        third_owner_id = third_owner.id
+        super_context = AuthContext(
+            department=harness.context.department,
+            operator=harness.context.operator,
+            role=Role.SUPER_ADMIN,
+            auth_session=harness.context.auth_session,
+        )
+        created = await harness.campaign_service.create_campaign(
+            super_context,
+            CampaignCreateInput(
+                department_id=target_department_id,
+                name="Cross-department Campaign",
+                owner_operator_id=target_owner_id,
+            ),
+            idempotency_key="cross-department-owner-projection",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert created.result.owner.id == target_owner_id
+        assert created.result.owner.name == target_owner.name
+        detail = await harness.campaign_service.get_campaign(
+            super_context,
+            created.result.id,
+            department_id=target_department_id,
+        )
+        assert detail.owner == created.result.owner
+
+        def update(owner_id: UUID) -> CampaignUpdateInput:
+            return CampaignUpdateInput(
+                name="Cross-department Campaign changed",
+                owner_operator_id=owner_id,
+                review_mode=created.result.review_mode,
+                review_count=created.result.review_count,
+                duplicate_history_policy=created.result.duplicate_history_policy,
+                duplicate_window_days=created.result.duplicate_window_days,
+                expected_version=created.result.version,
+                department_id=target_department_id,
+            )
+
+        for wrong_owner in (harness.context.operator.id, third_owner_id):
+            with pytest.raises(CampaignOutreachError) as rejected:
+                await harness.campaign_service.update_campaign(
+                    super_context,
+                    created.result.id,
+                    update(wrong_owner),
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+            assert rejected.value.code == "OPERATOR_NOT_FOUND"
+            await refresh_context_after_rollback(harness)
+
+        changed = await harness.campaign_service.update_campaign(
+            super_context,
+            created.result.id,
+            update(replacement_owner_id),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert changed.owner.id == replacement_owner_id
 
 
 @async_test

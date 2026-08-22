@@ -13,6 +13,7 @@ from sqlalchemy import and_, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from backend_core.auth.models import Operator
 from backend_core.growth.enums import CandidatePoolKind, CandidateResult, Phase3AOperationScope
 from backend_core.growth.models import (
     CandidatePool,
@@ -50,13 +51,13 @@ MAX_BATCH_SIZE = 1_000
 
 @dataclass(frozen=True, slots=True)
 class CandidatePoolPage:
-    items: tuple[CandidatePool, ...]
+    items: tuple[CandidatePoolOwnerRecord, ...]
     next_cursor: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
 class CandidateRunMemberPage:
-    items: tuple[CandidatePoolMember, ...]
+    items: tuple[CandidatePoolMemberProjectionRecord, ...]
     next_cursor: UUID | None
 
 
@@ -64,6 +65,23 @@ class CandidateRunMemberPage:
 class CandidateRunPage:
     items: tuple[CandidatePoolRun, ...]
     next_cursor: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolOwnerRecord:
+    """One Candidate Pool with its required Department-local canonical owner."""
+
+    pool: CandidatePool
+    owner: Operator
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolMemberProjectionRecord:
+    """One historical Candidate Member with safe current canonical identity."""
+
+    member: CandidatePoolMember
+    influencer: Influencer
+    platform_account: InfluencerPlatformAccount
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -148,6 +166,35 @@ class CandidatePoolRepository:
             statement = statement.execution_options(populate_existing=True).with_for_update()
         return (await self.session.execute(statement)).scalar_one_or_none()
 
+    async def get_pool_with_owner(
+        self,
+        pool_id: UUID,
+        *,
+        department_id: UUID,
+    ) -> CandidatePoolOwnerRecord | None:
+        """Return a scoped Pool and owner without excluding disabled owners."""
+
+        row = (
+            await self.session.execute(
+                select(CandidatePool, Operator)
+                .join(
+                    Operator,
+                    and_(
+                        Operator.id == CandidatePool.owner_operator_id,
+                        Operator.department_id == CandidatePool.department_id,
+                    ),
+                )
+                .where(
+                    CandidatePool.id == pool_id,
+                    CandidatePool.department_id == department_id,
+                )
+            )
+        ).first()
+        if row is None:
+            return None
+        pool, owner = row
+        return CandidatePoolOwnerRecord(pool=pool, owner=owner)
+
     async def list_pools(
         self,
         *,
@@ -155,16 +202,25 @@ class CandidatePoolRepository:
         cursor: UUID | None,
         limit: int,
     ) -> CandidatePoolPage:
-        statement = select(CandidatePool)
+        statement = select(CandidatePool, Operator).join(
+            Operator,
+            and_(
+                Operator.id == CandidatePool.owner_operator_id,
+                Operator.department_id == CandidatePool.department_id,
+            ),
+        )
         if department_id is not None:
             statement = statement.where(CandidatePool.department_id == department_id)
         if cursor is not None:
             statement = statement.where(CandidatePool.id > cursor)
         statement = statement.order_by(CandidatePool.id).limit(limit + 1)
-        rows = tuple((await self.session.execute(statement)).scalars())
+        rows = tuple(await self.session.execute(statement))
+        items = tuple(
+            CandidatePoolOwnerRecord(pool=pool, owner=owner) for pool, owner in rows[:limit]
+        )
         return CandidatePoolPage(
-            items=rows[:limit],
-            next_cursor=rows[limit - 1].id if len(rows) > limit else None,
+            items=items,
+            next_cursor=items[-1].pool.id if len(rows) > limit and items else None,
         )
 
     async def get_policy(
@@ -269,6 +325,8 @@ class CandidatePoolRepository:
     async def list_run_members(
         self,
         *,
+        pool_id: UUID,
+        department_id: UUID,
         run_id: UUID,
         cursor: UUID | None,
         limit: int,
@@ -277,19 +335,53 @@ class CandidatePoolRepository:
         # NOT_MATCH is counted on the run but never materialized as a public
         # row. Keep the invariant in the read path as well for legacy/corrupt
         # rows that may predate the materializer guard.
-        statement = select(CandidatePoolMember).where(
-            CandidatePoolMember.run_id == run_id,
-            CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
+        statement = (
+            select(CandidatePoolMember, Influencer, InfluencerPlatformAccount)
+            .select_from(CandidatePoolMember)
+            .join(
+                CandidatePoolRun,
+                and_(
+                    CandidatePoolRun.id == CandidatePoolMember.run_id,
+                    CandidatePoolRun.pool_id == pool_id,
+                ),
+            )
+            .join(
+                CandidatePool,
+                and_(
+                    CandidatePool.id == CandidatePoolRun.pool_id,
+                    CandidatePool.department_id == department_id,
+                ),
+            )
+            .join(Influencer, Influencer.id == CandidatePoolMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CandidatePoolMember.platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CandidatePoolMember.influencer_id,
+                ),
+            )
+            .where(
+                CandidatePoolMember.run_id == run_id,
+                CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
+            )
         )
         if result is not None:
             statement = statement.where(CandidatePoolMember.result == result)
         if cursor is not None:
             statement = statement.where(CandidatePoolMember.id > cursor)
         statement = statement.order_by(CandidatePoolMember.id).limit(limit + 1)
-        rows = tuple((await self.session.execute(statement)).scalars())
+        rows = tuple(await self.session.execute(statement))
+        items = tuple(
+            CandidatePoolMemberProjectionRecord(
+                member=member,
+                influencer=influencer,
+                platform_account=platform_account,
+            )
+            for member, influencer, platform_account in rows[:limit]
+        )
         return CandidateRunMemberPage(
-            items=rows[:limit],
-            next_cursor=rows[limit - 1].id if len(rows) > limit else None,
+            items=items,
+            next_cursor=items[-1].member.id if len(rows) > limit and items else None,
         )
 
     async def get_collection_job(

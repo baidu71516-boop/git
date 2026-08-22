@@ -272,6 +272,19 @@ export type CollectionJobCreateInput = {
   notes?: string | null;
 };
 
+export type CollectionJobScreeningRulesUpdatePayload = {
+  screening_rules: ScreeningRulesV1;
+  follower_min: number | null;
+  follower_max: number | null;
+  expected_revision: number;
+};
+
+export type UpdateCollectionJobScreeningRulesInput = {
+  collectionJobId: string;
+  importJobId: string;
+  payload: CollectionJobScreeningRulesUpdatePayload;
+};
+
 export type CollectionJobPublic = {
   id: string;
   name: string;
@@ -328,6 +341,13 @@ export type ImportJobPublic = {
   error_message: string | null;
   created_at: string;
   updated_at: string;
+};
+
+export type ImportJobListPage = {
+  items: ImportJobPublic[];
+  total: number;
+  offset: number;
+  limit: number;
 };
 
 export type ImportJobFilePublic = {

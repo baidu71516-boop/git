@@ -29,6 +29,7 @@ from backend_core.growth.models import (
     CandidatePoolRun,
     Phase3AIdempotencyRecord,
 )
+from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import CandidatePoolCreateInput, TargetingPolicyCreateInput
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
@@ -1877,6 +1878,183 @@ def test_immutable_policy_runs_and_members_use_closed_keyset_reads() -> None:
                     result=CandidateResult.UNKNOWN,
                 )
                 assert [member.id for member in unknown_members.items] == [UUID(int=202)]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_candidate_pool_readiness_projections_are_canonical_historical_and_bounded() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.MANAGER)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                influencer = await session.get(Influencer, account.influencer_id)
+                assert influencer is not None
+                account.platform_account_id = None
+                account.account_handle = None
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Canonical projection",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                    ),
+                    idempotency_key="candidate-canonical-projection",
+                )
+                assert pool.owner.id == pool.owner_operator_id
+                assert pool.owner.name == context.operator.name
+
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="candidate-canonical-projection-run",
+                )
+                await service.materialize_run(run.id)
+
+                influencer.status = InfluencerStatus.DISABLED
+                influencer.deleted_at = NOW
+                account.is_active = False
+                context.operator.status = OperatorStatus.DISABLED
+                context.operator.name = "Disabled historical Pool owner"
+                await session.commit()
+
+                listed = await service.list_pools(context, cursor=None, limit=50)
+                assert listed.items == (await service.get_pool(context, pool.id),)
+                assert listed.items[0].owner.id == pool.owner_operator_id
+                assert listed.items[0].owner.name == "Disabled historical Pool owner"
+                assert listed.items[0].owner.status is OperatorStatus.DISABLED
+
+                members = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert len(members.items) == 1
+                member = members.items[0]
+                assert member.influencer.id == member.influencer_id == influencer.id
+                assert member.influencer.status is InfluencerStatus.DISABLED
+                assert member.platform_account.id == member.platform_account_id == account.id
+                assert member.platform_account.platform_account_id is None
+                assert member.platform_account.account_handle is None
+                assert member.platform_account.is_active is False
+                assert not ({"email", "phone", "wechat", "contact"} & set(member.model_dump()))
+
+                repository = CandidatePoolRepository(session)
+                statements: list[str] = []
+
+                def capture(
+                    _connection: object,
+                    _cursor: object,
+                    statement: str,
+                    _parameters: object,
+                    _context: object,
+                    _executemany: bool,
+                ) -> None:
+                    if statement.lstrip().upper().startswith("SELECT"):
+                        statements.append(statement)
+
+                event.listen(engine.sync_engine, "before_cursor_execute", capture)
+                try:
+                    projection_page = await repository.list_run_members(
+                        pool_id=pool.id,
+                        department_id=context.department.id,
+                        run_id=run.id,
+                        cursor=None,
+                        limit=50,
+                    )
+                    pool_page = await repository.list_pools(
+                        department_id=context.department.id,
+                        cursor=None,
+                        limit=50,
+                    )
+                finally:
+                    event.remove(engine.sync_engine, "before_cursor_execute", capture)
+                assert len(projection_page.items) == 1
+                assert len(pool_page.items) == 1
+                assert len(statements) == 2
+                assert "JOIN influencer_platform_accounts" in statements[0]
+                assert "JOIN influencers" in statements[0]
+                assert "influencer_contacts" not in statements[0]
+                assert "JOIN operators" in statements[1]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_candidate_pool_create_replay_enriches_legacy_owner_and_rejects_cross_department() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                await session.commit()
+                service = _service(session)
+                payload = CandidatePoolCreateInput(
+                    name="Legacy owner replay",
+                    kind=CandidatePoolKind.POTENTIAL_SELLER,
+                    policy=SellerTargetingPolicy(),
+                )
+                created = await service.create_pool(
+                    context,
+                    payload,
+                    idempotency_key="candidate-legacy-owner-replay",
+                )
+                record = await session.scalar(
+                    select(Phase3AIdempotencyRecord).where(
+                        Phase3AIdempotencyRecord.operation_scope
+                        == Phase3AOperationScope.CANDIDATE_POOL_CREATE
+                    )
+                )
+                assert record is not None
+                record.result_payload = {
+                    key: value for key, value in record.result_payload.items() if key != "owner"
+                }
+                context.operator.name = "Current canonical replay owner"
+                context.operator.status = OperatorStatus.DISABLED
+                await session.commit()
+
+                replay = await service.create_pool(
+                    context,
+                    payload,
+                    idempotency_key="candidate-legacy-owner-replay",
+                )
+                assert replay.id == created.id
+                assert replay.owner.id == replay.owner_operator_id
+                assert replay.owner.name == "Current canonical replay owner"
+                assert replay.owner.status is OperatorStatus.DISABLED
+
+                other = await _actor(session, role=Role.OPERATOR)
+                assert other.operator is not None
+                record.result_payload = {
+                    **record.result_payload,
+                    "owner_operator_id": str(other.operator.id),
+                }
+                await session.commit()
+                with pytest.raises(TargetingError) as invalid:
+                    await service.create_pool(
+                        context,
+                        payload,
+                        idempotency_key="candidate-legacy-owner-replay",
+                    )
+                assert invalid.value.status_code == 409
+                assert invalid.value.code == "IDEMPOTENCY_RECORD_INVALID"
         finally:
             await engine.dispose()
 

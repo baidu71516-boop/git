@@ -251,8 +251,15 @@ class AuthService:
     async def list_active_departments(self) -> list[Department]:
         return await self.repository.list_active_departments()
 
-    async def list_operators(self, context: AuthContext) -> list[Operator]:
-        return await self.repository.list_active_operators(context.department.id)
+    async def list_operators(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> list[Operator]:
+        """List active operators in a Department scope authorized by the HTTP layer."""
+
+        return await self.repository.list_active_operators(department_id or context.department.id)
 
     async def select_operator(
         self,

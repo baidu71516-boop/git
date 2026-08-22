@@ -18,6 +18,7 @@ import {
   requestBulkPreview,
   retryBulkImportFile,
   retryBulkImportJob,
+  updateCollectionJobScreeningRules,
   updateBulkImportFileMapping,
   updateBulkImportFileSourceAcquiredAt,
   uploadBulkImportFile,
@@ -50,6 +51,7 @@ import {
   useRetryBulkImportJobMutation,
   useUpdateBulkImportFileMappingMutation,
   useUpdateBulkImportFileSourceAcquiredAtMutation,
+  useUpdateCollectionJobScreeningRulesMutation,
   useUploadBulkImportFileMutation,
 } from "@/features/imports/queries";
 import type { ImportJobFilePublic } from "@/features/imports/types";
@@ -186,6 +188,54 @@ describe("Bulk import API contract", () => {
       ["/import-jobs/job-1"],
       ["/import-jobs/job-1/files"],
     ]);
+  });
+
+  it("uses the exact screening-rule PUT path and full real-schema body", async () => {
+    apiRequestMock.mockResolvedValue(success({ id: "collection-1" }));
+    const payload = {
+      screening_rules: {
+        schema_version: 1 as const,
+        platforms: ["xiaohongshu"] as "xiaohongshu"[],
+        source_tags_exact_any: ["美妆", "护肤"],
+      },
+      follower_min: 10_000,
+      follower_max: 500_000,
+      expected_revision: 7,
+    };
+
+    await updateCollectionJobScreeningRules({
+      collectionJobId: "collection/id",
+      importJobId: "job-1",
+      payload,
+    });
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/collection-jobs/collection%2Fid/screening-rules",
+      { method: "PUT", body: JSON.stringify(payload) },
+    );
+  });
+
+  it("preserves empty platform/tag arrays and both follower nulls in a rule update", async () => {
+    apiRequestMock.mockResolvedValue(success({ id: "collection-1" }));
+    const payload = {
+      screening_rules: {
+        schema_version: 1 as const,
+        platforms: [] as "xiaohongshu"[],
+        source_tags_exact_any: [] as string[],
+      },
+      follower_min: null,
+      follower_max: null,
+      expected_revision: 1,
+    };
+
+    await updateCollectionJobScreeningRules({
+      collectionJobId: "collection-1",
+      importJobId: "job-1",
+      payload,
+    });
+
+    const request = apiRequestMock.mock.calls[0]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toEqual(payload);
   });
 
   it("submits refresh_queue_id only when the Bulk Job is created for a Queue return", async () => {
@@ -499,6 +549,7 @@ describe("Bulk query retry and polling policy", () => {
     const { result } = renderHook(
       () => ({
         createCollection: useCreateCollectionJobMutation(),
+        updateScreening: useUpdateCollectionJobScreeningRulesMutation(),
         createBulk: useCreateBulkImportJobMutation(),
         upload: useUploadBulkImportFileMutation(),
         updateTime: useUpdateBulkImportFileSourceAcquiredAtMutation(),
@@ -524,6 +575,21 @@ describe("Bulk query retry and polling policy", () => {
       () =>
         result.current.createBulk.mutateAsync({
           collection_job_id: "collection-1",
+        }),
+      () =>
+        result.current.updateScreening.mutateAsync({
+          collectionJobId: "collection-1",
+          importJobId: "job-1",
+          payload: {
+            screening_rules: {
+              schema_version: 1,
+              platforms: ["xiaohongshu"],
+              source_tags_exact_any: [],
+            },
+            follower_min: null,
+            follower_max: null,
+            expected_revision: 1,
+          },
         }),
       () =>
         result.current.upload.mutateAsync({
@@ -609,6 +675,52 @@ describe("Bulk query retry and polling policy", () => {
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: bulkImportQueryKeys.job("job-1"),
     });
+    queryClient.clear();
+  });
+
+  it("invalidates the Collection Job and current Import Job after a rule save", async () => {
+    apiRequestMock.mockResolvedValue(
+      success({ id: "collection-1", screening_rules_revision: 2 }),
+    );
+    const queryClient = new QueryClient();
+    const invalidate = vi
+      .spyOn(queryClient, "invalidateQueries")
+      .mockResolvedValue(undefined);
+    function Wrapper({ children }: { children: ReactNode }) {
+      return createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        children,
+      );
+    }
+    const { result } = renderHook(
+      () => useUpdateCollectionJobScreeningRulesMutation(),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        collectionJobId: "collection-1",
+        importJobId: "job-1",
+        payload: {
+          screening_rules: {
+            schema_version: 1,
+            platforms: ["xiaohongshu"],
+            source_tags_exact_any: ["美妆"],
+          },
+          follower_min: null,
+          follower_max: 100_000,
+          expected_revision: 1,
+        },
+      });
+    });
+
+    expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual(
+      [
+        bulkImportQueryKeys.collection("collection-1"),
+        bulkImportQueryKeys.job("job-1"),
+      ],
+    );
     queryClient.clear();
   });
 });

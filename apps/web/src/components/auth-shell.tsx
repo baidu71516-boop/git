@@ -19,8 +19,15 @@ import { useCallback, useEffect, useState } from "react";
 import { InfluencerWorkspace } from "@/features/influencers/influencer-workspace";
 import { InfluencerDetailWorkspace } from "@/features/influencers/influencer-detail-workspace";
 import { DataCollectionWorkspace } from "@/features/imports/data-collection-workspace";
+import { ImportJobHistory } from "@/features/imports/import-job-history";
 import { RefreshQueueDetail } from "@/features/refresh-queues/refresh-queue-detail";
 import { RefreshQueueList } from "@/features/refresh-queues/refresh-queue-list";
+import { TodayWorkspace } from "@/features/outreach-today/today-workspace";
+import { CampaignDetailView } from "@/features/campaigns/campaign-detail-view";
+import { CampaignListView } from "@/features/campaigns/campaign-list-view";
+import { CandidatePoolDetailView } from "@/features/candidate-pools/candidate-pool-detail-view";
+import { CandidatePoolListView } from "@/features/candidate-pools/candidate-pool-list-view";
+import { CandidateRunDetailView } from "@/features/candidate-pools/candidate-run-detail-view";
 import { AppShell } from "@/components/app-shell";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
@@ -62,7 +69,14 @@ const roleLabels: Record<Role, string> = {
   viewer: "只读成员",
 };
 
-type AuthWorkspace = "imports" | "influencers" | "refresh-queues";
+type AuthWorkspace =
+  | "imports"
+  | "import-jobs"
+  | "influencers"
+  | "refresh-queues"
+  | "outreach-today"
+  | "campaigns"
+  | "candidate-pools";
 
 function workspaceRequiresOperator(
   workspace: AuthWorkspace,
@@ -78,10 +92,16 @@ export function AuthShell({
   workspace = "imports",
   influencerId,
   refreshQueueId,
+  campaignId,
+  candidatePoolId,
+  candidateRunId,
 }: {
   workspace?: AuthWorkspace;
   influencerId?: string;
   refreshQueueId?: string;
+  campaignId?: string;
+  candidatePoolId?: string;
+  candidateRunId?: string;
 }) {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -261,13 +281,27 @@ export function AuthShell({
   const title =
     workspace === "imports"
       ? "数据采集"
-      : workspace === "refresh-queues"
-        ? refreshQueueId
-          ? "数据更新名单"
-          : "数据更新"
-        : influencerId
-          ? "达人详情"
-          : "达人库";
+      : workspace === "import-jobs"
+        ? "导入记录"
+        : workspace === "refresh-queues"
+          ? refreshQueueId
+            ? "数据更新名单"
+            : "数据更新"
+          : workspace === "outreach-today"
+            ? "今日触达"
+            : workspace === "campaigns"
+              ? campaignId
+                ? "拓客活动详情"
+                : "拓客活动"
+              : workspace === "candidate-pools"
+                ? candidateRunId
+                  ? "候选结果"
+                  : candidatePoolId
+                    ? "候选池详情"
+                    : "候选池"
+                : influencerId
+                  ? "达人详情"
+                  : "达人库";
 
   return (
     <AppShell
@@ -290,6 +324,8 @@ export function AuthShell({
         ) : (
           <InfluencerWorkspace />
         )
+      ) : workspace === "import-jobs" ? (
+        <ImportJobHistory />
       ) : workspace === "refresh-queues" ? (
         auth.role === "viewer" || auth.operator ? (
           refreshQueueId ? (
@@ -304,6 +340,40 @@ export function AuthShell({
             />
           )
         ) : null
+      ) : workspace === "outreach-today" ? (
+        <TodayWorkspace />
+      ) : workspace === "campaigns" ? (
+        campaignId ? (
+          <CampaignDetailView
+            campaignId={campaignId}
+            role={auth.role}
+            hasSelectedOperator={auth.operator !== null}
+          />
+        ) : (
+          <CampaignListView
+            role={auth.role}
+            hasSelectedOperator={auth.operator !== null}
+          />
+        )
+      ) : workspace === "candidate-pools" ? (
+        candidatePoolId ? (
+          candidateRunId ? (
+            <CandidateRunDetailView
+              poolId={candidatePoolId}
+              runId={candidateRunId}
+              role={auth.role}
+              hasSelectedOperator={auth.operator !== null}
+            />
+          ) : (
+            <CandidatePoolDetailView
+              poolId={candidatePoolId}
+              role={auth.role}
+              hasSelectedOperator={auth.operator !== null}
+            />
+          )
+        ) : (
+          <CandidatePoolListView />
+        )
       ) : auth.role === "viewer" || auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />
       ) : null}

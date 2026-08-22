@@ -17,6 +17,7 @@ from backend_core.auth.enums import OperatorStatus
 from backend_core.auth.repository import AuthRepository
 from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
 from backend_core.campaigns.errors import CampaignOutreachError
+from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.enums import (
     CandidatePoolKind,
     CandidatePoolRunStatus,
@@ -26,12 +27,15 @@ from backend_core.growth.enums import (
 )
 from backend_core.growth.models import (
     CandidatePool,
-    CandidatePoolMember,
     CandidatePoolRun,
     Phase3AIdempotencyRecord,
     TargetingPolicy,
 )
-from backend_core.growth.repository import CandidatePoolRepository
+from backend_core.growth.repository import (
+    CandidatePoolMemberProjectionRecord,
+    CandidatePoolOwnerRecord,
+    CandidatePoolRepository,
+)
 from backend_core.growth.schemas import (
     CandidatePoolCreateInput,
     CandidatePoolMemberPublic,
@@ -55,6 +59,10 @@ from backend_core.growth.targeting import (
 )
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
 from backend_core.influencers.freshness import FreshnessPolicy
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 
 
 class TargetingError(Exception):
@@ -221,19 +229,32 @@ class CandidatePoolService:
             "Persisted idempotency result is invalid",
         )
 
-    @classmethod
-    def _pool_result_from_idempotency_record(
-        cls,
+    async def _pool_result_from_idempotency_record(
+        self,
         record: Phase3AIdempotencyRecord,
     ) -> CandidatePoolPublic:
         if record.result_schema_version != IDEMPOTENCY_RESULT_SCHEMA_VERSION:
-            raise cls._invalid_idempotency_record()
+            raise self._invalid_idempotency_record()
         try:
-            result = CandidatePoolPublic.model_validate(record.result_payload)
+            owner_id = UUID(str(record.result_payload["owner_operator_id"]))
+        except (KeyError, TypeError, ValueError) as error:
+            raise self._invalid_idempotency_record() from error
+        owner = await self.auth_repository.get_operator(owner_id)
+        if owner is None or owner.department_id != record.department_id:
+            raise self._invalid_idempotency_record()
+        try:
+            result = CandidatePoolPublic.from_replay_payload(
+                record.result_payload,
+                owner=CampaignOwnerSummary.model_validate(owner),
+            )
         except ValidationError as error:
-            raise cls._invalid_idempotency_record() from error
-        if result.id != record.result_entity_id:
-            raise cls._invalid_idempotency_record()
+            raise self._invalid_idempotency_record() from error
+        if (
+            result.id != record.result_entity_id
+            or result.department_id != record.department_id
+            or result.owner.id != result.owner_operator_id
+        ):
+            raise self._invalid_idempotency_record()
         return result
 
     @classmethod
@@ -267,7 +288,7 @@ class CandidatePoolService:
             return None
         if record.request_hash != request_hash:
             raise self._idempotency_key_reused()
-        return self._pool_result_from_idempotency_record(record)
+        return await self._pool_result_from_idempotency_record(record)
 
     async def _policy_create_replay(
         self,
@@ -469,7 +490,17 @@ class CandidatePoolService:
             policy = await self._append_policy_locked(pool, operator_id, typed_definition)
             await self.session.refresh(pool)
             await self.session.refresh(policy)
-            result = CandidatePoolPublic.model_validate(pool)
+            projection = await self.repository.get_pool_with_owner(
+                pool.id,
+                department_id=resolved_department_id,
+            )
+            if projection is None:
+                raise TargetingError(
+                    500,
+                    "CANDIDATE_POOL_OWNER_PROJECTION_INVALID",
+                    "Candidate Pool owner projection is invalid",
+                )
+            result = self._pool_public_from_record(projection)
             self.audit.add(
                 action=AuditAction.CANDIDATE_POOL_CREATED,
                 result=AuditResult.SUCCESS,
@@ -687,7 +718,7 @@ class CandidatePoolService:
             limit=limit,
         )
         return CandidatePoolPage(
-            items=tuple(CandidatePoolPublic.model_validate(item) for item in page.items),
+            items=tuple(self._pool_public_from_record(item) for item in page.items),
             next_cursor=page.next_cursor,
         )
 
@@ -699,7 +730,13 @@ class CandidatePoolService:
         department_id: UUID | None = None,
     ) -> CandidatePoolPublic:
         scope = await self._resolve_read_scope(context, department_id)
-        return CandidatePoolPublic.model_validate(await self._read_pool(pool_id, scope))
+        projection = await self.repository.get_pool_with_owner(
+            pool_id,
+            department_id=scope.department_id,
+        )
+        if projection is None:
+            raise TargetingError(404, "CANDIDATE_POOL_NOT_FOUND", "Candidate Pool not found")
+        return self._pool_public_from_record(projection)
 
     async def list_policies(
         self,
@@ -954,6 +991,8 @@ class CandidatePoolService:
                 404, "CANDIDATE_POOL_RUN_NOT_FOUND", "Candidate Pool run not found"
             )
         page = await self.repository.list_run_members(
+            pool_id=pool.id,
+            department_id=scope.department_id,
             run_id=run.id,
             cursor=cursor,
             limit=limit,
@@ -966,22 +1005,35 @@ class CandidatePoolService:
         )
 
     @staticmethod
-    def _member_public(member: CandidatePoolMember, *, viewer: bool) -> CandidatePoolMemberPublic:
+    def _pool_public_from_record(record: CandidatePoolOwnerRecord) -> CandidatePoolPublic:
+        return CandidatePoolPublic.from_model(
+            record.pool,
+            owner=CampaignOwnerSummary.model_validate(record.owner),
+        )
+
+    @staticmethod
+    def _member_public(
+        record: CandidatePoolMemberProjectionRecord,
+        *,
+        viewer: bool,
+    ) -> CandidatePoolMemberPublic:
+        member = record.member
+        if record.platform_account.influencer_id != member.influencer_id:
+            raise TargetingError(
+                500,
+                "CANDIDATE_POOL_MEMBER_PROJECTION_INVALID",
+                "Candidate Pool member account projection is invalid",
+            )
         evidence = member.redacted_evidence
         if viewer:
             evidence = viewer_redacted_evidence(evidence)
         reason_codes = tuple(TargetingReasonCode(code) for code in member.reason_codes)
-        return CandidatePoolMemberPublic(
-            id=member.id,
-            run_id=member.run_id,
-            influencer_id=member.influencer_id,
-            platform_account_id=member.platform_account_id,
-            result=member.result,
+        return CandidatePoolMemberPublic.from_projection(
+            member,
+            influencer=InfluencerIdentitySummary.model_validate(record.influencer),
+            platform_account=PlatformAccountIdentitySummary.model_validate(record.platform_account),
             reason_codes=(viewer_redacted_reason_codes(reason_codes) if viewer else reason_codes),
             redacted_evidence=evidence,
-            evidence_hash=member.evidence_hash,
-            created_at=member.created_at,
-            updated_at=member.updated_at,
         )
 
     async def materialize_run(self, run_id: UUID) -> CandidatePoolRun | None:

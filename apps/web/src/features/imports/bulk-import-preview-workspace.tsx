@@ -1,11 +1,12 @@
 "use client";
 
-import { Segmented, Space, Typography } from "antd";
+import { Select, Space, Typography } from "antd";
 import { useMemo, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 
 import { BulkImportWorkspaceView } from "./bulk-import-workspace-view";
+import { ScreeningRuleEditorModal } from "./components/screening-rule-editor-modal";
 import {
   createBulkPreviewScenarios,
   getBulkPreviewRowsPage,
@@ -16,6 +17,42 @@ import type { ImportRowCategory, ImportRowPublic } from "./types";
 const { Text } = Typography;
 const noOperation = () => undefined;
 const previewPageSize = 50;
+const previewStatePlaceholder = "选择开发预览场景";
+
+function getPreviewScenarioLabel(key: BulkPreviewScenarioKey): string {
+  switch (key) {
+    case "screening_rules_editable":
+      return "筛选规则 · 可编辑";
+    case "screening_rules_conflict":
+      return "筛选规则 · 规则冲突";
+    case "screening_rules_readonly":
+      return "筛选规则 · 只读";
+    case "preview_ready":
+      return "筛选规则 · 已有数据预览";
+    case "no_job":
+      return "无批量任务";
+    case "no_files":
+      return "任务无文件";
+    case "mixed_files":
+      return "多文件处理中";
+    case "preview_stale":
+      return "数据预览需重建";
+    case "confirm_queued":
+      return "确认任务排队中";
+    case "importing":
+      return "导入中";
+    case "completed":
+      return "导入完成";
+    case "refresh_preview_ready":
+      return "更新回流预览";
+    case "refresh_completed":
+      return "更新回流完成";
+    case "failed":
+      return "任务失败";
+    default:
+      return key;
+  }
+}
 
 export function BulkImportPreviewWorkspace() {
   const scenarios = useMemo(() => createBulkPreviewScenarios(), []);
@@ -25,11 +62,15 @@ export function BulkImportPreviewWorkspace() {
   const [offset, setOffset] = useState(0);
   const [selectedRow, setSelectedRow] = useState<ImportRowPublic | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [screeningRuleModalOpen, setScreeningRuleModalOpen] = useState(false);
+  const [screeningRuleConflict, setScreeningRuleConflict] = useState(false);
+  const [screeningRuleReloading, setScreeningRuleReloading] = useState(false);
   const scenario =
     scenarios.find((candidate) => candidate.key === scenarioKey) ??
-    scenarios[0];
+    scenarios[0]!;
 
-  if (!scenario) return null;
+  const isReadOnlyScenario = scenario.key === "screening_rules_readonly";
+  const isConflictScenario = scenario.key === "screening_rules_conflict";
 
   const rowsPage = getBulkPreviewRowsPage(
     scenario,
@@ -41,6 +82,7 @@ export function BulkImportPreviewWorkspace() {
   function changeScenario(value: BulkPreviewScenarioKey) {
     const nextScenario = scenarios.find((candidate) => candidate.key === value);
     setScenarioKey(value);
+    setScreeningRuleConflict(value === "screening_rules_conflict");
     if (!nextScenario?.job?.preview_summary) setCategory("all");
     setOffset(0);
     setSelectedRow(null);
@@ -51,6 +93,26 @@ export function BulkImportPreviewWorkspace() {
     setCategory(value);
     setOffset(0);
     setSelectedRow(null);
+  }
+
+  const canShowPreviewRuleHint =
+    Boolean(
+      scenario.job?.preview_revision && scenario.job.preview_revision > 0,
+    ) && !isConflictScenario;
+
+  function openScreeningRules() {
+    setScreeningRuleModalOpen(true);
+  }
+
+  function closeScreeningRules() {
+    setScreeningRuleModalOpen(false);
+  }
+
+  async function reloadLatestScreeningRules() {
+    setScreeningRuleReloading(true);
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    setScreeningRuleConflict(false);
+    setScreeningRuleReloading(false);
   }
 
   return (
@@ -68,17 +130,26 @@ export function BulkImportPreviewWorkspace() {
       >
         <div className="data-collection-preview-controls">
           <Text strong>开发预览状态</Text>
-          <Segmented
-            block
-            value={scenarioKey}
-            options={scenarios.map(({ key, label }) => ({
-              label,
-              value: key,
-            }))}
-            onChange={(value) =>
-              changeScenario(value as BulkPreviewScenarioKey)
-            }
-          />
+          <Space direction="vertical" size="small" style={{ minWidth: 0 }}>
+            <Text type="secondary">预览场景</Text>
+            <Select
+              style={{ width: 300, maxWidth: "100%" }}
+              value={scenarioKey}
+              options={scenarios.map(({ key }) => ({
+                value: key,
+                label: getPreviewScenarioLabel(key),
+              }))}
+              onChange={(value) => changeScenario(value)}
+              showSearch
+              optionFilterProp="label"
+              filterOption={(input, option) => {
+                const label = String(option?.label ?? "").toLocaleLowerCase();
+                const keyword = input.trim().toLocaleLowerCase();
+                return label.includes(keyword);
+              }}
+              placeholder={previewStatePlaceholder}
+            />
+          </Space>
         </div>
 
         <Space orientation="vertical" size="middle" className="full-width">
@@ -86,7 +157,7 @@ export function BulkImportPreviewWorkspace() {
             job={scenario.job}
             collection={scenario.collection}
             files={scenario.files}
-            readOnly={false}
+            readOnly={isReadOnlyScenario}
             uploadItems={[]}
             busyFileId={null}
             previewBusy={false}
@@ -116,6 +187,9 @@ export function BulkImportPreviewWorkspace() {
             onRequestPreview={noOperation}
             onRebuildPreview={noOperation}
             onRetryJob={noOperation}
+            onOpenScreeningRules={
+              scenario.collection ? openScreeningRules : undefined
+            }
             preview={{
               rowsPage,
               selectedRow,
@@ -140,6 +214,23 @@ export function BulkImportPreviewWorkspace() {
               onConfirm: () => setConfirmOpen(false),
             }}
           />
+          {scenario.collection ? (
+            <ScreeningRuleEditorModal
+              open={screeningRuleModalOpen}
+              collection={scenario.collection}
+              readOnly={isReadOnlyScenario}
+              previewReady={canShowPreviewRuleHint}
+              saving={false}
+              reloading={screeningRuleReloading}
+              conflict={screeningRuleConflict}
+              error={null}
+              onCancel={closeScreeningRules}
+              onSave={() => {
+                setScreeningRuleModalOpen(false);
+              }}
+              onReloadLatest={() => void reloadLatestScreeningRules()}
+            />
+          ) : null}
         </Space>
       </section>
     </AppShell>

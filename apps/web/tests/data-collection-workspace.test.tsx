@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -187,6 +188,18 @@ function envelope(data: unknown, status = 200): Response {
               message: "not found",
               details: null,
             },
+      request_id: "request-1",
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+function apiError(status: number, code: string): Response {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      data: null,
+      error: { code, message: code, details: null },
       request_id: "request-1",
     }),
     { status, headers: { "Content-Type": "application/json" } },
@@ -503,6 +516,196 @@ describe("DataCollectionWorkspace", () => {
     expect(getItemSpy).not.toHaveBeenCalled();
     expect(setItemSpy).not.toHaveBeenCalled();
   });
+
+  it("lets a Viewer inspect all real screening fields without exposing a save action", async () => {
+    navigation.search = "workspace=bulk&bulk_job_id=job-1";
+    const fetchSpy = apiRouter(makeJob(), [makeFile()]);
+
+    renderWorkspace("viewer");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "查看筛选规则" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "查看筛选规则",
+    });
+    expect(screen.getByText("筛选规则")).toBeInTheDocument();
+    expect(screen.getByText("平台")).toBeInTheDocument();
+    expect(screen.getByText("小红书")).toBeInTheDocument();
+    expect(screen.getByText("来源标签")).toBeInTheDocument();
+    expect(screen.getByText("未设置")).toBeInTheDocument();
+    expect(screen.getByText("粉丝范围")).toBeInTheDocument();
+    expect(screen.getByText("不限")).toBeInTheDocument();
+    expect(screen.getByText("规则版本")).toBeInTheDocument();
+    expect(within(dialog).getByText("1")).toBeInTheDocument();
+    expect(
+      within(dialog).queryByRole("button", { name: "保存筛选规则" }),
+    ).not.toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(
+      false,
+    );
+  });
+
+  it("saves the five real rule fields, refetches both jobs, and reuses Backend stale UI without automation", async () => {
+    navigation.search = "workspace=bulk&bulk_job_id=job-1";
+    let currentJob = makeJob({
+      status: "preview_ready",
+      preview_revision: 1,
+    });
+    let currentCollection = { ...collection };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/import-jobs/job-1") && !init?.method) {
+          return envelope(currentJob);
+        }
+        if (url.endsWith("/import-jobs/job-1/files") && !init?.method) {
+          return envelope([makeFile()]);
+        }
+        if (url.endsWith("/collection-jobs/collection-1") && !init?.method) {
+          return envelope(currentCollection);
+        }
+        if (
+          url.endsWith("/collection-jobs/collection-1/screening-rules") &&
+          init?.method === "PUT"
+        ) {
+          currentCollection = {
+            ...currentCollection,
+            follower_min: 10_000,
+            follower_max: null,
+            screening_rules: {
+              schema_version: 1,
+              platforms: ["xiaohongshu"],
+              source_tags_exact_any: ["美妆", "护肤"],
+            },
+            screening_rules_revision: 2,
+          };
+          currentJob = { ...currentJob, status: "preview_stale" };
+          return envelope(currentCollection);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderWorkspace();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑筛选规则" }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "编辑筛选规则",
+    });
+    expect(
+      within(dialog).getByText("保存后，当前数据预览将失效，需要重新生成。"),
+    ).toBeInTheDocument();
+    fireEvent.change(within(dialog).getAllByRole("spinbutton")[0], {
+      target: { value: "10000" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "保存筛选规则" }),
+    );
+
+    await waitFor(() => {
+      const put = fetchSpy.mock.calls.find(
+        ([input, init]) =>
+          String(input).endsWith(
+            "/collection-jobs/collection-1/screening-rules",
+          ) && init?.method === "PUT",
+      );
+      expect(JSON.parse(String(put?.[1]?.body))).toEqual({
+        screening_rules: {
+          schema_version: 1,
+          platforms: ["xiaohongshu"],
+          source_tags_exact_any: [],
+        },
+        follower_min: 10_000,
+        follower_max: null,
+        expected_revision: 1,
+      });
+    });
+    expect(
+      await screen.findByText("筛选规则已更新，请重新生成数据预览。"),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("数据预览需要重新生成")).toBeInTheDocument();
+
+    const requestPaths = fetchSpy.mock.calls.map(([input]) => String(input));
+    expect(
+      requestPaths.filter((path) => path.endsWith("/import-jobs/job-1")).length,
+    ).toBeGreaterThan(1);
+    expect(
+      requestPaths.filter((path) =>
+        path.endsWith("/collection-jobs/collection-1"),
+      ).length,
+    ).toBeGreaterThan(1);
+    expect(requestPaths.some((path) => path.endsWith("/preview"))).toBe(false);
+    expect(requestPaths.some((path) => path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("shows a revision conflict and reloads latest rules without retrying or overwriting", async () => {
+    navigation.search = "workspace=bulk&bulk_job_id=job-1";
+    let latest = false;
+    let collectionReads = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/import-jobs/job-1")) return envelope(makeJob());
+        if (url.endsWith("/import-jobs/job-1/files")) {
+          return envelope([makeFile()]);
+        }
+        if (url.endsWith("/collection-jobs/collection-1") && !init?.method) {
+          collectionReads += 1;
+          return envelope(
+            latest
+              ? {
+                  ...collection,
+                  screening_rules: {
+                    ...collection.screening_rules,
+                    source_tags_exact_any: ["护肤"],
+                  },
+                  screening_rules_revision: 3,
+                }
+              : collection,
+          );
+        }
+        if (
+          url.endsWith("/collection-jobs/collection-1/screening-rules") &&
+          init?.method === "PUT"
+        ) {
+          latest = true;
+          return apiError(409, "SCREENING_RULES_REVISION_CONFLICT");
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderWorkspace();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑筛选规则" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存筛选规则" }));
+
+    expect(
+      await screen.findByText(
+        "筛选规则已被其他人更新，请重新加载最新规则后再继续编辑。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.filter(([, init]) => init?.method === "PUT"),
+    ).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "重新加载最新规则" }));
+    await waitFor(() => expect(collectionReads).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("dialog")).queryByText("未设置"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      within(screen.getByRole("dialog")).getByText("3"),
+    ).toBeInTheDocument();
+    expect(
+      fetchSpy.mock.calls.filter(([, init]) => init?.method === "PUT"),
+    ).toHaveLength(1);
+  }, 20_000);
 
   it("does not poll an idle Bulk pane after it is hidden", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

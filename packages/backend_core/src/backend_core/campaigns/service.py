@@ -20,7 +20,9 @@ from backend_core.campaigns.channels import ChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.repository import (
     CampaignMemberInsertRow,
+    CampaignMemberProjectionRecord,
     CampaignMemberRestoreRow,
+    CampaignOwnerRecord,
     CampaignRepository,
 )
 from backend_core.campaigns.schemas import (
@@ -34,6 +36,7 @@ from backend_core.campaigns.schemas import (
     CampaignMemberPage,
     CampaignMemberRemoveInput,
     CampaignMemberResult,
+    CampaignOwnerSummary,
     CampaignPage,
     CampaignResult,
     CampaignStatusTransitionInput,
@@ -51,6 +54,10 @@ from backend_core.growth.idempotency import (
 )
 from backend_core.growth.models import Campaign, Phase3AIdempotencyRecord
 from backend_core.influencers.enums import ContactType, ContactValidationStatus, Platform
+from backend_core.influencers.schemas import (
+    InfluencerIdentitySummary,
+    PlatformAccountIdentitySummary,
+)
 from backend_core.outreach.enums import OutreachChannel
 
 
@@ -119,13 +126,13 @@ class CampaignService:
         department_id: UUID | None = None,
     ) -> CampaignResult:
         scope = await self.access.resolve_read_scope(context, department_id)
-        campaign = await self.repository.get_campaign(
+        record = await self.repository.get_campaign_with_owner(
             campaign_id,
             department_id=scope.department_id,
         )
-        if campaign is None:
+        if record is None:
             raise CampaignOutreachError(404, "CAMPAIGN_NOT_FOUND", "Campaign not found")
-        return CampaignResult.from_model(campaign)
+        return self._campaign_result_from_record(record)
 
     async def list_campaigns(
         self,
@@ -149,7 +156,7 @@ class CampaignService:
             updated_at, next_campaign_id = page.next_cursor
             next_cursor = CampaignCursor(updated_at=updated_at, id=next_campaign_id)
         return CampaignPage(
-            items=tuple(CampaignResult.from_model(item) for item in page.items),
+            items=tuple(self._campaign_result_from_record(item) for item in page.items),
             next_cursor=next_cursor,
         )
 
@@ -162,16 +169,16 @@ class CampaignService:
         department_id: UUID | None = None,
     ) -> CampaignMemberResult:
         scope = await self.access.resolve_read_scope(context, department_id)
-        member = await self.repository.get_member(
+        projection = await self.repository.get_member_projection(
             member_id,
             campaign_id=campaign_id,
             department_id=scope.department_id,
         )
-        if member is None:
+        if projection is None:
             raise CampaignOutreachError(
                 404, "CAMPAIGN_MEMBER_NOT_FOUND", "Campaign member not found"
             )
-        return CampaignMemberResult.from_model(member)
+        return self._member_result_from_projection(projection)
 
     async def list_members(
         self,
@@ -216,7 +223,7 @@ class CampaignService:
                 campaign_id=campaign.id,
             )
         return CampaignMemberPage(
-            items=tuple(CampaignMemberResult.from_model(item) for item in page.items),
+            items=tuple(self._member_result_from_projection(item) for item in page.items),
             next_cursor=next_cursor,
         )
 
@@ -258,7 +265,7 @@ class CampaignService:
             key,
         )
         if existing is not None:
-            return self._replay_campaign(existing, request_hash)
+            return await self._replay_campaign(existing, request_hash)
 
         try:
             owner_id = await self._owner_operator_id(
@@ -287,7 +294,7 @@ class CampaignService:
             )
             self.session.add(campaign)
             await self.session.flush()
-            result = CampaignResult.from_model(campaign)
+            result = await self._campaign_result(campaign)
             self.idempotency.add(
                 department_id=scope.department_id,
                 operation_scope=Phase3AOperationScope.CAMPAIGN_CREATE,
@@ -320,7 +327,7 @@ class CampaignService:
                 key,
             )
             if raced is not None:
-                return self._replay_campaign(raced, request_hash)
+                return await self._replay_campaign(raced, request_hash)
             raise CampaignOutreachError(
                 409,
                 "CAMPAIGN_CREATE_CONFLICT",
@@ -351,12 +358,14 @@ class CampaignService:
                 entity_id=campaign.id,
             )
             self._require_campaign_open_for_mutation(campaign)
-            owner_id = await self._owner_operator_id(
-                scope=scope,
-                context=context,
-                actor_id=actor_id,
-                requested_owner_id=update_input.owner_operator_id,
-            )
+            owner_id = campaign.owner_operator_id
+            if update_input.owner_operator_id != campaign.owner_operator_id:
+                owner_id = await self._owner_operator_id(
+                    scope=scope,
+                    context=context,
+                    actor_id=actor_id,
+                    requested_owner_id=update_input.owner_operator_id,
+                )
             before = _safe_campaign_state(campaign)
             changed = (
                 campaign.name != update_input.name
@@ -367,7 +376,7 @@ class CampaignService:
                 or campaign.duplicate_window_days != update_input.duplicate_window_days
             )
             if not changed:
-                result = CampaignResult.from_model(campaign)
+                result = await self._campaign_result(campaign)
                 await self.session.commit()
                 return result
             campaign.name = update_input.name
@@ -379,7 +388,7 @@ class CampaignService:
             campaign.version += 1
             await self.session.flush()
             await self.session.refresh(campaign)
-            result = CampaignResult.from_model(campaign)
+            result = await self._campaign_result(campaign)
             self.audit.add(
                 action=AuditAction.CAMPAIGN_UPDATED,
                 result=AuditResult.SUCCESS,
@@ -436,7 +445,7 @@ class CampaignService:
             campaign.version += 1
             await self.session.flush()
             await self.session.refresh(campaign)
-            result = CampaignResult.from_model(campaign)
+            result = await self._campaign_result(campaign)
             self.audit.add(
                 action=AuditAction.CAMPAIGN_UPDATED,
                 result=AuditResult.SUCCESS,
@@ -638,18 +647,19 @@ class CampaignService:
         try:
             campaign = await self._locked_campaign(campaign_id, scope)
             self._require_campaign_open_for_mutation(campaign)
-            member = await self.repository.get_member(
+            projection = await self.repository.get_member_projection(
                 member_id,
                 campaign_id=campaign.id,
                 department_id=scope.department_id,
                 for_update=True,
             )
-            if member is None:
+            if projection is None:
                 raise CampaignOutreachError(
                     404,
                     "CAMPAIGN_MEMBER_NOT_FOUND",
                     "Campaign member not found",
                 )
+            member = projection.member
             self._require_expected_version(
                 member.version,
                 remove_input.expected_version,
@@ -667,7 +677,7 @@ class CampaignService:
             member.version += 1
             await self.session.flush()
             await self.session.refresh(member)
-            result = CampaignMemberResult.from_model(member)
+            result = self._member_result_from_projection(projection)
             self.audit.add(
                 action=AuditAction.CAMPAIGN_MEMBERS_REMOVED,
                 result=AuditResult.SUCCESS,
@@ -736,6 +746,51 @@ class CampaignService:
         if campaign is None:
             raise CampaignOutreachError(404, "CAMPAIGN_NOT_FOUND", "Campaign not found")
         return campaign
+
+    @staticmethod
+    def _campaign_result_from_record(record: CampaignOwnerRecord) -> CampaignResult:
+        return CampaignResult.from_model(
+            record.campaign,
+            owner=CampaignOwnerSummary.model_validate(record.owner),
+        )
+
+    @staticmethod
+    def _member_result_from_projection(
+        record: CampaignMemberProjectionRecord,
+    ) -> CampaignMemberResult:
+        """Build the one safe Member response from the repository's joined graph."""
+
+        member = record.member
+        influencer = record.influencer
+        preferred_platform_account = record.preferred_platform_account
+        if preferred_platform_account.influencer_id != member.influencer_id:
+            raise CampaignOutreachError(
+                500,
+                "CAMPAIGN_MEMBER_PROJECTION_INVALID",
+                "Campaign member preferred account projection is invalid",
+            )
+        return CampaignMemberResult.from_projection(
+            member,
+            influencer=InfluencerIdentitySummary.model_validate(influencer),
+            preferred_platform_account=PlatformAccountIdentitySummary.model_validate(
+                preferred_platform_account
+            ),
+        )
+
+    async def _campaign_result(self, campaign: Campaign) -> CampaignResult:
+        """Project one mutation result without allowing a disabled owner to disappear."""
+
+        owner = await self.auth_repository.get_operator(campaign.owner_operator_id)
+        if owner is None or owner.department_id != campaign.department_id:
+            raise CampaignOutreachError(
+                500,
+                "CAMPAIGN_OWNER_PROJECTION_INVALID",
+                "Campaign owner projection is invalid",
+            )
+        return CampaignResult.from_model(
+            campaign,
+            owner=CampaignOwnerSummary.model_validate(owner),
+        )
 
     async def _owner_operator_id(
         self,
@@ -1080,19 +1135,38 @@ class CampaignService:
             }[current]
         )
 
-    @staticmethod
-    def _replay_campaign(
+    async def _replay_campaign(
+        self,
         record: Phase3AIdempotencyRecord,
         request_hash: str,
     ) -> MutationResult[CampaignResult]:
-        CampaignService._require_matching_hash(record, request_hash)
+        self._require_matching_hash(record, request_hash)
         if record.result_schema_version != 1:
             raise CampaignOutreachError(
                 500,
                 "IDEMPOTENCY_RESULT_UNSUPPORTED",
                 "Campaign replay result schema is unsupported",
             )
-        result = CampaignResult.from_replay_payload(record.result_payload)
+        raw_owner_id = record.result_payload.get("owner_operator_id")
+        try:
+            owner_id = UUID(str(raw_owner_id))
+        except (TypeError, ValueError) as error:
+            raise CampaignOutreachError(
+                500,
+                "IDEMPOTENCY_RESULT_INVALID",
+                "Campaign replay result has an invalid owner",
+            ) from error
+        owner = await self.auth_repository.get_operator(owner_id)
+        if owner is None or owner.department_id != record.department_id:
+            raise CampaignOutreachError(
+                500,
+                "IDEMPOTENCY_RESULT_INVALID",
+                "Campaign replay result owner is invalid",
+            )
+        result = CampaignResult.from_replay_payload(
+            record.result_payload,
+            owner=CampaignOwnerSummary.model_validate(owner),
+        )
         if result.id != record.result_entity_id:
             raise CampaignOutreachError(
                 500,

@@ -195,6 +195,7 @@ export type BulkImportWorkspaceViewProps = {
   notice: string | null;
   refreshContext?: RefreshReturnContext | null;
   onNewCollection: () => void;
+  onOpenScreeningRules?: () => void;
   onSelectFiles: (files: File[]) => void;
   onRetryUpload: (item: BulkUploadItem) => void;
   onEditAcquisitionTime: (file: ImportJobFilePublic) => void;
@@ -228,6 +229,7 @@ export function BulkImportWorkspaceView({
   notice,
   refreshContext = null,
   onNewCollection,
+  onOpenScreeningRules,
   onSelectFiles,
   onRetryUpload,
   onEditAcquisitionTime,
@@ -298,6 +300,7 @@ export function BulkImportWorkspaceView({
           collection={collection}
           readOnly={readOnly}
           onNewCollection={onNewCollection}
+          onOpenScreeningRules={onOpenScreeningRules}
         />
 
         {readOnly ? (

@@ -18,6 +18,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.schema import Table
 
+from backend_core.auth.models import Operator
 from backend_core.growth.enums import CandidateResult
 from backend_core.growth.models import (
     Campaign,
@@ -26,7 +27,11 @@ from backend_core.growth.models import (
     CandidatePoolMember,
     CandidatePoolRun,
 )
-from backend_core.influencers.models import InfluencerContact, InfluencerPlatformAccount
+from backend_core.influencers.models import (
+    Influencer,
+    InfluencerContact,
+    InfluencerPlatformAccount,
+)
 from backend_core.outreach.enums import OutreachChannel, OutreachEventType
 from backend_core.outreach.models import (
     MessageTemplate,
@@ -71,16 +76,33 @@ class CampaignMemberRestoreRow:
 class CampaignRowsPage:
     """ORM rows and the final returned Campaign keyset tuple."""
 
-    items: tuple[Campaign, ...]
+    items: tuple[CampaignOwnerRecord, ...]
     next_cursor: tuple[datetime, UUID] | None
 
 
 @dataclass(frozen=True, slots=True)
-class CampaignMemberRowsPage:
-    """Active ORM Member rows and the final returned keyset tuple."""
+class CampaignOwnerRecord:
+    """One Campaign with its required, Department-local owner projection source."""
 
-    items: tuple[CampaignMember, ...]
+    campaign: Campaign
+    owner: Operator
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignMemberRowsPage:
+    """Active Member display-projection rows and the final keyset tuple."""
+
+    items: tuple[CampaignMemberProjectionRecord, ...]
     next_cursor: tuple[datetime, UUID] | None
+
+
+@dataclass(frozen=True, slots=True)
+class CampaignMemberProjectionRecord:
+    """One Member with its canonical current, non-Contact display identity."""
+
+    member: CampaignMember
+    influencer: Influencer
+    preferred_platform_account: InfluencerPlatformAccount
 
 
 class CampaignRepository:
@@ -111,6 +133,35 @@ class CampaignRepository:
             statement = statement.execution_options(populate_existing=True).with_for_update()
         return cast(Campaign | None, await self.session.scalar(statement))
 
+    async def get_campaign_with_owner(
+        self,
+        campaign_id: UUID,
+        *,
+        department_id: UUID,
+    ) -> CampaignOwnerRecord | None:
+        """Return one scoped Campaign and its owner without filtering disabled owners."""
+
+        row = (
+            await self.session.execute(
+                select(Campaign, Operator)
+                .join(
+                    Operator,
+                    and_(
+                        Operator.id == Campaign.owner_operator_id,
+                        Operator.department_id == Campaign.department_id,
+                    ),
+                )
+                .where(
+                    Campaign.id == campaign_id,
+                    Campaign.department_id == department_id,
+                )
+            )
+        ).first()
+        if row is None:
+            return None
+        campaign, owner = row
+        return CampaignOwnerRecord(campaign=campaign, owner=owner)
+
     async def list_campaigns(self, *, department_id: UUID | None) -> list[Campaign]:
         statement = select(Campaign)
         if department_id is not None:
@@ -131,7 +182,17 @@ class CampaignRepository:
     ) -> CampaignRowsPage:
         """Return one Department-scoped Campaign page in the frozen DESC order."""
 
-        statement = select(Campaign).where(Campaign.department_id == department_id)
+        statement = (
+            select(Campaign, Operator)
+            .join(
+                Operator,
+                and_(
+                    Operator.id == Campaign.owner_operator_id,
+                    Operator.department_id == Campaign.department_id,
+                ),
+            )
+            .where(Campaign.department_id == department_id)
+        )
         if cursor_updated_at is not None and cursor_id is not None:
             statement = statement.where(
                 or_(
@@ -143,12 +204,18 @@ class CampaignRepository:
                 )
             )
         rows = tuple(
-            await self.session.scalars(
+            await self.session.execute(
                 statement.order_by(Campaign.updated_at.desc(), Campaign.id.desc()).limit(limit + 1)
             )
         )
-        items = rows[:limit]
-        next_cursor = (items[-1].updated_at, items[-1].id) if len(rows) > limit and items else None
+        items = tuple(
+            CampaignOwnerRecord(campaign=campaign, owner=owner) for campaign, owner in rows[:limit]
+        )
+        next_cursor = (
+            (items[-1].campaign.updated_at, items[-1].campaign.id)
+            if len(rows) > limit and items
+            else None
+        )
         return CampaignRowsPage(items=items, next_cursor=next_cursor)
 
     async def get_member(
@@ -159,6 +226,8 @@ class CampaignRepository:
         department_id: UUID | None,
         for_update: bool = False,
     ) -> CampaignMember | None:
+        """Return the raw Member for non-display domain workflows."""
+
         statement = (
             select(CampaignMember)
             .where(
@@ -173,6 +242,53 @@ class CampaignRepository:
             statement = statement.with_for_update()
         return cast(CampaignMember | None, await self.session.scalar(statement))
 
+    async def get_member_projection(
+        self,
+        member_id: UUID,
+        *,
+        campaign_id: UUID,
+        department_id: UUID,
+        for_update: bool = False,
+    ) -> CampaignMemberProjectionRecord | None:
+        """Return one scoped Member with its current, non-Contact display identity."""
+
+        statement = (
+            select(CampaignMember, Influencer, InfluencerPlatformAccount)
+            .select_from(CampaignMember)
+            .join(
+                Campaign,
+                and_(
+                    Campaign.id == CampaignMember.campaign_id,
+                    Campaign.department_id == CampaignMember.department_id,
+                ),
+            )
+            .join(Influencer, Influencer.id == CampaignMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CampaignMember.preferred_platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CampaignMember.influencer_id,
+                ),
+            )
+            .where(
+                CampaignMember.id == member_id,
+                CampaignMember.campaign_id == campaign_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+        statement = statement.where(CampaignMember.department_id == department_id)
+        if for_update:
+            statement = statement.with_for_update(of=CampaignMember)
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        member, influencer, preferred_platform_account = row
+        return CampaignMemberProjectionRecord(
+            member=member,
+            influencer=influencer,
+            preferred_platform_account=preferred_platform_account,
+        )
+
     async def list_active_members_page(
         self,
         *,
@@ -184,10 +300,29 @@ class CampaignRepository:
     ) -> CampaignMemberRowsPage:
         """Return active Members in immutable creation order for one scoped Campaign."""
 
-        statement = select(CampaignMember).where(
-            CampaignMember.campaign_id == campaign_id,
-            CampaignMember.department_id == department_id,
-            CampaignMember.removed_at.is_(None),
+        statement = (
+            select(CampaignMember, Influencer, InfluencerPlatformAccount)
+            .select_from(CampaignMember)
+            .join(
+                Campaign,
+                and_(
+                    Campaign.id == CampaignMember.campaign_id,
+                    Campaign.department_id == CampaignMember.department_id,
+                ),
+            )
+            .join(Influencer, Influencer.id == CampaignMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CampaignMember.preferred_platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CampaignMember.influencer_id,
+                ),
+            )
+            .where(
+                CampaignMember.campaign_id == campaign_id,
+                CampaignMember.department_id == department_id,
+                CampaignMember.removed_at.is_(None),
+            )
         )
         if cursor_created_at is not None and cursor_id is not None:
             statement = statement.where(
@@ -200,12 +335,23 @@ class CampaignRepository:
                 )
             )
         rows = tuple(
-            await self.session.scalars(
+            await self.session.execute(
                 statement.order_by(CampaignMember.created_at, CampaignMember.id).limit(limit + 1)
             )
         )
-        items = rows[:limit]
-        next_cursor = (items[-1].created_at, items[-1].id) if len(rows) > limit and items else None
+        items = tuple(
+            CampaignMemberProjectionRecord(
+                member=member,
+                influencer=influencer,
+                preferred_platform_account=preferred_platform_account,
+            )
+            for member, influencer, preferred_platform_account in rows[:limit]
+        )
+        next_cursor = (
+            (items[-1].member.created_at, items[-1].member.id)
+            if len(rows) > limit and items
+            else None
+        )
         return CampaignMemberRowsPage(items=items, next_cursor=next_cursor)
 
     async def list_members_for_influencers(
