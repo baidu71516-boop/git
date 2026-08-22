@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/workspace/.venv/bin:$PATH"
 
 RUN groupadd --system app && useradd --system --gid app --home-dir /workspace app \
-    && pip install --no-cache-dir uv==0.12.3
+    && pip install --no-cache-dir --timeout 180 --retries 5 uv==0.12.3
 
 WORKDIR /workspace
 COPY . .
