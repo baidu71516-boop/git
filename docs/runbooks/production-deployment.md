@@ -29,6 +29,9 @@ headers from the host Nginx only because Docker Nginx is loopback-only and host
 Nginx is the sole public ingress. Do not use that inner config for a
 directly Internet-exposed Docker Nginx.
 
+At the public boundary, host Nginx overwrites `X-Forwarded-For` with
+`$remote_addr`. The inner loopback Nginx then preserves that trusted value.
+
 Install `infrastructure/nginx/host-baidu.zmcmbd.com.conf` as the enabled host
 site, create `/var/www/certbot`, then validate and reload:
 
