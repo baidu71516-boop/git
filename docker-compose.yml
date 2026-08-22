@@ -75,7 +75,7 @@ services:
       - app.celery_app:celery_app
       - worker
       - --loglevel=INFO
-      - --queues=default,import,ai,email,analytics
+      - --queues=default,import,ai,email,analytics,targeting
       - --hostname=worker@%h
     env_file: .env
     volumes:

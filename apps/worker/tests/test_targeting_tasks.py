@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import uuid4
 
@@ -11,6 +14,16 @@ from app.celery_app import celery_app
 from app.tasks import targeting as targeting_tasks
 from backend_core.config import Settings
 from backend_core.growth.service import TargetingError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+REQUIRED_WORKER_QUEUES = {
+    "default",
+    "import",
+    "ai",
+    "email",
+    "analytics",
+    "targeting",
+}
 
 
 def _settings() -> Settings:
@@ -49,6 +62,35 @@ def test_targeting_tasks_routes_and_reconciler_are_registered() -> None:
         "schedule": 60,
         "options": {"queue": "default"},
     }
+
+
+def test_rendered_production_worker_consumes_targeting_and_existing_queues() -> None:
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            ".env.example",
+            "-f",
+            "docker-compose.yml",
+            "-f",
+            "infrastructure/production/docker-compose.loopback.yml",
+            "config",
+            "--no-env-resolution",
+            "--format",
+            "json",
+        ],
+        check=True,
+        capture_output=True,
+        cwd=PROJECT_ROOT,
+        text=True,
+    )
+    rendered = json.loads(result.stdout)
+    command = rendered["services"]["worker"]["command"]
+    queue_arguments = [argument for argument in command if argument.startswith("--queues=")]
+
+    assert queue_arguments == ["--queues=default,import,ai,email,analytics,targeting"]
+    assert set(queue_arguments[0].removeprefix("--queues=").split(",")) == REQUIRED_WORKER_QUEUES
 
 
 def test_materializer_entrypoint_validates_and_delegates_id_only_payload() -> None:
