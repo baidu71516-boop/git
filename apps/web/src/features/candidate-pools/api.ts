@@ -2,7 +2,9 @@ import { ApiClientError, apiRequest } from "@/lib/api/client";
 
 import type {
   CandidateCampaignAddResult,
+  CandidateCampaignSelection,
   CandidateMemberPage,
+  CandidateMemberPageSize,
   CandidatePool,
   CandidatePoolPage,
   CandidatePoolRun,
@@ -11,6 +13,8 @@ import type {
 } from "./types";
 
 export const CANDIDATE_POOL_PAGE_LIMIT = 50;
+export const CANDIDATE_MEMBER_PAGE_LIMIT: CandidateMemberPageSize = 50;
+export const CANDIDATE_MEMBER_PAGE_SIZES = [20, 50, 100, 200] as const;
 
 function requireData<T>(data: T | null, label: string): T {
   if (data === null)
@@ -25,9 +29,10 @@ function pagePath(
   path: string,
   cursor?: string | null,
   result?: "MATCH" | "UNKNOWN",
+  limit = CANDIDATE_POOL_PAGE_LIMIT,
 ) {
   const params = new URLSearchParams({
-    limit: String(CANDIDATE_POOL_PAGE_LIMIT),
+    limit: String(limit),
   });
   if (cursor) params.set("cursor", cursor);
   if (result) params.set("result", result);
@@ -39,6 +44,20 @@ export function candidatePoolPath(poolId: string) {
 }
 export function candidateRunPath(poolId: string, runId: string) {
   return `${candidatePoolPath(poolId)}/runs/${encoded(runId)}`;
+}
+export function candidateMemberPagePath(
+  poolId: string,
+  runId: string,
+  cursor?: string | null,
+  result?: "MATCH" | "UNKNOWN",
+  pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
+) {
+  return pagePath(
+    `${candidateRunPath(poolId, runId)}/members`,
+    cursor,
+    result,
+    pageSize,
+  );
 }
 
 export async function fetchCandidatePoolPage(
@@ -97,11 +116,12 @@ export async function fetchCandidateMembers(
   runId: string,
   cursor?: string | null,
   result?: "MATCH" | "UNKNOWN",
+  pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
 ): Promise<CandidateMemberPage> {
   return requireData(
     (
       await apiRequest<CandidateMemberPage>(
-        pagePath(`${candidateRunPath(poolId, runId)}/members`, cursor, result),
+        candidateMemberPagePath(poolId, runId, cursor, result, pageSize),
       )
     ).data,
     "候选结果列表",
@@ -122,12 +142,34 @@ export async function createCandidateRun(
     "生成候选结果",
   );
 }
-export async function addCandidatesToCampaign(
+export function addCandidatesToCampaign(
+  campaignId: string,
+  selection: CandidateCampaignSelection,
+  idempotencyKey: string,
+): Promise<CandidateCampaignAddResult>;
+/** @deprecated Pass a CandidateCampaignSelection instead. */
+export function addCandidatesToCampaign(
   campaignId: string,
   runId: string,
   memberIds: string[],
   idempotencyKey: string,
+): Promise<CandidateCampaignAddResult>;
+export async function addCandidatesToCampaign(
+  campaignId: string,
+  selectionOrRunId: CandidateCampaignSelection | string,
+  idempotencyKeyOrMemberIds: string | string[],
+  legacyIdempotencyKey?: string,
 ): Promise<CandidateCampaignAddResult> {
+  const [selection, idempotencyKey] =
+    typeof selectionOrRunId === "string"
+      ? [
+          {
+            run_id: selectionOrRunId,
+            member_ids: idempotencyKeyOrMemberIds as string[],
+          } satisfies CandidateCampaignSelection,
+          legacyIdempotencyKey as string,
+        ]
+      : [selectionOrRunId, idempotencyKeyOrMemberIds as string];
   return requireData(
     (
       await apiRequest<CandidateCampaignAddResult>(
@@ -135,7 +177,7 @@ export async function addCandidatesToCampaign(
         {
           method: "POST",
           headers: { "Idempotency-Key": idempotencyKey },
-          body: JSON.stringify({ run_id: runId, member_ids: memberIds }),
+          body: JSON.stringify(selection),
         },
       )
     ).data,

@@ -24,6 +24,7 @@ from backend_core.campaigns.repository import (
     CampaignMemberRestoreRow,
     CampaignOwnerRecord,
     CampaignRepository,
+    CandidatePoolRunAmbiguityRecord,
 )
 from backend_core.campaigns.schemas import (
     CampaignCreateInput,
@@ -52,7 +53,12 @@ from backend_core.growth.idempotency import (
     canonical_request_hash,
     validate_idempotency_key,
 )
-from backend_core.growth.models import Campaign, Phase3AIdempotencyRecord
+from backend_core.growth.models import (
+    Campaign,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    Phase3AIdempotencyRecord,
+)
 from backend_core.influencers.enums import ContactType, ContactValidationStatus, Platform
 from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
@@ -79,6 +85,15 @@ class MutationResult[ResultT]:
     replayed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class _CampaignMemberBulkAddCounts:
+    """Aggregate mutable Member outcomes without retaining source rows."""
+
+    added_count: int
+    restored_count: int
+    already_active_count: int
+
+
 def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise CampaignOutreachError(500, "CLOCK_INVALID", "Clock must return a timezone-aware time")
@@ -100,6 +115,9 @@ def _safe_campaign_state(campaign: Campaign) -> dict[str, object]:
 
 class CampaignService:
     """Own Campaign lifecycle, Member history, Audit, CAS, and A1 replay behavior."""
+
+    _ALL_MATCH_SOURCE_CHUNK_SIZE = 200
+    _ALL_MATCH_AMBIGUITY_SOURCE_CHUNK_SIZE = 200
 
     def __init__(
         self,
@@ -561,21 +579,46 @@ class CampaignService:
         ip: str,
         user_agent: str,
     ) -> MutationResult[CampaignMemberBulkAddResult]:
-        """Add explicitly selected persisted MATCH/UNKNOWN rows from one completed run."""
+        """Add one explicit selection or all persisted MATCH rows from a completed run."""
 
         scope, actor_id = await self.access.resolve_mutation_scope(
             context,
             add_input.department_id,
         )
         key = self._validated_idempotency_key(idempotency_key)
-        member_ids = self._canonical_member_ids(add_input.member_ids)
-        request_hash = canonical_request_hash(
-            {
-                "campaign_id": campaign_id,
-                "source_pool_run_id": add_input.run_id,
-                "member_ids": member_ids,
-            }
-        )
+        if add_input.selection_mode == "ALL_MATCH":
+            if add_input.excluded_member_ids is None:
+                raise CampaignOutreachError(
+                    422,
+                    "CANDIDATE_POOL_RUN_SELECTION_INVALID",
+                    "ALL_MATCH selection requires excluded Candidate pool member IDs",
+                )
+            excluded_member_ids = self._canonical_excluded_member_ids(add_input.excluded_member_ids)
+            request_hash = canonical_request_hash(
+                {
+                    "campaign_id": campaign_id,
+                    "source_pool_run_id": add_input.run_id,
+                    "selection_mode": "ALL_MATCH",
+                    "excluded_member_ids": excluded_member_ids,
+                }
+            )
+        else:
+            if add_input.member_ids is None:
+                raise CampaignOutreachError(
+                    422,
+                    "CANDIDATE_POOL_RUN_SELECTION_INVALID",
+                    "Explicit selection requires Candidate pool member IDs",
+                )
+            member_ids = self._canonical_member_ids(add_input.member_ids)
+            # Preserve the existing explicit request hash exactly so historical
+            # idempotency records replay without a migration or hash rewrite.
+            request_hash = canonical_request_hash(
+                {
+                    "campaign_id": campaign_id,
+                    "source_pool_run_id": add_input.run_id,
+                    "member_ids": member_ids,
+                }
+            )
         existing = await self.idempotency.get(
             scope.department_id,
             Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
@@ -587,21 +630,33 @@ class CampaignService:
         try:
             campaign = await self._locked_campaign(campaign_id, scope)
             self._require_campaign_open_for_mutation(campaign)
-            members = await self._selected_run_members(
-                department_id=scope.department_id,
-                run_id=add_input.run_id,
-                member_ids=member_ids,
-            )
-            result = await self._apply_member_bulk_add(
-                context=context,
-                scope=scope,
-                actor_id=actor_id,
-                campaign=campaign,
-                members=members,
-                source_pool_run_id=add_input.run_id,
-                ip=ip,
-                user_agent=user_agent,
-            )
+            if add_input.selection_mode == "ALL_MATCH":
+                result = await self._apply_all_match_member_bulk_add(
+                    context=context,
+                    scope=scope,
+                    actor_id=actor_id,
+                    campaign=campaign,
+                    run_id=add_input.run_id,
+                    excluded_member_ids=excluded_member_ids,
+                    ip=ip,
+                    user_agent=user_agent,
+                )
+            else:
+                members = await self._selected_run_members(
+                    department_id=scope.department_id,
+                    run_id=add_input.run_id,
+                    member_ids=member_ids,
+                )
+                result = await self._apply_member_bulk_add(
+                    context=context,
+                    scope=scope,
+                    actor_id=actor_id,
+                    campaign=campaign,
+                    members=members,
+                    source_pool_run_id=add_input.run_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                )
             self.idempotency.add(
                 department_id=scope.department_id,
                 operation_scope=Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
@@ -723,6 +778,18 @@ class CampaignService:
                 422,
                 "CANDIDATE_POOL_RUN_MEMBER_DUPLICATE",
                 "Candidate pool member_ids must be distinct",
+            )
+        return tuple(sorted(member_ids, key=str))
+
+    @staticmethod
+    def _canonical_excluded_member_ids(member_ids: tuple[UUID, ...]) -> tuple[UUID, ...]:
+        """Canonicalize bounded ALL_MATCH exclusions without silently deduplicating them."""
+
+        if len(set(member_ids)) != len(member_ids):
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_DUPLICATE",
+                "Excluded Candidate pool member_ids must be distinct",
             )
         return tuple(sorted(member_ids, key=str))
 
@@ -869,6 +936,80 @@ class CampaignService:
     ) -> tuple[CampaignMemberAddItem, ...]:
         """Resolve one explicit candidate selection without auto-including UNKNOWN rows."""
 
+        source_run = await self._completed_source_run(
+            department_id=department_id,
+            run_id=run_id,
+        )
+        selected = await self.repository.list_selected_source_run_members(
+            source_pool_run_id=source_run.id,
+            member_ids=member_ids,
+        )
+        if len(selected) != len(member_ids):
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND",
+                "Every selected Candidate pool member must belong to the selected run",
+            )
+        ambiguity = await self._first_explicit_selection_ambiguity(
+            source_pool_run_id=source_run.id,
+            selected_members=selected,
+        )
+        if ambiguity is not None:
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
+                "Selected Candidate pool members cannot choose multiple accounts "
+                "for one influencer",
+                safe_details=self._ambiguity_details(ambiguity),
+            )
+        return tuple(
+            CampaignMemberAddItem(
+                influencer_id=member.influencer_id,
+                preferred_platform_account_id=member.platform_account_id,
+            )
+            for member in selected
+        )
+
+    async def _first_explicit_selection_ambiguity(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        selected_members: tuple[CandidatePoolMember, ...],
+    ) -> CandidatePoolRunAmbiguityRecord | None:
+        """Find one explicit same-Influencer account conflict in bounded memory."""
+
+        first_member_by_influencer: dict[UUID, CandidatePoolMember] = {}
+        for member in selected_members:
+            first_member = first_member_by_influencer.get(member.influencer_id)
+            if first_member is None:
+                first_member_by_influencer[member.influencer_id] = member
+                continue
+            if first_member.platform_account_id == member.platform_account_id:
+                continue
+            ambiguity = await self.repository.source_run_member_pair_ambiguity(
+                source_pool_run_id=source_pool_run_id,
+                member_ids=(first_member.id, member.id),
+            )
+            if ambiguity is None:
+                # The selected rows were just validated against this locked
+                # run.  Treat a failed joined identity projection as a
+                # fail-closed integrity error instead of hiding the conflict.
+                raise CampaignOutreachError(
+                    500,
+                    "CANDIDATE_POOL_RUN_AMBIGUITY_DETAILS_UNAVAILABLE",
+                    "Candidate pool member conflict details are unavailable",
+                )
+            return ambiguity
+        return None
+
+    async def _completed_source_run(
+        self,
+        *,
+        department_id: UUID,
+        run_id: UUID,
+    ) -> CandidatePoolRun:
+        """Lock one Department-owned, terminal source run before a membership mutation."""
+
         source_run = await self.repository.get_source_pool_run(
             run_id,
             department_id=department_id,
@@ -886,33 +1027,152 @@ class CampaignService:
                 "CANDIDATE_POOL_RUN_NOT_COMPLETED",
                 "Candidate pool run must be completed before Campaign members are added",
             )
-        selected = await self.repository.list_selected_source_run_members(
-            source_pool_run_id=source_run.id,
-            member_ids=member_ids,
+        return source_run
+
+    async def _apply_all_match_member_bulk_add(
+        self,
+        *,
+        context: AuthContext,
+        scope: DepartmentScope,
+        actor_id: UUID,
+        campaign: Campaign,
+        run_id: UUID,
+        excluded_member_ids: tuple[UUID, ...],
+        ip: str,
+        user_agent: str,
+    ) -> CampaignMemberBulkAddResult:
+        """Resolve MATCH minus exclusions server-side in fixed UUID-keyset chunks."""
+
+        source_run = await self._completed_source_run(
+            department_id=scope.department_id,
+            run_id=run_id,
         )
-        if len(selected) != len(member_ids):
+        valid_exclusion_count = await self.repository.count_matching_source_run_members(
+            source_pool_run_id=source_run.id,
+            member_ids=excluded_member_ids,
+        )
+        if valid_exclusion_count != len(excluded_member_ids):
             raise CampaignOutreachError(
                 422,
                 "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND",
-                "Every selected Candidate pool member must belong to the selected run",
+                "Every ALL_MATCH exclusion must be a MATCH Candidate pool member "
+                "of the selected run",
             )
-        if await self.repository.selected_source_run_has_multiple_accounts_per_influencer(
+        excluded_member_id_set = set(excluded_member_ids)
+        ambiguity = await self._first_all_match_ambiguity(
             source_pool_run_id=source_run.id,
-            member_ids=member_ids,
-        ):
+            excluded_member_ids=excluded_member_id_set,
+        )
+        if ambiguity is not None:
             raise CampaignOutreachError(
                 422,
                 "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
-                "Selected Candidate pool members cannot choose multiple accounts "
-                "for one influencer",
+                "ALL_MATCH cannot choose multiple platform accounts for one influencer; "
+                "exclude one account and retry",
+                safe_details=self._ambiguity_details(ambiguity),
             )
-        return tuple(
-            CampaignMemberAddItem(
-                influencer_id=member.influencer_id,
-                preferred_platform_account_id=member.platform_account_id,
-            )
-            for member in selected
+
+        target_side_actor_id = await self._target_side_actor_id(
+            context=context,
+            scope=scope,
+            actor_id=actor_id,
+            fallback_operator_id=campaign.owner_operator_id,
         )
+        after_member_id: UUID | None = None
+        requested_count = 0
+        added_count = 0
+        restored_count = 0
+        already_active_count = 0
+        while True:
+            source_page = await self.repository.list_matching_source_run_members_page(
+                source_pool_run_id=source_run.id,
+                after_member_id=after_member_id,
+                limit=self._ALL_MATCH_SOURCE_CHUNK_SIZE,
+            )
+            if not source_page:
+                break
+            after_member_id = source_page[-1].id
+            members = tuple(
+                CampaignMemberAddItem(
+                    influencer_id=source_member.influencer_id,
+                    preferred_platform_account_id=source_member.platform_account_id,
+                )
+                for source_member in source_page
+                if source_member.id not in excluded_member_id_set
+            )
+            if not members:
+                continue
+            outcomes = await self._apply_member_bulk_add_chunk(
+                scope=scope,
+                campaign=campaign,
+                members=members,
+                source_pool_run_id=source_run.id,
+                target_side_actor_id=target_side_actor_id,
+            )
+            requested_count += len(members)
+            added_count += outcomes.added_count
+            restored_count += outcomes.restored_count
+            already_active_count += outcomes.already_active_count
+
+        if requested_count == 0:
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_SELECTION_EMPTY",
+                "ALL_MATCH resolved to no Candidate pool members",
+            )
+        return await self._finalize_member_bulk_add(
+            scope=scope,
+            actor_id=actor_id,
+            campaign=campaign,
+            source_pool_run_id=source_run.id,
+            requested_count=requested_count,
+            outcomes=_CampaignMemberBulkAddCounts(
+                added_count=added_count,
+                restored_count=restored_count,
+                already_active_count=already_active_count,
+            ),
+            ip=ip,
+            user_agent=user_agent,
+        )
+
+    async def _first_all_match_ambiguity(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        excluded_member_ids: set[UUID],
+    ) -> CandidatePoolRunAmbiguityRecord | None:
+        """Find one conflict without expanding exclusions or re-sorting source pages."""
+
+        return await self.repository.first_matching_source_run_ambiguity(
+            source_pool_run_id=source_pool_run_id,
+            excluded_member_ids=excluded_member_ids,
+            chunk_size=self._ALL_MATCH_AMBIGUITY_SOURCE_CHUNK_SIZE,
+        )
+
+    @staticmethod
+    def _ambiguity_details(
+        ambiguity: CandidatePoolRunAmbiguityRecord,
+    ) -> dict[str, object]:
+        """Return only current authorized run identities a client can safely highlight."""
+
+        accounts = [
+            {
+                "member_id": str(account.member_id),
+                "platform_account_id": str(account.platform_account_id),
+                "platform": account.platform.value,
+                "account_name": account.account_name,
+                "account_handle": account.account_handle,
+            }
+            for account in ambiguity.accounts
+        ]
+        return {
+            "conflicting_influencer": {
+                "id": str(ambiguity.influencer_id),
+                "display_name": ambiguity.influencer_display_name,
+            },
+            "conflicting_member_ids": [account["member_id"] for account in accounts],
+            "conflicting_accounts": accounts,
+        }
 
     async def _apply_member_bulk_add(
         self,
@@ -929,6 +1189,41 @@ class CampaignService:
         """Apply a bounded, set-prevalidated Member selection within the current transaction."""
 
         self._require_campaign_open_for_mutation(campaign)
+        target_side_actor_id = await self._target_side_actor_id(
+            context=context,
+            scope=scope,
+            actor_id=actor_id,
+            fallback_operator_id=campaign.owner_operator_id,
+        )
+        outcomes = await self._apply_member_bulk_add_chunk(
+            scope=scope,
+            campaign=campaign,
+            members=members,
+            source_pool_run_id=source_pool_run_id,
+            target_side_actor_id=target_side_actor_id,
+        )
+        return await self._finalize_member_bulk_add(
+            scope=scope,
+            actor_id=actor_id,
+            campaign=campaign,
+            source_pool_run_id=source_pool_run_id,
+            requested_count=len(members),
+            outcomes=outcomes,
+            ip=ip,
+            user_agent=user_agent,
+        )
+
+    async def _apply_member_bulk_add_chunk(
+        self,
+        *,
+        scope: DepartmentScope,
+        campaign: Campaign,
+        members: tuple[CampaignMemberAddItem, ...],
+        source_pool_run_id: UUID | None,
+        target_side_actor_id: UUID,
+    ) -> _CampaignMemberBulkAddCounts:
+        """Apply one fixed source chunk without emitting an audit record per chunk."""
+
         await self._validate_preferred_accounts(members)
         existing_members = {
             member.influencer_id: member
@@ -938,12 +1233,6 @@ class CampaignService:
                 for_update=True,
             )
         }
-        target_side_actor_id = await self._target_side_actor_id(
-            context=context,
-            scope=scope,
-            actor_id=actor_id,
-            fallback_operator_id=campaign.owner_operator_id,
-        )
         added_count = 0
         restored_count = 0
         already_active_count = 0
@@ -989,17 +1278,37 @@ class CampaignService:
                 "CAMPAIGN_MEMBER_CONFLICT",
                 "Campaign member mutation conflicted",
             )
+        return _CampaignMemberBulkAddCounts(
+            added_count=added_count,
+            restored_count=restored_count,
+            already_active_count=already_active_count,
+        )
+
+    async def _finalize_member_bulk_add(
+        self,
+        *,
+        scope: DepartmentScope,
+        actor_id: UUID,
+        campaign: Campaign,
+        source_pool_run_id: UUID | None,
+        requested_count: int,
+        outcomes: _CampaignMemberBulkAddCounts,
+        ip: str,
+        user_agent: str,
+    ) -> CampaignMemberBulkAddResult:
+        """Aggregate chunk outcomes into the stable mutation result and one audit fact."""
+
         active_count_after = await self.repository.count_active_members(campaign.id)
         result = CampaignMemberBulkAddResult(
             campaign_id=campaign.id,
             source_pool_run_id=source_pool_run_id,
-            requested_count=len(members),
-            added_count=added_count,
-            restored_count=restored_count,
-            already_active_count=already_active_count,
+            requested_count=requested_count,
+            added_count=outcomes.added_count,
+            restored_count=outcomes.restored_count,
+            already_active_count=outcomes.already_active_count,
             active_count_after=active_count_after,
         )
-        if added_count or restored_count:
+        if outcomes.added_count or outcomes.restored_count:
             self.audit.add(
                 action=AuditAction.CAMPAIGN_MEMBERS_ADDED,
                 result=AuditResult.SUCCESS,
@@ -1010,9 +1319,9 @@ class CampaignService:
                 entity_type="campaign",
                 entity_id=campaign.id,
                 after={
-                    "added_count": added_count,
-                    "restored_count": restored_count,
-                    "already_active_count": already_active_count,
+                    "added_count": outcomes.added_count,
+                    "restored_count": outcomes.restored_count,
+                    "already_active_count": outcomes.already_active_count,
                     "active_count_after": active_count_after,
                     "cross_department_override": scope.cross_department_override,
                 },

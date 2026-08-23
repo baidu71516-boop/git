@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from backend_core.auth.service import AuthContext
@@ -113,11 +113,28 @@ class CampaignMemberBulkAddRequest(Phase3AHttpWrite):
 
 
 class CampaignMemberFromCandidateRunRequest(Phase3AHttpWrite):
+    """Strict explicit-or-ALL_MATCH source-run selection request."""
+
     run_id: UUID
-    member_ids: tuple[UUID, ...] = Field(min_length=1, max_length=10_000)
+    selection_mode: Literal["ALL_MATCH"] | None = None
+    member_ids: tuple[UUID, ...] | None = Field(default=None, min_length=1, max_length=10_000)
+    excluded_member_ids: tuple[UUID, ...] | None = Field(default=None, max_length=10_000)
 
     @model_validator(mode="after")
-    def require_distinct_member_ids(self) -> CampaignMemberFromCandidateRunRequest:
+    def require_exactly_one_selection_shape(self) -> CampaignMemberFromCandidateRunRequest:
+        if self.selection_mode == "ALL_MATCH":
+            if self.member_ids is not None or self.excluded_member_ids is None:
+                raise ValueError(
+                    "ALL_MATCH requires excluded_member_ids and does not accept member_ids"
+                )
+            if len(self.excluded_member_ids) != len(set(self.excluded_member_ids)):
+                raise ValueError("excluded_member_ids must be distinct")
+            return self
+
+        if self.member_ids is None or self.excluded_member_ids is not None:
+            raise ValueError(
+                "Explicit selection requires member_ids and does not accept excluded_member_ids"
+            )
         if len(self.member_ids) != len(set(self.member_ids)):
             raise ValueError("member_ids must be distinct")
         return self

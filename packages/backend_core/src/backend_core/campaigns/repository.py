@@ -27,6 +27,7 @@ from backend_core.growth.models import (
     CandidatePoolMember,
     CandidatePoolRun,
 )
+from backend_core.influencers.enums import Platform
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -103,6 +104,48 @@ class CampaignMemberProjectionRecord:
     member: CampaignMember
     influencer: Influencer
     preferred_platform_account: InfluencerPlatformAccount
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolMatchMemberRecord:
+    """One lightweight persisted MATCH row used by ALL_MATCH chunk processing."""
+
+    id: UUID
+    influencer_id: UUID
+    platform_account_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolRunAmbiguityAccountRecord:
+    """Safe, canonical account identity needed to resolve one account conflict."""
+
+    member_id: UUID
+    platform_account_id: UUID
+    platform: Platform
+    account_name: str
+    account_handle: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolRunAmbiguityRecord:
+    """A bounded first same-Influencer conflict in an ALL_MATCH source run."""
+
+    influencer_id: UUID
+    influencer_display_name: str
+    accounts: tuple[CandidatePoolRunAmbiguityAccountRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CandidatePoolMatchMemberIdentityRecord:
+    """One safe MATCH row used by the streaming ALL_MATCH ambiguity preflight."""
+
+    member_id: UUID
+    influencer_id: UUID
+    influencer_display_name: str
+    platform_account_id: UUID
+    platform: Platform
+    account_name: str
+    account_handle: str | None
 
 
 class CampaignRepository:
@@ -598,28 +641,248 @@ class CampaignRepository:
         )
         return tuple(await self.session.scalars(statement))
 
-    async def selected_source_run_has_multiple_accounts_per_influencer(
+    async def count_matching_source_run_members(
         self,
         *,
         source_pool_run_id: UUID,
         member_ids: tuple[UUID, ...],
-    ) -> bool:
-        """Perform the no-tie-breaker selection check in SQL over the selected set."""
+    ) -> int:
+        """Count bounded exclusion IDs that are persisted MATCH rows of one run.
 
-        if not member_ids:
-            return False
+        The request contract caps exclusions at 10,000 IDs.  Still split the
+        set queries so SQLite and other conservative bind-parameter limits do
+        not turn a valid request into a backend-specific failure.
+        """
+
+        valid_count = 0
+        for offset in range(0, len(member_ids), self._SINGLE_COLUMN_QUERY_CHUNK_SIZE):
+            chunk = member_ids[offset : offset + self._SINGLE_COLUMN_QUERY_CHUNK_SIZE]
+            count = await self.session.scalar(
+                select(func.count(CandidatePoolMember.id)).where(
+                    CandidatePoolMember.run_id == source_pool_run_id,
+                    CandidatePoolMember.id.in_(chunk),
+                    CandidatePoolMember.result == CandidateResult.MATCH,
+                )
+            )
+            valid_count += int(count or 0)
+        return valid_count
+
+    async def list_matching_source_run_members_page(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        after_member_id: UUID | None,
+        limit: int,
+    ) -> tuple[CandidatePoolMatchMemberRecord, ...]:
+        """Read one bounded UUID-keyset page of lightweight MATCH source rows."""
+
+        statement = select(
+            CandidatePoolMember.id,
+            CandidatePoolMember.influencer_id,
+            CandidatePoolMember.platform_account_id,
+        ).where(
+            CandidatePoolMember.run_id == source_pool_run_id,
+            CandidatePoolMember.result == CandidateResult.MATCH,
+        )
+        if after_member_id is not None:
+            statement = statement.where(CandidatePoolMember.id > after_member_id)
+        rows = tuple(
+            await self.session.execute(statement.order_by(CandidatePoolMember.id).limit(limit))
+        )
+        return tuple(
+            CandidatePoolMatchMemberRecord(
+                id=member_id,
+                influencer_id=influencer_id,
+                platform_account_id=platform_account_id,
+            )
+            for member_id, influencer_id, platform_account_id in rows
+        )
+
+    async def first_matching_source_run_ambiguity(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        excluded_member_ids: set[UUID],
+        chunk_size: int,
+    ) -> CandidatePoolRunAmbiguityRecord | None:
+        """Find one unresolved same-Influencer MATCH conflict in one result stream.
+
+        Exclusions are intentionally filtered in the service's bounded set,
+        rather than expanded into one unportable 10,000-parameter ``NOT IN``
+        clause.  There is deliberately one server-side ordered stream rather
+        than keyset pages ordered by ``influencer_id``: the persisted index is
+        ``(run_id, result, id)``, not ``(run_id, result, influencer_id, id)``.
+        Reissuing an influencer sort for every keyset page would repeatedly
+        sort the same run and can become quadratic.  Streaming one ordered
+        result limits application memory to ``chunk_size`` rows while retaining
+        only one selected account for the current Influencer.
+        """
+
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+
         statement = (
-            select(CandidatePoolMember.influencer_id)
+            select(
+                CandidatePoolMember.id,
+                CandidatePoolMember.influencer_id,
+                Influencer.display_name,
+                CandidatePoolMember.platform_account_id,
+                InfluencerPlatformAccount.platform,
+                InfluencerPlatformAccount.account_name,
+                InfluencerPlatformAccount.account_handle,
+            )
+            .join(Influencer, Influencer.id == CandidatePoolMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CandidatePoolMember.platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CandidatePoolMember.influencer_id,
+                ),
+            )
+            .where(
+                CandidatePoolMember.run_id == source_pool_run_id,
+                CandidatePoolMember.result == CandidateResult.MATCH,
+            )
+        )
+        result = await self.session.stream(
+            statement.order_by(CandidatePoolMember.influencer_id, CandidatePoolMember.id),
+            execution_options={"yield_per": chunk_size},
+        )
+        first_selected_account: CandidatePoolMatchMemberIdentityRecord | None = None
+        try:
+            async for rows in result.partitions(chunk_size):
+                for (
+                    member_id,
+                    influencer_id,
+                    display_name,
+                    platform_account_id,
+                    platform,
+                    account_name,
+                    account_handle,
+                ) in rows:
+                    source_member = CandidatePoolMatchMemberIdentityRecord(
+                        member_id=member_id,
+                        influencer_id=influencer_id,
+                        influencer_display_name=display_name,
+                        platform_account_id=platform_account_id,
+                        platform=platform,
+                        account_name=account_name,
+                        account_handle=account_handle,
+                    )
+                    if source_member.member_id in excluded_member_ids:
+                        continue
+                    if (
+                        first_selected_account is None
+                        or source_member.influencer_id != first_selected_account.influencer_id
+                    ):
+                        first_selected_account = source_member
+                        continue
+                    if (
+                        source_member.platform_account_id
+                        == first_selected_account.platform_account_id
+                    ):
+                        # The persisted run is unique by account, but retain the
+                        # exact explicit-selection contract defensively.
+                        continue
+                    return self._ambiguity_record(first_selected_account, source_member)
+        finally:
+            await result.close()
+        return None
+
+    async def source_run_member_pair_ambiguity(
+        self,
+        *,
+        source_pool_run_id: UUID,
+        member_ids: tuple[UUID, UUID],
+    ) -> CandidatePoolRunAmbiguityRecord | None:
+        """Return safe identities for one already-detected explicit selection conflict.
+
+        The caller provides exactly two selected Member IDs, so this remains a
+        fixed-size joined query even when the explicit selection itself has
+        the public 10,000-ID maximum.
+        """
+
+        statement = (
+            select(
+                CandidatePoolMember.id,
+                CandidatePoolMember.influencer_id,
+                Influencer.display_name,
+                CandidatePoolMember.platform_account_id,
+                InfluencerPlatformAccount.platform,
+                InfluencerPlatformAccount.account_name,
+                InfluencerPlatformAccount.account_handle,
+            )
+            .join(Influencer, Influencer.id == CandidatePoolMember.influencer_id)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == CandidatePoolMember.platform_account_id,
+                    InfluencerPlatformAccount.influencer_id == CandidatePoolMember.influencer_id,
+                ),
+            )
             .where(
                 CandidatePoolMember.run_id == source_pool_run_id,
                 CandidatePoolMember.id.in_(member_ids),
                 CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
             )
-            .group_by(CandidatePoolMember.influencer_id)
-            .having(func.count(func.distinct(CandidatePoolMember.platform_account_id)) > 1)
-            .limit(1)
+            .order_by(CandidatePoolMember.id)
         )
-        return await self.session.scalar(statement) is not None
+        rows = tuple(await self.session.execute(statement))
+        if len(rows) != 2:
+            return None
+        identities = tuple(
+            CandidatePoolMatchMemberIdentityRecord(
+                member_id=member_id,
+                influencer_id=influencer_id,
+                influencer_display_name=display_name,
+                platform_account_id=platform_account_id,
+                platform=platform,
+                account_name=account_name,
+                account_handle=account_handle,
+            )
+            for (
+                member_id,
+                influencer_id,
+                display_name,
+                platform_account_id,
+                platform,
+                account_name,
+                account_handle,
+            ) in rows
+        )
+        first, second = identities
+        if (
+            first.influencer_id != second.influencer_id
+            or first.platform_account_id == second.platform_account_id
+        ):
+            return None
+        return self._ambiguity_record(first, second)
+
+    @staticmethod
+    def _ambiguity_record(
+        first: CandidatePoolMatchMemberIdentityRecord,
+        second: CandidatePoolMatchMemberIdentityRecord,
+    ) -> CandidatePoolRunAmbiguityRecord:
+        return CandidatePoolRunAmbiguityRecord(
+            influencer_id=first.influencer_id,
+            influencer_display_name=first.influencer_display_name,
+            accounts=(
+                CandidatePoolRunAmbiguityAccountRecord(
+                    member_id=first.member_id,
+                    platform_account_id=first.platform_account_id,
+                    platform=first.platform,
+                    account_name=first.account_name,
+                    account_handle=first.account_handle,
+                ),
+                CandidatePoolRunAmbiguityAccountRecord(
+                    member_id=second.member_id,
+                    platform_account_id=second.platform_account_id,
+                    platform=second.platform,
+                    account_name=second.account_name,
+                    account_handle=second.account_handle,
+                ),
+            ),
+        )
 
     async def list_targets_for_campaign(
         self,

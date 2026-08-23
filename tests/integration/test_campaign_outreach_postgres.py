@@ -30,12 +30,27 @@ from backend_core.campaigns.schemas import (
     CampaignCreateInput,
     CampaignMemberAddItem,
     CampaignMemberBulkAddInput,
+    CampaignMemberFromCandidateRunBulkAddInput,
 )
 from backend_core.campaigns.service import CampaignService
 from backend_core.config import get_settings
-from backend_core.growth.enums import Phase3AOperationScope
+from backend_core.growth.enums import (
+    CandidatePoolKind,
+    CandidatePoolRunStatus,
+    CandidatePoolStatus,
+    CandidateResult,
+    Phase3AOperationScope,
+)
 from backend_core.growth.idempotency import Phase3AIdempotencyRepository
-from backend_core.growth.models import Campaign, CampaignMember, Phase3AIdempotencyRecord
+from backend_core.growth.models import (
+    Campaign,
+    CampaignMember,
+    CandidatePool,
+    CandidatePoolMember,
+    CandidatePoolRun,
+    Phase3AIdempotencyRecord,
+    TargetingPolicy,
+)
 from backend_core.influencers.enums import (
     ContactType,
     ContactValidationStatus,
@@ -126,6 +141,12 @@ class CampaignMemberFixture:
 @dataclass(frozen=True, slots=True)
 class TaskFixture:
     task_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateRunFixture:
+    run_id: UUID
+    match_member_ids: tuple[UUID, ...]
 
 
 class _FirstLookupGate:
@@ -288,6 +309,107 @@ async def _seed_influencer(
             platform_account_id=account.id,
             contact_ids=tuple(contact_ids),
         )
+
+
+async def _seed_completed_match_run(
+    factory: async_sessionmaker[AsyncSession],
+    actor: ActorFixture,
+    *,
+    match_count: int,
+) -> CandidateRunFixture:
+    """Create one completed immutable source run with enough distinct MATCH rows to page."""
+
+    assert actor.context.operator is not None
+    assert match_count > CampaignService._ALL_MATCH_SOURCE_CHUNK_SIZE
+    async with factory() as session:
+        pool = CandidatePool(
+            department_id=actor.department_id,
+            owner_operator_id=actor.operator_id,
+            name=f"ALL_MATCH PostgreSQL pool {uuid4().hex}",
+            kind=CandidatePoolKind.POTENTIAL_SELLER,
+            source_collection_job_id=None,
+            status=CandidatePoolStatus.ACTIVE,
+            current_policy_id=None,
+            version=1,
+        )
+        session.add(pool)
+        await session.flush()
+        policy = TargetingPolicy(
+            pool_id=pool.id,
+            version=1,
+            schema_version=1,
+            definition={},
+            canonical_hash="0" * 64,
+            created_by_operator_id=actor.operator_id,
+        )
+        session.add(policy)
+        await session.flush()
+        run = CandidatePoolRun(
+            pool_id=pool.id,
+            policy_id=policy.id,
+            as_of=datetime.now(UTC),
+            input_watermark=None,
+            status=CandidatePoolRunStatus.COMPLETED,
+            match_count=match_count,
+            unknown_count=0,
+            not_match_count=0,
+            error_code=None,
+            error_message=None,
+            idempotency_key=f"all-match-run-{uuid4().hex}",
+            request_hash="0" * 64,
+        )
+        session.add(run)
+        await session.flush()
+
+        influencers: list[Influencer] = []
+        accounts: list[InfluencerPlatformAccount] = []
+        members: list[CandidatePoolMember] = []
+        member_ids: list[UUID] = []
+        for index in range(match_count):
+            influencer_id = uuid4()
+            account_id = uuid4()
+            member_id = uuid4()
+            influencers.append(
+                Influencer(
+                    id=influencer_id,
+                    display_name=f"ALL_MATCH influencer {index}",
+                    owner_operator_id=actor.operator_id,
+                    crm_stage=CRMStage.TO_DEVELOP,
+                    status=InfluencerStatus.ACTIVE,
+                    deleted_at=None,
+                )
+            )
+            accounts.append(
+                InfluencerPlatformAccount(
+                    id=account_id,
+                    influencer_id=influencer_id,
+                    platform=Platform.XIAOHONGSHU,
+                    platform_account_id=f"all-match-{uuid4().hex}",
+                    account_name=f"ALL_MATCH account {index}",
+                    source=DataSource.MANUAL,
+                    is_active=True,
+                )
+            )
+            members.append(
+                CandidatePoolMember(
+                    id=member_id,
+                    run_id=run.id,
+                    influencer_id=influencer_id,
+                    platform_account_id=account_id,
+                    result=CandidateResult.MATCH,
+                    reason_codes=[],
+                    redacted_evidence={},
+                    evidence_hash="0" * 64,
+                )
+            )
+            member_ids.append(member_id)
+        session.add_all(influencers)
+        await session.flush()
+        session.add_all(accounts)
+        await session.flush()
+        session.add_all(members)
+        await session.commit()
+        return CandidateRunFixture(run_id=run.id, match_member_ids=tuple(member_ids))
 
 
 async def _seed_campaign_member(
@@ -570,6 +692,192 @@ async def _campaign_member_bulk_add_same_key_race(harness: PostgresHarness) -> N
                 AuditLog.action == AuditAction.CAMPAIGN_MEMBERS_ADDED,
             )
             == 1
+        )
+
+
+def test_all_match_large_postgres_run_is_chunked_replayable_and_atomic(
+    postgres_harness: PostgresHarness,
+) -> None:
+    asyncio.run(_all_match_large_postgres_run_is_chunked_replayable_and_atomic(postgres_harness))
+
+
+async def _all_match_large_postgres_run_is_chunked_replayable_and_atomic(
+    harness: PostgresHarness,
+) -> None:
+    source_chunk_size = CampaignService._ALL_MATCH_SOURCE_CHUNK_SIZE
+    actor = await _seed_actor(harness.factory)
+    source = await _seed_completed_match_run(
+        harness.factory,
+        actor,
+        match_count=source_chunk_size + 5,
+    )
+    excluded_member_ids = source.match_member_ids[:5]
+    expected_count = len(source.match_member_ids) - len(excluded_member_ids)
+    request = CampaignMemberFromCandidateRunBulkAddInput(
+        run_id=source.run_id,
+        selection_mode="ALL_MATCH",
+        excluded_member_ids=excluded_member_ids,
+    )
+    success_key = f"all-match-large-success-{uuid4().hex}"
+
+    async with harness.factory() as session:
+        service = CampaignService(session, channel_registry=CHANNELS)
+        campaign = await service.create_campaign(
+            actor.context,
+            CampaignCreateInput(name="ALL_MATCH PostgreSQL large run"),
+            idempotency_key=f"setup-all-match-campaign-{uuid4().hex}",
+            ip=REQUEST_IP,
+            user_agent=REQUEST_AGENT,
+        )
+        campaign_id = campaign.result.id
+        page_limits: list[int] = []
+        original_page_reader = service.repository.list_matching_source_run_members_page
+
+        async def record_source_page(
+            *,
+            source_pool_run_id: UUID,
+            after_member_id: UUID | None,
+            limit: int,
+        ) -> Any:
+            assert source_pool_run_id == source.run_id
+            page_limits.append(limit)
+            return await original_page_reader(
+                source_pool_run_id=source_pool_run_id,
+                after_member_id=after_member_id,
+                limit=limit,
+            )
+
+        service.repository.list_matching_source_run_members_page = record_source_page  # type: ignore[method-assign]
+        first = await service.bulk_add_members_from_candidate_run(
+            actor.context,
+            campaign_id,
+            request,
+            idempotency_key=success_key,
+            ip=REQUEST_IP,
+            user_agent=REQUEST_AGENT,
+        )
+        pages_before_replay = len(page_limits)
+        replay = await service.bulk_add_members_from_candidate_run(
+            actor.context,
+            campaign_id,
+            request,
+            idempotency_key=success_key,
+            ip=REQUEST_IP,
+            user_agent=REQUEST_AGENT,
+        )
+
+        assert first.result.requested_count == expected_count
+        assert first.result.added_count == expected_count
+        assert first.result.restored_count == 0
+        assert first.result.already_active_count == 0
+        assert first.result.active_count_after == expected_count
+        assert first.result.source_pool_run_id == source.run_id
+        assert replay.replayed
+        assert replay.result == first.result
+        assert len(page_limits) == pages_before_replay
+        assert len(page_limits) >= 2
+        assert max(page_limits) <= source_chunk_size
+        assert (
+            await _count(
+                session,
+                CampaignMember,
+                CampaignMember.campaign_id == campaign_id,
+            )
+            == expected_count
+        )
+        assert set(
+            await session.scalars(
+                select(CampaignMember.source_pool_run_id).where(
+                    CampaignMember.campaign_id == campaign_id
+                )
+            )
+        ) == {source.run_id}
+        assert (
+            await _count(
+                session,
+                AuditLog,
+                AuditLog.action == AuditAction.CAMPAIGN_MEMBERS_ADDED,
+                AuditLog.entity_id == campaign_id,
+            )
+            == 1
+        )
+        assert (
+            await _count(
+                session,
+                Phase3AIdempotencyRecord,
+                Phase3AIdempotencyRecord.department_id == actor.department_id,
+                Phase3AIdempotencyRecord.operation_scope
+                == Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                Phase3AIdempotencyRecord.idempotency_key == success_key,
+            )
+            == 1
+        )
+
+    rollback_key = f"all-match-large-rollback-{uuid4().hex}"
+    async with harness.factory() as session:
+        service = CampaignService(session, channel_registry=CHANNELS)
+        rollback_campaign = await service.create_campaign(
+            actor.context,
+            CampaignCreateInput(name="ALL_MATCH PostgreSQL rollback"),
+            idempotency_key=f"setup-all-match-rollback-campaign-{uuid4().hex}",
+            ip=REQUEST_IP,
+            user_agent=REQUEST_AGENT,
+        )
+        rollback_campaign_id = rollback_campaign.result.id
+        insert_calls = 0
+        original_insert = service.repository.insert_campaign_members
+
+        async def fail_second_source_write(members: Any) -> None:
+            nonlocal insert_calls
+            insert_calls += 1
+            if insert_calls == 2:
+                raise RuntimeError("forced all-match second source write failure")
+            await original_insert(members)
+
+        service.repository.insert_campaign_members = fail_second_source_write  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError, match="forced all-match second source write failure"):
+            await service.bulk_add_members_from_candidate_run(
+                actor.context,
+                rollback_campaign_id,
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=source.run_id,
+                    selection_mode="ALL_MATCH",
+                    excluded_member_ids=(),
+                ),
+                idempotency_key=rollback_key,
+                ip=REQUEST_IP,
+                user_agent=REQUEST_AGENT,
+            )
+        assert insert_calls == 2
+
+    async with harness.factory() as session:
+        assert (
+            await _count(
+                session,
+                CampaignMember,
+                CampaignMember.campaign_id == rollback_campaign_id,
+            )
+            == 0
+        )
+        assert (
+            await _count(
+                session,
+                AuditLog,
+                AuditLog.action == AuditAction.CAMPAIGN_MEMBERS_ADDED,
+                AuditLog.entity_id == rollback_campaign_id,
+            )
+            == 0
+        )
+        assert (
+            await _count(
+                session,
+                Phase3AIdempotencyRecord,
+                Phase3AIdempotencyRecord.department_id == actor.department_id,
+                Phase3AIdempotencyRecord.operation_scope
+                == Phase3AOperationScope.CAMPAIGN_MEMBER_BULK_ADD,
+                Phase3AIdempotencyRecord.idempotency_key == rollback_key,
+            )
+            == 0
         )
 
 

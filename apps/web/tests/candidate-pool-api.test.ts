@@ -2,12 +2,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   addCandidatesToCampaign,
+  candidateMemberPagePath,
   candidatePoolPath,
   candidateRunPath,
+  CANDIDATE_MEMBER_PAGE_SIZES,
   createCandidateRun,
   fetchCandidateMembers,
   fetchCandidatePoolPage,
 } from "../src/features/candidate-pools/api";
+import { candidatePoolQueryKeys } from "../src/features/candidate-pools/queries";
 
 if (typeof document === "undefined") {
   Object.defineProperty(globalThis, "document", {
@@ -34,18 +37,24 @@ afterEach(() => {
 });
 
 describe("Candidate Pool API", () => {
-  it("keeps all cursors opaque and uses the frozen page size", async () => {
+  it("keeps all cursors opaque and uses the requested bounded member page size", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(response({ items: [], next_cursor: null }))
       .mockResolvedValueOnce(response({ items: [], next_cursor: null }));
     await fetchCandidatePoolPage("opaque-cursor");
-    await fetchCandidateMembers("pool/a", "run/b", "opaque-member", "UNKNOWN");
+    await fetchCandidateMembers(
+      "pool/a",
+      "run/b",
+      "opaque-member",
+      "UNKNOWN",
+      200,
+    );
     expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
       "/api/v1/candidate-pools?limit=50&cursor=opaque-cursor",
     );
     expect(String(fetchMock.mock.calls[1]?.[0])).toBe(
-      "/api/v1/candidate-pools/pool%2Fa/runs/run%2Fb/members?limit=50&cursor=opaque-member&result=UNKNOWN",
+      "/api/v1/candidate-pools/pool%2Fa/runs/run%2Fb/members?limit=200&cursor=opaque-member&result=UNKNOWN",
     );
   });
 
@@ -67,7 +76,7 @@ describe("Candidate Pool API", () => {
     );
   });
 
-  it("submits only run_id and member_ids to the existing Campaign endpoint", async () => {
+  it("keeps the explicit Campaign request body byte-for-byte compatible", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       response({
         campaign_id: "campaign-1",
@@ -84,9 +93,32 @@ describe("Candidate Pool API", () => {
     );
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(url).toBe("/api/v1/campaigns/campaign-1/members/from-candidate-run");
+    expect(init?.body).toBe('{"run_id":"run-1","member_ids":["member-1"]}');
+  });
+
+  it("submits server-resolved ALL_MATCH with only explicit exclusions", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      response({
+        campaign_id: "campaign-1",
+        added_count: 0,
+        restored_count: 0,
+        already_active_count: 0,
+      }),
+    );
+    await addCandidatesToCampaign(
+      "campaign-1",
+      {
+        run_id: "run-1",
+        selection_mode: "ALL_MATCH",
+        excluded_member_ids: ["member-2"],
+      },
+      "attempt-key",
+    );
+    const [, init] = fetchMock.mock.calls[0] ?? [];
     expect(JSON.parse(String(init?.body))).toEqual({
       run_id: "run-1",
-      member_ids: ["member-1"],
+      selection_mode: "ALL_MATCH",
+      excluded_member_ids: ["member-2"],
     });
   });
 
@@ -94,6 +126,21 @@ describe("Candidate Pool API", () => {
     expect(candidatePoolPath("pool/a")).toBe("/candidate-pools/pool%2Fa");
     expect(candidateRunPath("pool/a", "run/b")).toBe(
       "/candidate-pools/pool%2Fa/runs/run%2Fb",
+    );
+    expect(candidateMemberPagePath("pool/a", "run/b", null, "MATCH", 20)).toBe(
+      "/candidate-pools/pool%2Fa/runs/run%2Fb/members?limit=20&result=MATCH",
+    );
+  });
+
+  it("keeps member pages isolated by one of the four supported page sizes", () => {
+    expect(CANDIDATE_MEMBER_PAGE_SIZES).toEqual([20, 50, 100, 200]);
+    expect(
+      candidatePoolQueryKeys.members("pool-1", "run-1", "MATCH", 20),
+    ).toEqual(["candidate-pools", "members", "pool-1", "run-1", "MATCH", 20]);
+    expect(
+      candidatePoolQueryKeys.members("pool-1", "run-1", "MATCH", 200),
+    ).not.toEqual(
+      candidatePoolQueryKeys.members("pool-1", "run-1", "MATCH", 20),
     );
   });
 });

@@ -54,6 +54,7 @@ from backend_core.growth.enums import (
     DuplicateHistoryPolicy,
     Phase3AOperationScope,
 )
+from backend_core.growth.idempotency import canonical_request_hash
 from backend_core.growth.models import (
     Campaign,
     CampaignMember,
@@ -1382,6 +1383,13 @@ async def test_selected_run_member_ids_require_completed_matching_run_and_replay
         )
         assert record is not None
         assert record.result_payload["source_pool_run_id"] == str(completed_run.run_id)
+        assert record.request_hash == canonical_request_hash(
+            {
+                "campaign_id": campaign_id,
+                "source_pool_run_id": completed_run.run_id,
+                "member_ids": (completed_run.member_id,),
+            }
+        )
 
         with pytest.raises(CampaignOutreachError) as incomplete:
             await harness.campaign_service.bulk_add_members_from_candidate_run(
@@ -1496,6 +1504,7 @@ async def test_selected_run_member_ids_keep_unknown_selection_explicit_and_resto
             )
             == []
         )
+        assert selected_input.member_ids is not None
         assert omitted_unknown_id not in selected_input.member_ids
 
         match_member = next(
@@ -1561,18 +1570,20 @@ async def test_selected_run_rejects_multiple_accounts_for_one_influencer() -> No
             influencer_id=fixture.influencer_id,
             platform=Platform.XIAOHONGSHU,
             platform_account_id=f"alternate-{uuid4().hex}",
-            account_name=f"Alternate account {uuid4().hex}",
+            account_name="Explicit conflict alternate account",
+            account_handle="explicit-conflict",
             source=DataSource.MANUAL,
             is_active=True,
         )
         harness.session.add(alternate_account)
         await harness.session.flush()
+        alternate_account_id = alternate_account.id
         alternate_member_id = await add_candidate_pool_member(
             harness,
             run_id=source_run.run_id,
             fixture=fixture,
             result=CandidateResult.UNKNOWN,
-            platform_account_id=alternate_account.id,
+            platform_account_id=alternate_account_id,
         )
         await harness.session.commit()
         campaign_id = await create_campaign(harness)
@@ -1591,7 +1602,577 @@ async def test_selected_run_rejects_multiple_accounts_for_one_influencer() -> No
             )
         assert ambiguous.value.status_code == 422
         assert ambiguous.value.code == "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS"
+        details = ambiguous.value.safe_details
+        assert details is not None
+        influencer = await harness.session.get(Influencer, fixture.influencer_id)
+        assert influencer is not None
+        assert details["conflicting_influencer"] == {
+            "id": str(fixture.influencer_id),
+            "display_name": influencer.display_name,
+        }
+        assert set(details["conflicting_member_ids"]) == {
+            str(source_run.member_id),
+            str(alternate_member_id),
+        }
+        accounts = details["conflicting_accounts"]
+        assert isinstance(accounts, list)
+        assert {account["platform_account_id"] for account in accounts} == {
+            str(fixture.account_id),
+            str(alternate_account_id),
+        }
+        assert any(
+            account["account_name"] == "Explicit conflict alternate account" for account in accounts
+        )
+        assert "contact" not in json.dumps(details).lower()
         assert await count_rows(harness.session, CampaignMember) == 0
+
+
+def test_all_match_candidate_run_input_has_one_strict_alternative_shape() -> None:
+    run_id = uuid4()
+    member_id = uuid4()
+
+    explicit = CampaignMemberFromCandidateRunBulkAddInput(
+        run_id=run_id,
+        member_ids=(member_id,),
+    )
+    all_match = CampaignMemberFromCandidateRunBulkAddInput(
+        run_id=run_id,
+        selection_mode="ALL_MATCH",
+        excluded_member_ids=(),
+    )
+
+    assert explicit.selection_mode is None
+    assert explicit.member_ids == (member_id,)
+    assert explicit.excluded_member_ids is None
+    assert all_match.member_ids is None
+    assert all_match.excluded_member_ids == ()
+    for invalid in (
+        {"run_id": run_id},
+        {"run_id": run_id, "excluded_member_ids": ()},
+        {"run_id": run_id, "selection_mode": "ALL_MATCH"},
+        {
+            "run_id": run_id,
+            "selection_mode": "ALL_MATCH",
+            "member_ids": (member_id,),
+            "excluded_member_ids": (),
+        },
+        {
+            "run_id": run_id,
+            "selection_mode": "ALL_MATCH",
+            "excluded_member_ids": (member_id, member_id),
+        },
+    ):
+        with pytest.raises(ValidationError):
+            CampaignMemberFromCandidateRunBulkAddInput.model_validate(invalid)
+
+
+@async_test
+async def test_all_match_resolves_server_side_in_chunks_excludes_only_match_and_replays() -> None:
+    async with domain_harness() as harness:
+        included_first = await seed_influencer(harness.session, harness.context)
+        excluded = await seed_influencer(harness.session, harness.context)
+        included_last = await seed_influencer(harness.session, harness.context)
+        unknown = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            included_first,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        excluded_member_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=excluded,
+            result=CandidateResult.MATCH,
+        )
+        await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=included_last,
+            result=CandidateResult.MATCH,
+        )
+        await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=unknown,
+            result=CandidateResult.UNKNOWN,
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        input_payload = CampaignMemberFromCandidateRunBulkAddInput(
+            run_id=source_run.run_id,
+            selection_mode="ALL_MATCH",
+            excluded_member_ids=(excluded_member_id,),
+        )
+        page_requests: list[tuple[UUID | None, int]] = []
+        original_page_reader = (
+            harness.campaign_service.repository.list_matching_source_run_members_page
+        )
+
+        async def record_page(
+            *,
+            source_pool_run_id: UUID,
+            after_member_id: UUID | None,
+            limit: int,
+        ) -> object:
+            assert source_pool_run_id == source_run.run_id
+            page_requests.append((after_member_id, limit))
+            return await original_page_reader(
+                source_pool_run_id=source_pool_run_id,
+                after_member_id=after_member_id,
+                limit=limit,
+            )
+
+        with (
+            patch.object(CampaignService, "_ALL_MATCH_SOURCE_CHUNK_SIZE", 2),
+            patch.object(
+                harness.campaign_service.repository,
+                "list_matching_source_run_members_page",
+                new=record_page,
+            ),
+        ):
+            first = await harness.campaign_service.bulk_add_members_from_candidate_run(
+                harness.context,
+                campaign_id,
+                input_payload,
+                idempotency_key="all-match-chunked",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        replay = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            input_payload,
+            idempotency_key="all-match-chunked",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+
+        assert first.result.requested_count == 2
+        assert first.result.added_count == 2
+        assert first.result.restored_count == 0
+        assert first.result.already_active_count == 0
+        assert first.result.active_count_after == 2
+        assert replay.replayed
+        assert replay.result == first.result
+        assert [limit for _cursor, limit in page_requests] == [2, 2, 2]
+        assert page_requests[0][0] is None
+        assert page_requests[1][0] is not None
+        assert page_requests[2][0] is not None
+
+        campaign_members = await harness.campaign_service.repository.list_members_for_influencers(
+            campaign_id,
+            (
+                included_first.influencer_id,
+                excluded.influencer_id,
+                included_last.influencer_id,
+                unknown.influencer_id,
+            ),
+        )
+        assert {member.influencer_id for member in campaign_members} == {
+            included_first.influencer_id,
+            included_last.influencer_id,
+        }
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 1
+
+        member_to_restore = next(
+            member
+            for member in campaign_members
+            if member.influencer_id == included_first.influencer_id
+        )
+        removed = await harness.campaign_service.remove_member(
+            harness.context,
+            campaign_id,
+            member_to_restore.id,
+            CampaignMemberRemoveInput(expected_version=member_to_restore.version),
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert removed.removed_at is not None
+        rejoined = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            input_payload,
+            idempotency_key="all-match-rejoin",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert rejoined.result.requested_count == 2
+        assert rejoined.result.added_count == 0
+        assert rejoined.result.restored_count == 1
+        assert rejoined.result.already_active_count == 1
+        assert rejoined.result.active_count_after == 2
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 2
+
+
+@async_test
+async def test_all_match_rejects_nonmatch_wrong_run_or_empty_selection() -> None:
+    async with domain_harness() as harness:
+        match = await seed_influencer(harness.session, harness.context)
+        unknown = await seed_influencer(harness.session, harness.context)
+        other = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            match,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        unknown_member_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=unknown,
+            result=CandidateResult.UNKNOWN,
+        )
+        other_run = await seed_candidate_pool_run(
+            harness,
+            other,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        empty_run = await seed_candidate_pool_run(
+            harness,
+            await seed_influencer(harness.session, harness.context),
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=False,
+        )
+        assert other_run.member_id is not None
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        for exclusion, key in (
+            (unknown_member_id, "all-match-unknown-exclusion"),
+            (other_run.member_id, "all-match-wrong-run-exclusion"),
+        ):
+            with pytest.raises(CampaignOutreachError) as rejected:
+                await harness.campaign_service.bulk_add_members_from_candidate_run(
+                    harness.context,
+                    campaign_id,
+                    CampaignMemberFromCandidateRunBulkAddInput(
+                        run_id=source_run.run_id,
+                        selection_mode="ALL_MATCH",
+                        excluded_member_ids=(exclusion,),
+                    ),
+                    idempotency_key=key,
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+            assert rejected.value.status_code == 422
+            assert rejected.value.code == "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
+            await refresh_context_after_rollback(harness)
+
+        with pytest.raises(CampaignOutreachError) as empty_selection:
+            await harness.campaign_service.bulk_add_members_from_candidate_run(
+                harness.context,
+                campaign_id,
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=empty_run.run_id,
+                    selection_mode="ALL_MATCH",
+                    excluded_member_ids=(),
+                ),
+                idempotency_key="all-match-zero",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert empty_selection.value.status_code == 422
+        assert empty_selection.value.code == "CANDIDATE_POOL_RUN_SELECTION_EMPTY"
+        assert await count_rows(harness.session, CampaignMember) == 0
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 0
+        assert (
+            await harness.session.scalar(
+                select(Phase3AIdempotencyRecord).where(
+                    Phase3AIdempotencyRecord.idempotency_key == "all-match-zero"
+                )
+            )
+            is None
+        )
+
+
+@async_test
+async def test_all_match_validates_ten_thousand_exclusions_in_small_bind_chunks() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            fixture,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+        exclusions = (
+            source_run.member_id,
+            *(UUID(int=value + 1_000_000) for value in range(9_999)),
+        )
+        assert len(exclusions) == 10_000
+        assert harness.session.bind is not None
+        parameter_counts: list[int] = []
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            if "count(candidate_pool_members.id)" not in statement.lower():
+                return
+            if isinstance(parameters, (dict, tuple)):
+                parameter_counts.append(len(parameters))
+            else:
+                parameter_counts.append(1)
+
+        event.listen(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            with pytest.raises(CampaignOutreachError) as invalid_exclusion:
+                await harness.campaign_service.bulk_add_members_from_candidate_run(
+                    harness.context,
+                    campaign_id,
+                    CampaignMemberFromCandidateRunBulkAddInput(
+                        run_id=source_run.run_id,
+                        selection_mode="ALL_MATCH",
+                        excluded_member_ids=exclusions,
+                    ),
+                    idempotency_key="all-match-ten-thousand-exclusions",
+                    ip="127.0.0.1",
+                    user_agent="campaign-outreach-domain-test",
+                )
+        finally:
+            event.remove(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+
+        assert invalid_exclusion.value.status_code == 422
+        assert invalid_exclusion.value.code == "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
+        assert len(parameter_counts) == 20
+        # 500 requested UUIDs plus the run and MATCH predicates, comfortably
+        # below SQLite's conservative bind ceiling and nowhere near 10,000.
+        assert max(parameter_counts) <= 502
+
+
+@async_test
+async def test_all_match_fails_closed_with_safe_actionable_account_conflict_details() -> None:
+    async with domain_harness() as harness:
+        fixture = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            fixture,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        alternate_account = InfluencerPlatformAccount(
+            influencer_id=fixture.influencer_id,
+            platform=Platform.XIAOHONGSHU,
+            platform_account_id=f"alternate-{uuid4().hex}",
+            account_name="Actionable alternate account",
+            account_handle="alternate-handle",
+            source=DataSource.MANUAL,
+            is_active=True,
+        )
+        harness.session.add(alternate_account)
+        await harness.session.flush()
+        alternate_account_id = alternate_account.id
+        alternate_member_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=fixture,
+            result=CandidateResult.MATCH,
+            platform_account_id=alternate_account_id,
+        )
+        await harness.session.commit()
+        campaign_id = await create_campaign(harness)
+
+        with pytest.raises(CampaignOutreachError) as ambiguous:
+            await harness.campaign_service.bulk_add_members_from_candidate_run(
+                harness.context,
+                campaign_id,
+                CampaignMemberFromCandidateRunBulkAddInput(
+                    run_id=source_run.run_id,
+                    selection_mode="ALL_MATCH",
+                    excluded_member_ids=(),
+                ),
+                idempotency_key="all-match-ambiguous",
+                ip="127.0.0.1",
+                user_agent="campaign-outreach-domain-test",
+            )
+        assert ambiguous.value.status_code == 422
+        assert ambiguous.value.code == "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS"
+        details = ambiguous.value.safe_details
+        assert details is not None
+        influencer = await harness.session.get(Influencer, fixture.influencer_id)
+        assert influencer is not None
+        assert details["conflicting_influencer"] == {
+            "id": str(fixture.influencer_id),
+            "display_name": influencer.display_name,
+        }
+        assert set(details["conflicting_member_ids"]) == {
+            str(source_run.member_id),
+            str(alternate_member_id),
+        }
+        accounts = details["conflicting_accounts"]
+        assert isinstance(accounts, list)
+        assert {account["member_id"] for account in accounts} == set(
+            details["conflicting_member_ids"]
+        )
+        assert {account["platform_account_id"] for account in accounts} == {
+            str(fixture.account_id),
+            str(alternate_account_id),
+        }
+        assert any(
+            account["account_name"] == "Actionable alternate account" for account in accounts
+        )
+        assert "contact" not in json.dumps(details).lower()
+        assert await count_rows(harness.session, CampaignMember) == 0
+        await refresh_context_after_rollback(harness)
+
+        resolved = await harness.campaign_service.bulk_add_members_from_candidate_run(
+            harness.context,
+            campaign_id,
+            CampaignMemberFromCandidateRunBulkAddInput(
+                run_id=source_run.run_id,
+                selection_mode="ALL_MATCH",
+                excluded_member_ids=(alternate_member_id,),
+            ),
+            idempotency_key="all-match-ambiguity-resolved",
+            ip="127.0.0.1",
+            user_agent="campaign-outreach-domain-test",
+        )
+        assert resolved.result.requested_count == 1
+        assert resolved.result.added_count == 1
+        assert await count_audits(harness.session, AuditAction.CAMPAIGN_MEMBERS_ADDED) == 1
+
+
+@async_test
+async def test_all_match_ambiguity_preflight_never_expands_large_exclusions_into_sql() -> None:
+    async with domain_harness() as harness:
+        first = await seed_influencer(harness.session, harness.context)
+        second = await seed_influencer(harness.session, harness.context)
+        source_run = await seed_candidate_pool_run(
+            harness,
+            first,
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=second,
+            result=CandidateResult.MATCH,
+        )
+        await harness.session.commit()
+        assert harness.session.bind is not None
+        statements: list[str] = []
+        parameter_counts: list[int] = []
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            if (
+                "FROM candidate_pool_members" not in statement
+                or "JOIN influencers" not in statement
+            ):
+                return
+            statements.append(statement)
+            if isinstance(parameters, (dict, tuple)):
+                parameter_counts.append(len(parameters))
+            else:
+                parameter_counts.append(1)
+
+        event.listen(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            with patch.object(CampaignService, "_ALL_MATCH_AMBIGUITY_SOURCE_CHUNK_SIZE", 1):
+                ambiguity = await harness.campaign_service._first_all_match_ambiguity(
+                    source_pool_run_id=source_run.run_id,
+                    excluded_member_ids={UUID(int=value + 1_000_000) for value in range(10_000)},
+                )
+        finally:
+            event.remove(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+
+        assert ambiguity is None
+        # One ordered stream, even with a one-row consumer partition.  This
+        # guards against reissuing an unindexed influencer sort per page.
+        assert len(statements) == 1
+        assert all("NOT IN" not in statement.upper() for statement in statements)
+        assert max(parameter_counts) < 10
+
+
+@async_test
+async def test_all_match_ambiguity_stream_finds_a_conflict_after_many_partitions() -> None:
+    async with domain_harness() as harness:
+        fixtures = [await seed_influencer(harness.session, harness.context) for _ in range(12)]
+        source_run = await seed_candidate_pool_run(
+            harness,
+            fixtures[0],
+            status=CandidatePoolRunStatus.COMPLETED,
+            include_member=True,
+        )
+        assert source_run.member_id is not None
+        member_ids: dict[UUID, UUID] = {fixtures[0].influencer_id: source_run.member_id}
+        for fixture in fixtures[1:]:
+            member_ids[fixture.influencer_id] = await add_candidate_pool_member(
+                harness,
+                run_id=source_run.run_id,
+                fixture=fixture,
+                result=CandidateResult.MATCH,
+            )
+        late_fixture = max(fixtures, key=lambda fixture: fixture.influencer_id.int)
+        alternate_account = InfluencerPlatformAccount(
+            influencer_id=late_fixture.influencer_id,
+            platform=Platform.XIAOHONGSHU,
+            platform_account_id=f"late-conflict-{uuid4().hex}",
+            account_name="Late conflict account",
+            account_handle="late-conflict",
+            source=DataSource.MANUAL,
+            is_active=True,
+        )
+        harness.session.add(alternate_account)
+        await harness.session.flush()
+        alternate_member_id = await add_candidate_pool_member(
+            harness,
+            run_id=source_run.run_id,
+            fixture=late_fixture,
+            result=CandidateResult.MATCH,
+            platform_account_id=alternate_account.id,
+        )
+        await harness.session.commit()
+        assert harness.session.bind is not None
+        statements: list[str] = []
+
+        def capture(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: object,
+        ) -> None:
+            if "FROM candidate_pool_members" in statement and "JOIN influencers" in statement:
+                statements.append(statement)
+
+        event.listen(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+        try:
+            with patch.object(CampaignService, "_ALL_MATCH_AMBIGUITY_SOURCE_CHUNK_SIZE", 1):
+                ambiguity = await harness.campaign_service._first_all_match_ambiguity(
+                    source_pool_run_id=source_run.run_id,
+                    excluded_member_ids=set(),
+                )
+        finally:
+            event.remove(harness.session.bind.sync_engine, "before_cursor_execute", capture)
+
+        assert ambiguity is not None
+        assert ambiguity.influencer_id == late_fixture.influencer_id
+        assert {account.member_id for account in ambiguity.accounts} == {
+            member_ids[late_fixture.influencer_id],
+            alternate_member_id,
+        }
+        assert len(statements) == 1
 
 
 @async_test

@@ -518,6 +518,19 @@ def test_candidate_pool_read_routes_adapt_closed_service_contracts() -> None:
                 assert members.status_code == 200
                 assert members.json()["data"]["items"][0]["evidence_hash"] == "d" * 64
 
+                members_200 = await client.get(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?limit=200"
+                )
+                assert members_200.status_code == 200
+                assert service.calls[-1] == (
+                    "list_run_members",
+                    (POOL_ID, RUN_ID, None, 200, None, context.department.id),
+                )
+                too_many_members = await client.get(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?limit=201"
+                )
+                _assert_error(too_many_members, status_code=422, code="VALIDATION_ERROR")
+
                 invalid_member_result = await client.get(
                     f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?result=NOT_MATCH"
                 )

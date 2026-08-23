@@ -1,7 +1,9 @@
 """HTTP contract coverage for the closed Phase 3A Campaign and Outreach routers."""
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from uuid import UUID, uuid4
 
 from app.http.campaigns import get_campaign_service
@@ -69,6 +71,9 @@ RUN_MEMBER_ID = UUID("00000000-0000-0000-0000-000000000508")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000000509")
 TASK_ID = UUID("00000000-0000-0000-0000-000000000510")
 EVENT_ID = UUID("00000000-0000-0000-0000-000000000511")
+ALL_MATCH_CONFLICT_MEMBER_ID = UUID("00000000-0000-0000-0000-000000000512")
+ALL_MATCH_CONFLICT_ACCOUNT_ID = UUID("00000000-0000-0000-0000-000000000513")
+ALL_MATCH_CONFLICT_ENTITY_ID = UUID("00000000-0000-0000-0000-000000000514")
 
 
 def _context() -> AuthContext:
@@ -322,6 +327,34 @@ class FakeCampaignService:
         **kwargs: object,
     ) -> MutationResult[CampaignMemberBulkAddResult]:
         self.calls.append(("bulk_add_members_from_candidate_run", (campaign_id, payload, kwargs)))
+        if (
+            isinstance(payload, CampaignMemberFromCandidateRunBulkAddInput)
+            and payload.selection_mode == "ALL_MATCH"
+            and payload.excluded_member_ids
+        ):
+            raise CampaignOutreachError(
+                422,
+                "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
+                "ALL_MATCH cannot choose multiple platform accounts for one influencer; "
+                "exclude one account and retry",
+                entity_id=ALL_MATCH_CONFLICT_ENTITY_ID,
+                safe_details={
+                    "conflicting_influencer": {
+                        "id": str(INFLUENCER_ID),
+                        "display_name": "Campaign member influencer",
+                    },
+                    "conflicting_member_ids": [str(RUN_MEMBER_ID)],
+                    "conflicting_accounts": [
+                        {
+                            "member_id": str(RUN_MEMBER_ID),
+                            "platform_account_id": str(ALL_MATCH_CONFLICT_ACCOUNT_ID),
+                            "platform": "xiaohongshu",
+                            "account_name": "Campaign member account",
+                            "account_handle": "campaign-member-handle",
+                        }
+                    ],
+                },
+            )
         return MutationResult(
             status_code=200,
             result=CampaignMemberBulkAddResult(
@@ -599,6 +632,26 @@ def test_campaign_and_outreach_http_adapt_closed_domain_routes() -> None:
                 selected_payload = campaign_service.calls[-1][1][1]
                 assert isinstance(selected_payload, CampaignMemberFromCandidateRunBulkAddInput)
                 assert selected_payload.run_id == RUN_ID
+                assert selected_payload.selection_mode is None
+                assert selected_payload.member_ids == (RUN_MEMBER_ID,)
+                assert selected_payload.excluded_member_ids is None
+
+                all_match = await client.post(
+                    f"/api/v1/campaigns/{CAMPAIGN_ID}/members/from-candidate-run",
+                    json={
+                        "run_id": str(RUN_ID),
+                        "selection_mode": "ALL_MATCH",
+                        "excluded_member_ids": [],
+                    },
+                    headers=_mutation_headers("campaign-all-match"),
+                )
+                assert all_match.status_code == 200
+                all_match_payload = campaign_service.calls[-1][1][1]
+                assert isinstance(all_match_payload, CampaignMemberFromCandidateRunBulkAddInput)
+                assert all_match_payload.run_id == RUN_ID
+                assert all_match_payload.selection_mode == "ALL_MATCH"
+                assert all_match_payload.member_ids is None
+                assert all_match_payload.excluded_member_ids == ()
 
                 members = await client.get(f"/api/v1/campaigns/{CAMPAIGN_ID}/members?limit=1")
                 assert members.status_code == 200
@@ -731,6 +784,86 @@ def test_put_boundaries_and_safe_campaign_outreach_errors() -> None:
     asyncio.run(scenario())
 
 
+def test_all_match_http_contract_is_strict_and_exposes_only_safe_conflict_details() -> None:
+    async def scenario() -> None:
+        context = _context()
+        campaign_service = FakeCampaignService(context)
+        outreach_service = FakeOutreachService(context)
+        _install_overrides(context, campaign_service, outreach_service)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                settings = get_settings()
+                client.cookies.set(settings.csrf_cookie_name, "campaign-csrf")
+                endpoint = f"/api/v1/campaigns/{CAMPAIGN_ID}/members/from-candidate-run"
+                invalid_payloads = (
+                    {"run_id": str(RUN_ID)},
+                    {"run_id": str(RUN_ID), "excluded_member_ids": []},
+                    {"run_id": str(RUN_ID), "selection_mode": "ALL_MATCH"},
+                    {
+                        "run_id": str(RUN_ID),
+                        "selection_mode": "ALL_MATCH",
+                        "member_ids": [str(RUN_MEMBER_ID)],
+                        "excluded_member_ids": [],
+                    },
+                    {
+                        "run_id": str(RUN_ID),
+                        "selection_mode": "ALL_MATCH",
+                        "excluded_member_ids": [
+                            str(RUN_MEMBER_ID),
+                            str(RUN_MEMBER_ID),
+                        ],
+                    },
+                )
+                for index, payload in enumerate(invalid_payloads):
+                    invalid = await client.post(
+                        endpoint,
+                        json=payload,
+                        headers=_mutation_headers(f"invalid-all-match-{index}"),
+                    )
+                    _assert_error(invalid, status_code=422, code="VALIDATION_ERROR")
+                assert not campaign_service.calls
+
+                conflict = await client.post(
+                    endpoint,
+                    json={
+                        "run_id": str(RUN_ID),
+                        "selection_mode": "ALL_MATCH",
+                        "excluded_member_ids": [str(ALL_MATCH_CONFLICT_MEMBER_ID)],
+                    },
+                    headers=_mutation_headers("all-match-conflict"),
+                )
+                body = _assert_error(
+                    conflict,
+                    status_code=422,
+                    code="CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
+                )
+                details = cast(dict[str, object], body["error"])["details"]
+                assert details == {
+                    "conflicting_influencer": {
+                        "id": str(INFLUENCER_ID),
+                        "display_name": "Campaign member influencer",
+                    },
+                    "conflicting_member_ids": [str(RUN_MEMBER_ID)],
+                    "conflicting_accounts": [
+                        {
+                            "member_id": str(RUN_MEMBER_ID),
+                            "platform_account_id": str(ALL_MATCH_CONFLICT_ACCOUNT_ID),
+                            "platform": "xiaohongshu",
+                            "account_name": "Campaign member account",
+                            "account_handle": "campaign-member-handle",
+                        }
+                    ],
+                }
+                assert str(ALL_MATCH_CONFLICT_ENTITY_ID) not in json.dumps(body)
+                assert "contact" not in json.dumps(details).lower()
+                assert len(campaign_service.calls) == 1
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
 def _resolve_ref(document: dict[str, object], schema: dict[str, object]) -> dict[str, object]:
     while "$ref" in schema:
         reference = str(schema["$ref"])
@@ -753,6 +886,20 @@ def test_campaign_outreach_openapi_is_typed_and_keeps_public_mutation_boundaries
     campaign_update_fields = campaign_update_schema["properties"]
     assert "status" not in campaign_update_fields
     assert "department_id" not in campaign_update_fields
+
+    candidate_run_add_schema = _resolve_ref(
+        document,
+        paths["/api/v1/campaigns/{campaign_id}/members/from-candidate-run"]["post"]["requestBody"][
+            "content"
+        ]["application/json"]["schema"],
+    )
+    assert candidate_run_add_schema["required"] == ["run_id"]
+    assert set(candidate_run_add_schema["properties"]) == {
+        "run_id",
+        "selection_mode",
+        "member_ids",
+        "excluded_member_ids",
+    }
 
     target_update_schema = _resolve_ref(
         document,

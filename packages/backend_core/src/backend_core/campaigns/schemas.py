@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Any, Protocol, Self
+from typing import Annotated, Any, Literal, Protocol, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
@@ -146,14 +146,35 @@ class CampaignMemberBulkAddInput(CampaignWriteContract):
 
 
 class CampaignMemberFromCandidateRunBulkAddInput(CampaignWriteContract):
-    """Explicit selected persisted Candidate Pool Members for a provenance-bearing add."""
+    """One explicit selection or all persisted MATCH rows from a completed run.
+
+    The original explicit shape deliberately remains byte-for-byte compatible:
+    ``{run_id, member_ids}``.  ``ALL_MATCH`` is a strict alternative rather
+    than a mixed selection mode, so an all-MATCH request can never quietly add
+    a selected UNKNOWN row.
+    """
 
     department_id: UUID | None = None
     run_id: UUID
-    member_ids: tuple[UUID, ...] = Field(min_length=1, max_length=10_000)
+    selection_mode: Literal["ALL_MATCH"] | None = None
+    member_ids: tuple[UUID, ...] | None = Field(default=None, min_length=1, max_length=10_000)
+    excluded_member_ids: tuple[UUID, ...] | None = Field(default=None, max_length=10_000)
 
     @model_validator(mode="after")
-    def require_distinct_member_ids(self) -> Self:
+    def require_exactly_one_selection_shape(self) -> Self:
+        if self.selection_mode == "ALL_MATCH":
+            if self.member_ids is not None or self.excluded_member_ids is None:
+                raise ValueError(
+                    "ALL_MATCH requires excluded_member_ids and does not accept member_ids"
+                )
+            if len(set(self.excluded_member_ids)) != len(self.excluded_member_ids):
+                raise ValueError("excluded_member_ids must be distinct")
+            return self
+
+        if self.member_ids is None or self.excluded_member_ids is not None:
+            raise ValueError(
+                "Explicit selection requires member_ids and does not accept excluded_member_ids"
+            )
         if len(set(self.member_ids)) != len(self.member_ids):
             raise ValueError("member_ids must be distinct")
         return self

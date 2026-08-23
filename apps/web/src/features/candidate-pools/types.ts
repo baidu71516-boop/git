@@ -130,6 +130,27 @@ export type CandidateMemberPage = {
   next_cursor: string | null;
 };
 
+export type CandidateMemberPageSize = 20 | 50 | 100 | 200;
+
+/** Existing explicit selection shape. Keep this request body unchanged. */
+export type CandidateCampaignExplicitSelection = {
+  run_id: string;
+  member_ids: string[];
+  selection_mode?: never;
+  excluded_member_ids?: never;
+};
+
+/** Server-resolved immutable MATCH set, minus the selected exclusions. */
+export type CandidateCampaignAllMatchSelection = {
+  run_id: string;
+  selection_mode: "ALL_MATCH";
+  excluded_member_ids: string[];
+  member_ids?: never;
+};
+
+export type CandidateCampaignSelection =
+  CandidateCampaignExplicitSelection | CandidateCampaignAllMatchSelection;
+
 export type CandidateCampaignAddResult = {
   campaign_id: string;
   added_count: number;

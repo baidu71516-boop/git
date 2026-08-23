@@ -345,7 +345,7 @@ async def list_candidate_pool_run_members(
     context: Annotated[AuthContext, Depends(require_auth)],
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     cursor: Annotated[UUID | None, Query()] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     result: Annotated[CandidateRunMemberResult | None, Query()] = None,
 ) -> dict[str, Any]:
     page = await _service_call(

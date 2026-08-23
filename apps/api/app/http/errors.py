@@ -66,16 +66,20 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request,
         exc: CampaignOutreachError,
     ) -> JSONResponse:
-        """Expose only the safe optimistic-concurrency fact from Phase 3A errors."""
+        """Expose only domain facts explicitly marked safe by Phase 3A callers."""
 
-        details = (
-            {"current_version": exc.current_version} if exc.current_version is not None else None
-        )
+        details = dict(exc.safe_details or {})
+        if exc.current_version is not None:
+            details["current_version"] = exc.current_version
         return JSONResponse(
             status_code=exc.status_code,
             content=envelope(
                 request,
-                error={"code": exc.code, "message": exc.message, "details": details},
+                error={
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": details or None,
+                },
             ),
         )
 

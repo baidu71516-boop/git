@@ -448,6 +448,12 @@
   margin: 0;
 }
 
+.candidate-page-size-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .candidate-run-history-header {
   display: flex;
   align-items: center;

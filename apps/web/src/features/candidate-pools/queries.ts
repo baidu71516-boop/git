@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { ApiClientError } from "@/lib/api/client";
 import {
+  CANDIDATE_MEMBER_PAGE_LIMIT,
   addCandidatesToCampaign,
   createCandidateRun,
   fetchCandidateMembers,
@@ -15,6 +16,10 @@ import {
   fetchCandidateRun,
   fetchCandidateRunPage,
 } from "./api";
+import type {
+  CandidateCampaignSelection,
+  CandidateMemberPageSize,
+} from "./types";
 
 function retryRead(failures: number, error: Error) {
   return (
@@ -29,8 +34,12 @@ export const candidatePoolQueryKeys = {
   runs: (poolId: string) => ["candidate-pools", "runs", poolId] as const,
   run: (poolId: string, runId: string) =>
     ["candidate-pools", "run", poolId, runId] as const,
-  members: (poolId: string, runId: string, result?: string) =>
-    ["candidate-pools", "members", poolId, runId, result] as const,
+  members: (
+    poolId: string,
+    runId: string,
+    result?: string,
+    pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
+  ) => ["candidate-pools", "members", poolId, runId, result, pageSize] as const,
 };
 export function useCandidatePoolList() {
   return useInfiniteQuery({
@@ -91,12 +100,13 @@ export function useCandidateMembers(
   runId: string,
   result: "MATCH" | "UNKNOWN" | undefined,
   enabled: boolean,
+  pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
 ) {
   return useInfiniteQuery({
-    queryKey: candidatePoolQueryKeys.members(poolId, runId, result),
+    queryKey: candidatePoolQueryKeys.members(poolId, runId, result, pageSize),
     initialPageParam: null as string | null,
     queryFn: ({ pageParam }) =>
-      fetchCandidateMembers(poolId, runId, pageParam, result),
+      fetchCandidateMembers(poolId, runId, pageParam, result, pageSize),
     getNextPageParam: (page) => page.next_cursor ?? undefined,
     enabled: enabled && Boolean(poolId && runId),
     retry: retryRead,
@@ -128,15 +138,27 @@ export function useAddCandidatesToCampaignMutation() {
   return useMutation({
     mutationFn: ({
       campaignId,
-      runId,
-      memberIds,
       idempotencyKey,
+      ...selectionInput
     }: {
       campaignId: string;
-      runId: string;
-      memberIds: string[];
       idempotencyKey: string;
-    }) => addCandidatesToCampaign(campaignId, runId, memberIds, idempotencyKey),
+    } & (
+      | { selection: CandidateCampaignSelection }
+      | { runId: string; memberIds: string[] }
+    )) =>
+      "selection" in selectionInput
+        ? addCandidatesToCampaign(
+            campaignId,
+            selectionInput.selection,
+            idempotencyKey,
+          )
+        : addCandidatesToCampaign(
+            campaignId,
+            selectionInput.runId,
+            selectionInput.memberIds,
+            idempotencyKey,
+          ),
     retry: false,
   });
 }

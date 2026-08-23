@@ -5,9 +5,11 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Drawer,
   Modal,
   Radio,
+  Select,
   Skeleton,
   Space,
   Table,
@@ -17,7 +19,14 @@ import {
 } from "antd";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 
 import { AppEmpty } from "@/components/ui/app-empty";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -25,7 +34,27 @@ import { fetchCampaignPage } from "@/features/campaigns/api";
 import { campaignStatusPresentation } from "@/features/campaigns/formatters";
 import type { Campaign } from "@/features/campaigns/types";
 import { platformLabel } from "@/features/influencers/formatters";
+import { ApiClientError } from "@/lib/api/client";
 
+import {
+  CANDIDATE_MEMBER_PAGE_LIMIT,
+  CANDIDATE_MEMBER_PAGE_SIZES,
+} from "./api";
+import {
+  candidateSelectionActions,
+  candidateSelectionCount,
+  candidateSelectionPageState,
+  candidateSelectionPayload,
+  candidateSelectionScopesEqual,
+  candidateSelectionUnknownCount,
+  candidateSelectionWouldExceedSelectionLimit,
+  createCandidateSelection,
+  isCandidateMemberSelectable,
+  isCandidateMemberSelected,
+  reduceCandidateSelection,
+  type CandidateSelectionScope,
+  type CandidateSelectionState,
+} from "./candidate-selection";
 import {
   candidateDateTime,
   candidateReasonLabel,
@@ -44,7 +73,9 @@ import {
 } from "./queries";
 import type {
   CandidateCampaignAddResult,
+  CandidateCampaignSelection,
   CandidateMember,
+  CandidateMemberPageSize,
   CandidatePoolRole,
   TargetingPolicy,
 } from "./types";
@@ -52,6 +83,131 @@ import type {
 const { Text } = Typography;
 const attemptKey = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+
+function initialCandidateSelection({
+  scope,
+  selected,
+}: {
+  scope: CandidateSelectionScope;
+  selected: CandidateMember[];
+}): CandidateSelectionState {
+  return selected.reduce(
+    (selection, member) =>
+      reduceCandidateSelection(
+        selection,
+        candidateSelectionActions.toggleMember(member, true),
+      ),
+    createCandidateSelection(scope),
+  );
+}
+
+type CandidateMemberNavigationScope = {
+  candidatePoolId: string;
+  runId: string;
+  filter: "all" | "MATCH" | "UNKNOWN";
+  pageSize: CandidateMemberPageSize;
+};
+
+function candidateMemberNavigationScopesEqual(
+  left: CandidateMemberNavigationScope,
+  right: CandidateMemberNavigationScope,
+): boolean {
+  return (
+    left.candidatePoolId === right.candidatePoolId &&
+    left.runId === right.runId &&
+    left.filter === right.filter &&
+    left.pageSize === right.pageSize
+  );
+}
+
+function memberSelectionLabel(member: CandidateMember): string {
+  const account = member.platform_account;
+  const handle = account.account_handle ? ` @${account.account_handle}` : "";
+  return `选择 ${member.influencer.display_name}：${platformLabel(account.platform)} · ${account.account_name}${handle}（候选记录 ${member.id}）`;
+}
+
+function selectionLimitMessage(selection: CandidateSelectionState): string {
+  return selection.mode === "ALL_MATCH"
+    ? "ALL_MATCH 最多可排除 10,000 位达人。请先恢复部分已排除的达人后再继续。"
+    : "一次最多可选择 10,000 位达人。请先取消部分已选达人后再继续。";
+}
+
+function selectedCandidateLabel(
+  selection: CandidateSelectionState,
+  selectedCount: number,
+): string {
+  if (
+    selection.mode === "ALL_MATCH" &&
+    selectedCount === selection.matchCount
+  ) {
+    return `已选择全部 ${selectedCount} 位符合条件达人`;
+  }
+  return `已选择 ${selectedCount} 位候选达人`;
+}
+
+function ambiguityErrorMessage(error: unknown): string | null {
+  if (
+    !(error instanceof ApiClientError) ||
+    error.code !== "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS"
+  ) {
+    return null;
+  }
+  const details =
+    error.details && typeof error.details === "object"
+      ? (error.details as Record<string, unknown>)
+      : {};
+  const conflict =
+    details.conflict && typeof details.conflict === "object"
+      ? (details.conflict as Record<string, unknown>)
+      : details;
+  const conflictingInfluencer =
+    conflict.conflicting_influencer &&
+    typeof conflict.conflicting_influencer === "object"
+      ? (conflict.conflicting_influencer as Record<string, unknown>)
+      : conflict;
+  const influencer =
+    typeof conflictingInfluencer.display_name === "string"
+      ? conflictingInfluencer.display_name
+      : typeof conflict.influencer_display_name === "string"
+        ? conflict.influencer_display_name
+        : null;
+  const accounts = Array.isArray(conflict.conflicting_accounts)
+    ? conflict.conflicting_accounts
+        .map((item) => {
+          if (!item || typeof item !== "object") return null;
+          const account = item as Record<string, unknown>;
+          const accountName =
+            typeof account.account_name === "string"
+              ? account.account_name
+              : "未命名账号";
+          const platform =
+            typeof account.platform === "string"
+              ? platformLabel(account.platform)
+              : "未知平台";
+          const handle =
+            typeof account.account_handle === "string" && account.account_handle
+              ? ` @${account.account_handle}`
+              : "";
+          const memberId =
+            typeof account.member_id === "string" && account.member_id
+              ? `（候选记录 ${account.member_id}）`
+              : "";
+          return `${platform} · ${accountName}${handle}${memberId}`;
+        })
+        .filter((item): item is string => item !== null)
+    : Array.isArray(conflict.account_names)
+      ? conflict.account_names.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : [];
+  if (influencer && accounts.length > 0) {
+    return `达人“${influencer}”同时命中了多个平台账号（${accounts.join("、")}）。请在候选结果中取消其中一个账号后重试。`;
+  }
+  if (influencer) {
+    return `达人“${influencer}”同时命中了多个平台账号。请在候选结果中取消其中一个账号后重试。`;
+  }
+  return "同一达人命中了多个平台账号。请在候选结果中取消其中一个账号后重试。";
+}
 
 export function CandidateCampaignSuccessFeedback({
   campaignId,
@@ -99,6 +255,7 @@ function Account({ member }: { member: CandidateMember }) {
         <Text type="secondary"> · @{account.account_handle}</Text>
       ) : null}
       {!account.is_active ? <Text type="secondary"> · 账号已停用</Text> : null}
+      <Text type="secondary"> · 候选记录 {member.id}</Text>
     </span>
   );
 }
@@ -247,19 +404,21 @@ function EvidenceContent({
 
 function CampaignSelector({
   open,
-  selected,
-  runId,
+  selection,
+  unknownCount,
+  selectedLabel,
   onClose,
   onSuccess,
   onInvalidSelection,
   previewMode = false,
 }: {
   open: boolean;
-  selected: CandidateMember[];
-  runId: string;
+  selection: CandidateCampaignSelection;
+  unknownCount: number;
+  selectedLabel: string;
   onClose: () => void;
-  onSuccess: () => void;
-  onInvalidSelection: () => void;
+  onSuccess: () => boolean;
+  onInvalidSelection: () => boolean;
   previewMode?: boolean;
 }) {
   const campaigns = useInfiniteQuery({
@@ -286,9 +445,6 @@ function CampaignSelector({
     () => campaigns.data?.pages.flatMap((page) => page.items) ?? [],
     [campaigns.data],
   );
-  const unknownCount = selected.filter(
-    (member) => member.result === "UNKNOWN",
-  ).length;
   async function submit() {
     if (!campaignId) return;
     if (previewMode) {
@@ -296,41 +452,37 @@ function CampaignSelector({
       return;
     }
     const selectedCampaignId = campaignId;
-    const memberIds = selected.map((member) => member.id);
-    const payload = JSON.stringify({ campaignId, memberIds });
+    const payload = JSON.stringify({ campaignId, selection });
     const current =
       retry?.payload === payload ? retry : { key: attemptKey(), payload };
     setError(null);
     try {
       const result = await mutation.mutateAsync({
         campaignId,
-        runId,
-        memberIds,
+        selection,
         idempotencyKey: current.key,
       });
-      void messageApi.success(
-        <CandidateCampaignSuccessFeedback
-          campaignId={selectedCampaignId}
-          result={result}
-        />,
-      );
       setRetry(null);
-      onSuccess();
+      if (onSuccess()) {
+        void messageApi.success(
+          <CandidateCampaignSuccessFeedback
+            campaignId={selectedCampaignId}
+            result={result}
+          />,
+        );
+      }
     } catch (caught) {
-      const label = mutationErrorMessage(
-        caught,
-        "加入拓客活动失败，请稍后重试。",
-      );
+      const label =
+        ambiguityErrorMessage(caught) ??
+        mutationErrorMessage(caught, "加入拓客活动失败，请稍后重试。");
       setError(label);
       if (isAmbiguousMutation(caught)) setRetry(current);
       else if ((caught as { code?: string }).code === "CAMPAIGN_CLOSED") {
         setCampaignId(null);
         void campaigns.refetch();
       } else if (
-        [
-          "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND",
-          "CANDIDATE_POOL_RUN_MEMBER_AMBIGUOUS",
-        ].includes((caught as { code?: string }).code ?? "")
+        (caught as { code?: string }).code ===
+        "CANDIDATE_POOL_RUN_MEMBER_NOT_FOUND"
       ) {
         onInvalidSelection();
       }
@@ -352,7 +504,7 @@ function CampaignSelector({
       onOk={() => void submit()}
     >
       {holder}
-      <Text>已选择 {selected.length} 位候选达人</Text>
+      <Text>{selectedLabel}</Text>
       {unknownCount ? (
         <Alert
           type="warning"
@@ -458,17 +610,83 @@ export function CandidateRunDetailView({
   const runQuery = useCandidateRun(poolId, runId, activePolling);
   const policies = useCandidatePolicies(poolId, Boolean(runQuery.data));
   const [filter, setFilter] = useState<"all" | "MATCH" | "UNKNOWN">("all");
+  const [pageSize, setPageSize] = useState<CandidateMemberPageSize>(
+    CANDIDATE_MEMBER_PAGE_LIMIT,
+  );
+  const [currentPageIndex, setCurrentPageIndex] = useState(0);
+  const [pageNavigationScope, setPageNavigationScope] = useState({
+    candidatePoolId: poolId,
+    filter: "all" as "all" | "MATCH" | "UNKNOWN",
+    pageSize: CANDIDATE_MEMBER_PAGE_LIMIT as CandidateMemberPageSize,
+    runId,
+  });
+  const activeNavigationScope: CandidateMemberNavigationScope = {
+    candidatePoolId: poolId,
+    runId,
+    filter,
+    pageSize,
+  };
+  const activeSelectionScope: CandidateSelectionScope = {
+    candidatePoolId: poolId,
+    runId,
+  };
+  const navigationIntentRef = useRef(activeNavigationScope);
+  const navigationRequestRef = useRef(0);
+  const selectionIdentityRef = useRef({
+    scope: activeSelectionScope,
+    generation: 0,
+  });
+  const [selectionGeneration, setSelectionGeneration] = useState(0);
+  useLayoutEffect(() => {
+    const nextScope: CandidateMemberNavigationScope = {
+      candidatePoolId: poolId,
+      runId,
+      filter,
+      pageSize,
+    };
+    if (
+      !candidateMemberNavigationScopesEqual(
+        navigationIntentRef.current,
+        nextScope,
+      )
+    ) {
+      navigationIntentRef.current = nextScope;
+      navigationRequestRef.current += 1;
+    }
+  }, [filter, pageSize, poolId, runId]);
+  useLayoutEffect(() => {
+    const nextScope: CandidateSelectionScope = {
+      candidatePoolId: poolId,
+      runId,
+    };
+    if (
+      !candidateSelectionScopesEqual(
+        selectionIdentityRef.current.scope,
+        nextScope,
+      )
+    ) {
+      const nextGeneration = selectionIdentityRef.current.generation + 1;
+      selectionIdentityRef.current = {
+        scope: nextScope,
+        generation: nextGeneration,
+      };
+      setSelectionGeneration(nextGeneration);
+    }
+  }, [poolId, runId]);
+  const [storedSelection, dispatchSelection] = useReducer(
+    reduceCandidateSelection,
+    {
+      scope: { candidatePoolId: poolId, runId },
+      selected: previewSelectedMembers ?? [],
+    },
+    initialCandidateSelection,
+  );
   const membersQuery = useCandidateMembers(
     poolId,
     runId,
     filter === "all" ? undefined : filter,
     runQuery.data?.status === "COMPLETED",
-  );
-  const [selected, setSelected] = useState<Record<string, CandidateMember>>(
-    () =>
-      Object.fromEntries(
-        (previewSelectedMembers ?? []).map((item) => [item.id, item]),
-      ),
+    pageSize,
   );
   const [evidence, setEvidence] = useState<CandidateMember | null>(
     previewMode ? null : (previewEvidence ?? null),
@@ -476,6 +694,11 @@ export function CandidateRunDetailView({
   const [modalOpen, setModalOpen] = useState(
     previewMode ? false : previewModalOpen,
   );
+  const [modalScope, setModalScope] = useState({
+    candidatePoolId: poolId,
+    runId,
+    generation: 0,
+  });
   const [messageApi, holder] = message.useMessage();
   useEffect(() => {
     if (previewMode) return;
@@ -487,9 +710,16 @@ export function CandidateRunDetailView({
   }, [previewMode, runQuery]);
   useEffect(() => {
     if (!previewMode || !previewModalOpen) return;
-    const timer = window.setTimeout(() => setModalOpen(true), 0);
+    const timer = window.setTimeout(() => {
+      setModalScope({
+        candidatePoolId: poolId,
+        runId,
+        generation: selectionIdentityRef.current.generation,
+      });
+      setModalOpen(true);
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [previewMode, previewModalOpen]);
+  }, [poolId, previewMode, previewModalOpen, runId, selectionGeneration]);
   useEffect(() => {
     if (!previewMode || !previewEvidence) return;
     const timer = window.setTimeout(() => setEvidence(previewEvidence), 0);
@@ -504,36 +734,153 @@ export function CandidateRunDetailView({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [messageApi, previewMode, previewSelectionAttempted]);
+  useLayoutEffect(() => {
+    dispatchSelection(
+      candidateSelectionActions.resetScope({ candidatePoolId: poolId, runId }),
+    );
+  }, [poolId, runId]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
   const policy = policies.data?.find((item) => item.id === run?.policy_id);
-  const members = useMemo(
-    () => membersQuery.data?.pages.flatMap((page) => page.items) ?? [],
+  const selection =
+    storedSelection.scope.candidatePoolId === poolId &&
+    storedSelection.scope.runId === runId
+      ? storedSelection
+      : createCandidateSelection({ candidatePoolId: poolId, runId });
+  const memberPages = useMemo(
+    () => membersQuery.data?.pages ?? [],
     [membersQuery.data],
   );
+  const visiblePageIndex = candidateMemberNavigationScopesEqual(
+    pageNavigationScope,
+    activeNavigationScope,
+  )
+    ? currentPageIndex
+    : 0;
+  const members = memberPages[visiblePageIndex]?.items ?? [];
+  const pageSelection = candidateSelectionPageState(selection, members);
+  const selectedCount = candidateSelectionCount(selection);
+  const selectedLabel = selectedCandidateLabel(selection, selectedCount);
+  const selectionPayload = candidateSelectionPayload(selection);
+  const unknownCount = candidateSelectionUnknownCount(selection);
+  const scopedModalOpen =
+    modalOpen &&
+    modalScope.candidatePoolId === poolId &&
+    modalScope.runId === runId &&
+    modalScope.generation === selectionGeneration;
   const canWrite = role !== "viewer" && hasSelectedOperator;
+  function updateMemberPageNavigation(
+    nextScope: CandidateMemberNavigationScope,
+    nextPageIndex: number,
+  ): number {
+    navigationIntentRef.current = nextScope;
+    navigationRequestRef.current += 1;
+    setPageNavigationScope(nextScope);
+    setCurrentPageIndex(nextPageIndex);
+    return navigationRequestRef.current;
+  }
   function changeFilter(next: "all" | "MATCH" | "UNKNOWN") {
     setFilter(next);
-    setSelected({});
+    updateMemberPageNavigation(
+      { candidatePoolId: poolId, filter: next, pageSize, runId },
+      0,
+    );
   }
   function toggle(member: CandidateMember, checked: boolean) {
-    setSelected((current) => {
-      if (!checked) {
-        const copy = { ...current };
-        delete copy[member.id];
-        return copy;
-      }
-      const sameInfluencer = Object.values(current).find(
-        (item) => item.influencer_id === member.influencer_id,
+    if (
+      checked &&
+      selection.mode === "EXPLICIT" &&
+      Object.values(selection.selectedById).some(
+        (item) =>
+          item.influencer_id === member.influencer_id && item.id !== member.id,
+      )
+    ) {
+      void messageApi.warning(
+        "同一达人只能选择一个平台账号，请先取消已选账号。",
       );
-      if (sameInfluencer && sameInfluencer.id !== member.id) {
-        void messageApi.warning(
-          "同一达人只能选择一个平台账号，请先取消已选账号。",
-        );
-        return current;
-      }
-      return { ...current, [member.id]: member };
+      return;
+    }
+    if (
+      candidateSelectionWouldExceedSelectionLimit(selection, [member], checked)
+    ) {
+      void messageApi.warning(selectionLimitMessage(selection));
+      return;
+    }
+    dispatchSelection(candidateSelectionActions.toggleMember(member, checked));
+  }
+  function selectCurrentPage() {
+    if (candidateSelectionWouldExceedSelectionLimit(selection, members, true)) {
+      void messageApi.warning(selectionLimitMessage(selection));
+      return;
+    }
+    dispatchSelection(candidateSelectionActions.selectPage(members));
+    if (pageSelection.blockedCount > 0) {
+      void messageApi.warning(
+        "本页有同一达人对应多个平台账号，请逐个选择其中一个账号。",
+      );
+    }
+  }
+  function deselectCurrentPage() {
+    if (
+      candidateSelectionWouldExceedSelectionLimit(selection, members, false)
+    ) {
+      void messageApi.warning(selectionLimitMessage(selection));
+      return;
+    }
+    dispatchSelection(candidateSelectionActions.deselectPage(members));
+  }
+  async function nextMemberPage() {
+    const requestScope = activeNavigationScope;
+    const nextPageIndex = visiblePageIndex + 1;
+    if (visiblePageIndex < memberPages.length - 1) {
+      updateMemberPageNavigation(requestScope, nextPageIndex);
+      return;
+    }
+    if (!membersQuery.hasNextPage || membersQuery.isFetchingNextPage) return;
+    const requestId = updateMemberPageNavigation(
+      requestScope,
+      visiblePageIndex,
+    );
+    const next = await membersQuery.fetchNextPage();
+    if (
+      !next.isError &&
+      navigationRequestRef.current === requestId &&
+      candidateMemberNavigationScopesEqual(
+        navigationIntentRef.current,
+        requestScope,
+      )
+    ) {
+      setCurrentPageIndex(nextPageIndex);
+    }
+  }
+  function previousMemberPage() {
+    updateMemberPageNavigation(
+      activeNavigationScope,
+      Math.max(0, visiblePageIndex - 1),
+    );
+  }
+  function openCampaignSelector() {
+    setModalScope({
+      candidatePoolId: poolId,
+      runId,
+      generation: selectionIdentityRef.current.generation,
     });
+    setModalOpen(true);
+  }
+  function finishCampaignSelection(
+    scope: CandidateSelectionScope,
+    generation: number,
+  ): boolean {
+    const currentSelection = selectionIdentityRef.current;
+    if (
+      currentSelection.generation !== generation ||
+      !candidateSelectionScopesEqual(currentSelection.scope, scope)
+    ) {
+      return false;
+    }
+    setModalOpen(false);
+    dispatchSelection(candidateSelectionActions.clearAll(scope));
+    return true;
   }
   if (runQuery.isPending)
     return (
@@ -575,13 +922,24 @@ export function CandidateRunDetailView({
     ...(canWrite
       ? [
           {
-            title: "选择",
+            title: (
+              <Checkbox
+                aria-label="选择本页候选达人"
+                checked={pageSelection.checked}
+                disabled={!pageSelection.eligibleCount}
+                indeterminate={pageSelection.indeterminate}
+                onChange={(event) => {
+                  if (event.target.checked) selectCurrentPage();
+                  else deselectCurrentPage();
+                }}
+              />
+            ),
             key: "select",
             render: (_: unknown, member: CandidateMember) => (
-              <input
-                aria-label={`选择 ${member.influencer.display_name}`}
-                type="checkbox"
-                checked={Boolean(selected[member.id])}
+              <Checkbox
+                aria-label={memberSelectionLabel(member)}
+                checked={isCandidateMemberSelected(selection, member)}
+                disabled={!isCandidateMemberSelectable(selection, member)}
                 onChange={(event) => toggle(member, event.target.checked)}
               />
             ),
@@ -704,20 +1062,75 @@ export function CandidateRunDetailView({
                   { key: "UNKNOWN", label: "信息不足" },
                 ]}
               />
-              {canWrite ? (
-                <Space>
-                  <Text type="secondary">
-                    已选择 {Object.keys(selected).length} 位候选达人
+              <Space wrap>
+                <span className="candidate-page-size-control">
+                  <Text id="candidate-member-page-size-label" type="secondary">
+                    每页数量
                   </Text>
-                  <Button
-                    type="primary"
-                    disabled={!Object.keys(selected).length}
-                    onClick={() => setModalOpen(true)}
-                  >
-                    加入拓客活动
-                  </Button>
-                </Space>
-              ) : null}
+                  <Select<CandidateMemberPageSize>
+                    aria-labelledby="candidate-member-page-size-label"
+                    options={CANDIDATE_MEMBER_PAGE_SIZES.map((value) => ({
+                      value,
+                      label: String(value),
+                    }))}
+                    size="small"
+                    value={pageSize}
+                    onChange={(value) => {
+                      setPageSize(value);
+                      updateMemberPageNavigation(
+                        {
+                          candidatePoolId: poolId,
+                          filter,
+                          pageSize: value,
+                          runId,
+                        },
+                        0,
+                      );
+                    }}
+                  />
+                </span>
+                {canWrite ? (
+                  <>
+                    <Text type="secondary">{selectedLabel}</Text>
+                    <Button
+                      disabled={!pageSelection.selectedCount}
+                      onClick={deselectCurrentPage}
+                    >
+                      取消本页选择
+                    </Button>
+                    <Button
+                      disabled={!selectedCount}
+                      onClick={() =>
+                        dispatchSelection(
+                          candidateSelectionActions.clearAll(selection.scope),
+                        )
+                      }
+                    >
+                      清空选择
+                    </Button>
+                    {run.match_count > 0 ? (
+                      <Button
+                        onClick={() =>
+                          dispatchSelection(
+                            candidateSelectionActions.selectAllMatch(
+                              run.match_count,
+                            ),
+                          )
+                        }
+                      >
+                        选择全部 {run.match_count} 位符合条件达人
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="primary"
+                      disabled={!selectionPayload}
+                      onClick={openCampaignSelector}
+                    >
+                      加入拓客活动
+                    </Button>
+                  </>
+                ) : null}
+              </Space>
             </div>
             {membersQuery.isPending ? (
               <Skeleton active paragraph={{ rows: 7 }} />
@@ -754,19 +1167,28 @@ export function CandidateRunDetailView({
                   />
                 </div>
                 <div className="campaign-pagination-footer">
-                  {membersQuery.hasNextPage ? (
+                  <Space>
                     <Button
-                      icon={<ReloadOutlined aria-hidden="true" />}
+                      disabled={visiblePageIndex === 0}
+                      onClick={previousMemberPage}
+                    >
+                      上一页
+                    </Button>
+                    <Text type="secondary">第 {visiblePageIndex + 1} 页</Text>
+                    <Button
+                      disabled={
+                        previewMode ||
+                        (!membersQuery.hasNextPage &&
+                          visiblePageIndex >= memberPages.length - 1)
+                      }
                       loading={
                         previewMode ? false : membersQuery.isFetchingNextPage
                       }
-                      onClick={() => {
-                        if (!previewMode) void membersQuery.fetchNextPage();
-                      }}
+                      onClick={() => void nextMemberPage()}
                     >
-                      加载更多
+                      下一页
                     </Button>
-                  ) : null}
+                  </Space>
                 </div>
               </>
             )}
@@ -815,18 +1237,22 @@ export function CandidateRunDetailView({
           </>
         ) : null}
       </Drawer>
-      <CampaignSelector
-        open={modalOpen}
-        selected={Object.values(selected)}
-        runId={runId}
-        onClose={() => setModalOpen(false)}
-        onSuccess={() => {
-          setModalOpen(false);
-          setSelected({});
-        }}
-        onInvalidSelection={() => setSelected({})}
-        previewMode={previewMode}
-      />
+      {selectionPayload ? (
+        <CampaignSelector
+          open={scopedModalOpen}
+          selection={selectionPayload}
+          selectedLabel={selectedLabel}
+          unknownCount={unknownCount}
+          onClose={() => setModalOpen(false)}
+          onSuccess={() =>
+            finishCampaignSelection(selection.scope, modalScope.generation)
+          }
+          onInvalidSelection={() =>
+            finishCampaignSelection(selection.scope, modalScope.generation)
+          }
+          previewMode={previewMode}
+        />
+      ) : null}
     </section>
   );
 }
