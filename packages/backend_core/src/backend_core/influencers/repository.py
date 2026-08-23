@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -28,6 +28,12 @@ from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import CTE, Subquery
 
 from backend_core.auth.models import Operator
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
+from backend_core.content_activity.models import ContentActivityProjection
 from backend_core.imports.enums import (
     ImportJobFileStatus,
     ImportJobStatus,
@@ -38,12 +44,17 @@ from backend_core.imports.models import ImportJob, ImportJobFile, ImportRow
 from backend_core.influencers.enums import (
     ContactFilter,
     ContactType,
+    ContentActivityFilter,
     DataSource,
     InfluencerStatus,
     Notes7dFilter,
     Notes60dFilter,
 )
-from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    FreshnessStatus,
+)
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -66,6 +77,7 @@ class InfluencerListRecord:
     current_metrics: tuple[InfluencerCurrentMetrics, ...]
     current_contacts: tuple[InfluencerContact, ...]
     huitun_freshness: tuple[AccountSourceFreshnessRecord, ...] = ()
+    content_activity_projections: tuple[ContentActivityProjection, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +92,7 @@ class InfluencerDetailRecord:
     source_identities: tuple[PlatformAccountSourceIdentity, ...]
     current_metrics: tuple[InfluencerCurrentMetrics, ...]
     huitun_freshness: tuple[AccountSourceFreshnessRecord, ...] = ()
+    content_activity_projections: tuple[ContentActivityProjection, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +349,14 @@ def _utc_as_of(value: datetime | None) -> datetime:
     return resolved.astimezone(UTC)
 
 
+_CONTENT_ACTIVITY_INACTIVITY_DAYS = {
+    ContentActivityFilter.INACTIVE_30D: 30,
+    ContentActivityFilter.INACTIVE_60D: 60,
+    ContentActivityFilter.INACTIVE_90D: 90,
+    ContentActivityFilter.INACTIVE_180D: 180,
+}
+
+
 class InfluencerRepository:
     """Explicit, fixed-query-count reads without ORM lazy relationships."""
 
@@ -557,12 +578,69 @@ class InfluencerRepository:
             ~has_matching_metric if notes_filter is Notes7dFilter.MISSING else has_matching_metric
         )
 
+    @staticmethod
+    def _content_activity_criterion(
+        activity_filter: ContentActivityFilter,
+        *,
+        as_of: datetime,
+        policy: ContentActivityFreshnessPolicy,
+    ) -> ColumnElement[bool]:
+        """Require one active account's exact, fresh trusted-public projection.
+
+        This is deliberately a correlated account predicate rather than an
+        influencer aggregate.  A missing, stale, failed, partial, or
+        no-public-content projection has no matching row and is therefore
+        excluded from every activity filter.
+        """
+
+        conditions: list[ColumnElement[bool]] = [
+            InfluencerPlatformAccount.influencer_id == Influencer.id,
+            InfluencerPlatformAccount.is_active.is_(True),
+            ContentActivityProjection.platform_account_id == InfluencerPlatformAccount.id,
+            ContentActivityProjection.platform == InfluencerPlatformAccount.platform,
+            ContentActivityProjection.trusted_observation_status
+            == ContentActivityObservationStatus.COMPLETE,
+            ContentActivityProjection.trusted_coverage_status
+            == ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            ContentActivityProjection.trusted_activity_result
+            == ContentActivityResult.PUBLICATION_FOUND,
+            ContentActivityProjection.latest_attempt_observation_id
+            == ContentActivityProjection.trusted_observation_id,
+            ContentActivityProjection.trusted_observed_at.is_not(None),
+            ContentActivityProjection.trusted_observed_at >= as_of - policy.max_age,
+            ContentActivityProjection.trusted_observed_at <= as_of,
+            ContentActivityProjection.last_publication_at.is_not(None),
+            ContentActivityProjection.last_publication_at <= as_of,
+        ]
+        if activity_filter is ContentActivityFilter.ACTIVE_WITHIN_7D:
+            conditions.append(
+                ContentActivityProjection.last_publication_at >= as_of - timedelta(days=7)
+            )
+        else:
+            days = _CONTENT_ACTIVITY_INACTIVITY_DAYS[activity_filter]
+            conditions.append(
+                ContentActivityProjection.last_publication_at <= as_of - timedelta(days=days)
+            )
+        return exists(
+            select(1)
+            .select_from(ContentActivityProjection)
+            .join(
+                InfluencerPlatformAccount,
+                and_(
+                    InfluencerPlatformAccount.id == ContentActivityProjection.platform_account_id,
+                    InfluencerPlatformAccount.platform == ContentActivityProjection.platform,
+                ),
+            )
+            .where(*conditions)
+        )
+
     def _list_criteria(
         self,
         query: InfluencerListQuery,
         *,
         as_of: datetime,
         policy: FreshnessPolicy,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy,
     ) -> list[ColumnElement[bool]]:
         criteria = list(_visible_influencer_criteria())
         if query.q is not None:
@@ -581,6 +659,14 @@ class InfluencerRepository:
             criteria.append(self._notes_7d_criterion(query.notes_7d_filter))
         if query.notes_60d_filter is not None:
             criteria.append(self._notes_60d_criterion(query.notes_60d_filter))
+        if query.content_activity_filter is not None:
+            criteria.append(
+                self._content_activity_criterion(
+                    query.content_activity_filter,
+                    as_of=as_of,
+                    policy=content_activity_freshness_policy,
+                )
+            )
         if (
             query.freshness_status is not None
             or query.requires_refresh is not None
@@ -643,15 +729,20 @@ class InfluencerRepository:
         *,
         as_of: datetime | None = None,
         policy: FreshnessPolicy | None = None,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]:
         """Return one aggregate per visible influencer and the exact subject total."""
 
         resolved_as_of = _utc_as_of(as_of)
         resolved_policy = policy or FreshnessPolicy()
+        resolved_content_activity_freshness_policy = (
+            content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+        )
         criteria = self._list_criteria(
             query,
             as_of=resolved_as_of,
             policy=resolved_policy,
+            content_activity_freshness_policy=resolved_content_activity_freshness_policy,
         )
         total_value = await self.session.scalar(select(func.count(Influencer.id)).where(*criteria))
         total = int(total_value or 0)
@@ -684,6 +775,17 @@ class InfluencerRepository:
             )
         )
         account_ids = [account.id for account in accounts]
+        content_activity_projections = (
+            list(
+                await self.session.scalars(
+                    select(ContentActivityProjection)
+                    .where(ContentActivityProjection.platform_account_id.in_(account_ids))
+                    .order_by(ContentActivityProjection.platform_account_id)
+                )
+            )
+            if account_ids
+            else []
+        )
         metrics = (
             list(
                 await self.session.scalars(
@@ -727,6 +829,10 @@ class InfluencerRepository:
         freshness_by_influencer: defaultdict[UUID, list[AccountSourceFreshnessRecord]] = (
             defaultdict(list)
         )
+        account_influencer_ids = {account.id: account.influencer_id for account in accounts}
+        activity_by_influencer: defaultdict[UUID, list[ContentActivityProjection]] = defaultdict(
+            list
+        )
         for account in accounts:
             accounts_by_influencer[account.influencer_id].append(account)
         for metric in metrics:
@@ -735,6 +841,10 @@ class InfluencerRepository:
             contacts_by_influencer[contact.influencer_id].append(contact)
         for influencer_id, freshness in freshness_records:
             freshness_by_influencer[influencer_id].append(freshness)
+        for projection in content_activity_projections:
+            projection_influencer_id = account_influencer_ids.get(projection.platform_account_id)
+            if projection_influencer_id is not None:
+                activity_by_influencer[projection_influencer_id].append(projection)
 
         return [
             InfluencerListRecord(
@@ -744,6 +854,7 @@ class InfluencerRepository:
                 current_metrics=tuple(metrics_by_influencer[influencer.id]),
                 current_contacts=tuple(contacts_by_influencer[influencer.id]),
                 huitun_freshness=tuple(freshness_by_influencer[influencer.id]),
+                content_activity_projections=tuple(activity_by_influencer[influencer.id]),
             )
             for influencer, owner in page_rows
         ], total
@@ -787,6 +898,13 @@ class InfluencerRepository:
             )
         )
         if account_ids:
+            content_activity_projections = tuple(
+                await self.session.scalars(
+                    select(ContentActivityProjection)
+                    .where(ContentActivityProjection.platform_account_id.in_(account_ids))
+                    .order_by(ContentActivityProjection.platform_account_id)
+                )
+            )
             source_states = tuple(
                 await self.session.scalars(
                     select(InfluencerSourceState)
@@ -827,6 +945,7 @@ class InfluencerRepository:
                 )
             )
         else:
+            content_activity_projections = ()
             source_states = ()
             source_identities = ()
             current_metrics = ()
@@ -841,6 +960,7 @@ class InfluencerRepository:
             source_identities=source_identities,
             current_metrics=current_metrics,
             huitun_freshness=tuple(record for _, record in freshness_records),
+            content_activity_projections=content_activity_projections,
         )
 
     async def _list_huitun_freshness(

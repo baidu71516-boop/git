@@ -13,7 +13,7 @@ from backend_core.db import Database
 from backend_core.growth.enums import CandidatePoolRunStatus
 from backend_core.growth.models import CandidatePoolRun
 from backend_core.growth.service import CandidatePoolService, TargetingError
-from backend_core.influencers.freshness import FreshnessPolicy
+from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessPolicy
 from sqlalchemy import select
 
 from app.celery_app import celery_app
@@ -41,6 +41,14 @@ def _freshness_policy(settings: Settings) -> FreshnessPolicy:
     )
 
 
+def _content_activity_freshness_policy(settings: Settings) -> ContentActivityFreshnessPolicy:
+    """Keep worker materialization aligned with the read-side activity policy."""
+
+    return ContentActivityFreshnessPolicy.from_day_threshold(
+        settings.content_activity_trusted_freshness_days
+    )
+
+
 async def _materialize(run_id: UUID) -> bool:
     """Delegate one ID-only delivery to the durable Candidate Pool service."""
 
@@ -51,6 +59,7 @@ async def _materialize(run_id: UUID) -> bool:
             service = CandidatePoolService(
                 session,
                 freshness_policy=_freshness_policy(settings),
+                content_activity_freshness_policy=_content_activity_freshness_policy(settings),
             )
             try:
                 run = await service.materialize_run(run_id)

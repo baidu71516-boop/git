@@ -1,0 +1,33 @@
+{
+  "code": 200,
+  "data": {
+    "data": {
+      "has_more": false,
+      "notes": [
+        {
+          "note": {
+            "note_id": "synthetic-video-sticky",
+            "type": "video",
+            "create_time": 1719579000,
+            "is_top": true
+          }
+        },
+        {
+          "note": {
+            "note_id": "synthetic-normal-latest",
+            "type": "normal",
+            "create_time": 1719579078
+          }
+        },
+        {
+          "cursor": "synthetic-cursor-not-used-by-v1",
+          "note": {
+            "note_id": "synthetic-video-tied",
+            "type": "video",
+            "create_time": 1719579078
+          }
+        }
+      ]
+    }
+  }
+}

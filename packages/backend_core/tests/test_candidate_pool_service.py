@@ -15,6 +15,23 @@ from backend_core.audit.models import AuditLog
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.service import AuthContext
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityProvider,
+    ContentActivityPublicationType,
+    ContentActivityResult,
+    ContentActivityScanTerminalReason,
+    ContentActivitySemantics,
+    ProviderAccountIdentityNamespace,
+    ProviderAccountIdentityVerificationOutcome,
+    ProviderAccountIdentityVerificationState,
+)
+from backend_core.content_activity.models import (
+    ContentActivityObservation,
+    ProviderAccountIdentity,
+    ProviderAccountIdentityVerification,
+)
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.growth.enums import (
@@ -154,6 +171,87 @@ async def _account(
     return account
 
 
+async def _content_activity_observation(
+    session: AsyncSession,
+    account: InfluencerPlatformAccount,
+    *,
+    last_publication_at: datetime,
+) -> ContentActivityObservation:
+    """Insert the minimum immutable trusted lineage for as-of hydration tests."""
+
+    observed_at = NOW - timedelta(days=1)
+    identity = ProviderAccountIdentity(
+        platform_account_id=account.id,
+        platform=account.platform,
+        namespace=ProviderAccountIdentityNamespace.XIAOHONGSHU_USERID,
+        opaque_external_identity=f"candidate-identity-{uuid4().hex}",
+        identity_source="TIKHUB_XHS_APP_V2",
+        resolver_contract_version="TIKHUB_XHS_APP_V2_GET_USER_INFO_RESPONSE_SCHEMA_V1",
+        verification_state=ProviderAccountIdentityVerificationState.VERIFIED_CURRENT,
+        resolved_at=observed_at,
+        verified_at=observed_at,
+        provenance_ref="candidate-fixture-identity",
+        lock_version=1,
+        superseded_at=None,
+        revoked_at=None,
+    )
+    session.add(identity)
+    await session.flush()
+    verification = ProviderAccountIdentityVerification(
+        provider_account_identity_id=identity.id,
+        identity_source="TIKHUB_XHS_APP_V2",
+        resolver_contract_version="TIKHUB_XHS_APP_V2_GET_USER_INFO_RESPONSE_SCHEMA_V1",
+        verification_outcome=ProviderAccountIdentityVerificationOutcome.POLICY_VERIFIED,
+        verified_at=observed_at,
+        provenance_ref="candidate-fixture-verification",
+        idempotency_key=f"candidate-fixture-{uuid4().hex}",
+    )
+    session.add(verification)
+    await session.flush()
+    observation = ContentActivityObservation(
+        platform_account_id=account.id,
+        platform=account.platform,
+        schema_version=1,
+        activity_semantics=ContentActivitySemantics.CURRENT_PUBLIC_VISIBLE,
+        provider_account_identity_id=identity.id,
+        provider_account_identity_verification_id=verification.id,
+        activity_source_provider=ContentActivityProvider.TIKHUB,
+        provider_product="XIAOHONGSHU_APP_V2",
+        endpoint="/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+        endpoint_version="APP_V2",
+        adapter_version="TIKHUB_XHS_CONTENT_ACTIVITY_ADAPTER_V1",
+        capability_policy_version="TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+        response_schema_version="TIKHUB_XHS_APP_V2_GET_USER_POSTED_NOTES_RESPONSE_SCHEMA_V1",
+        visibility_policy_version="TIKHUB_XHS_APP_V2_CURRENT_PUBLIC_VISIBILITY_POLICY_V1",
+        attempt_started_at=observed_at - timedelta(seconds=1),
+        observed_at=observed_at,
+        observation_status=ContentActivityObservationStatus.COMPLETE,
+        coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+        activity_result=ContentActivityResult.PUBLICATION_FOUND,
+        last_publication_at=last_publication_at,
+        latest_publication_id_namespace="xiaohongshu.noteid",
+        latest_publication_id="candidate-fixture-note",
+        latest_publication_type=ContentActivityPublicationType.VIDEO,
+        co_latest_publication_count=1,
+        coverage_start_at=None,
+        coverage_end_at=None,
+        timestamp_encoding="UNIX_SECONDS",
+        source_timezone=None,
+        timezone_basis="UNIX_SECONDS",
+        normalized_timezone="UTC",
+        request_ref="candidate-fixture-request",
+        provenance_ref="candidate-fixture-observation",
+        scan_terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
+        scanned_page_count=1,
+        scanned_item_count=1,
+        provider_error_class=None,
+        provider_error_code=None,
+    )
+    session.add(observation)
+    await session.flush()
+    return observation
+
+
 def _service(session: AsyncSession) -> CandidatePoolService:
     return CandidatePoolService(session, freshness_policy=FreshnessPolicy())
 
@@ -291,6 +389,75 @@ async def _create_schema(connection: AsyncConnection) -> None:
         await connection.run_sync(Base.metadata.create_all)
     finally:
         metric_table.indexes.update(metric_indexes)
+
+
+def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_history_queries() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        statements: list[str] = []
+
+        def track_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", track_statement)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                first = await _account(session, owner=context.operator)
+                second = await _account(session, owner=context.operator)
+                await _content_activity_observation(
+                    session,
+                    first,
+                    last_publication_at=NOW - timedelta(days=90),
+                )
+                await _content_activity_observation(
+                    session,
+                    second,
+                    last_publication_at=NOW - timedelta(days=10),
+                )
+                await session.commit()
+                statements.clear()
+
+                facts = await CandidatePoolRepository(session)._hydrate_fact_batch(
+                    accounts=(first, second),
+                    collection_context=None,
+                    source_collection_job_id=None,
+                    buyer=False,
+                    as_of=NOW,
+                    freshness_policy=FreshnessPolicy(),
+                    include_content_activity=True,
+                )
+
+                assert [fact.content_activity is not None for fact in facts] == [True, True]
+                assert facts[0].content_activity is not None
+                assert facts[0].content_activity.last_publication_at == NOW - timedelta(days=90)
+                assert facts[1].content_activity is not None
+                assert facts[1].content_activity.last_publication_at == NOW - timedelta(days=10)
+                activity_history_reads = [
+                    statement
+                    for statement in statements
+                    if "content_activity_observations" in statement.lower()
+                    and statement.lstrip().upper().startswith("SELECT")
+                ]
+                # One latest-attempt and one trusted-current window query for
+                # the whole account batch; never a per-candidate history read.
+                assert len(activity_history_reads) == 2
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", track_statement)
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_pool_create_uses_shared_idempotency_record_and_single_audits() -> None:

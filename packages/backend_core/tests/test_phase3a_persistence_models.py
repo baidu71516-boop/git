@@ -86,9 +86,11 @@ def test_phase3a_enums_are_closed_to_the_frozen_contract() -> None:
         "CAMPAIGN_MEMBER_BULK_ADD",
         "OUTREACH_TARGET_CREATE",
     ]
-    assert [item.value for item in AuditAction][-len(PHASE3A_AUDIT_ACTIONS) :] == (
-        PHASE3A_AUDIT_ACTIONS
-    )
+    # D1A appends independent audit actions after the frozen Phase 3A sequence;
+    # it must not reorder, remove, or reinterpret any Phase 3A action.
+    assert [
+        item.value for item in AuditAction if item.value in PHASE3A_AUDIT_ACTIONS
+    ] == PHASE3A_AUDIT_ACTIONS
 
 
 def test_campaign_member_and_target_ownership_constraints_are_present() -> None:

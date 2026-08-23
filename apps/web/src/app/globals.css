@@ -2761,6 +2761,34 @@ body {
   color: var(--app-text-secondary);
 }
 
+.content-activity-status-stack {
+  display: inline-grid;
+  gap: 3px;
+  width: fit-content;
+}
+
+.content-activity-status {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.content-activity-status-success {
+  color: #31715d;
+}
+
+.content-activity-status-warning {
+  color: #9a6035;
+}
+
+.content-activity-status-default {
+  color: var(--app-text-secondary);
+}
+
+.content-activity-status-stack .ant-typography-secondary {
+  color: var(--app-text-secondary);
+  font-size: 11px;
+}
+
 .influencer-view-link {
   color: var(--app-primary);
 }

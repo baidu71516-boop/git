@@ -7,8 +7,18 @@ from uuid import UUID
 
 from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
-from backend_core.influencers.enums import ContactFilter, CRMStage, Notes7dFilter, Notes60dFilter
-from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
+from backend_core.influencers.enums import (
+    ContactFilter,
+    ContentActivityFilter,
+    CRMStage,
+    Notes7dFilter,
+    Notes60dFilter,
+)
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    FreshnessStatus,
+)
 from backend_core.influencers.repository import InfluencerRepository
 from backend_core.influencers.schemas import (
     InfluencerDetail,
@@ -45,6 +55,7 @@ LIST_QUERY_PARAMETERS = frozenset(
         "contact_filter",
         "notes_7d_filter",
         "notes_60d_filter",
+        "content_activity_filter",
         "freshness_status",
         "requires_refresh",
         "last_huitun_observed_before",
@@ -65,6 +76,9 @@ def get_influencer_service(
             settings.freshness_fresh_days,
             settings.freshness_aging_days,
             settings.freshness_stale_days,
+        ),
+        content_activity_freshness_policy=ContentActivityFreshnessPolicy.from_day_threshold(
+            settings.content_activity_trusted_freshness_days,
         ),
     )
 
@@ -117,6 +131,7 @@ def parse_influencer_list_query(
     contact_filter: Annotated[ContactFilter | None, Query()] = None,
     notes_7d_filter: Annotated[Notes7dFilter | None, Query()] = None,
     notes_60d_filter: Annotated[Notes60dFilter | None, Query()] = None,
+    content_activity_filter: Annotated[ContentActivityFilter | None, Query()] = None,
     freshness_status: Annotated[FreshnessStatus | None, Query()] = None,
     requires_refresh: Annotated[bool | None, Query()] = None,
     last_huitun_observed_before: Annotated[datetime | None, Query()] = None,
@@ -139,6 +154,7 @@ def parse_influencer_list_query(
         contact_filter,
         notes_7d_filter,
         notes_60d_filter,
+        content_activity_filter,
         freshness_status,
         requires_refresh,
         last_huitun_observed_before,

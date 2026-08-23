@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   contactTypeLabel,
+  contentActivityDisplay,
+  contentActivityCoverageLabel,
+  contentActivityLatestAttemptLabel,
+  contentActivityTrustedResultLabel,
   crmStageDisplay,
   formatExactFollowers,
   formatFollowers,
@@ -60,6 +64,42 @@ describe("influencer list formatters", () => {
       "暂无可参与当前灰豚更新流程的数据。",
     );
     expect(freshnessExplanation("stale", true)).toBeNull();
+  });
+
+  it("keeps trusted, no-public, and uncertain Content Activity states distinct", () => {
+    expect(contentActivityDisplay("current", "PUBLICATION_FOUND")).toEqual({
+      label: "可信",
+      tone: "success",
+    });
+    expect(contentActivityDisplay("current", "NO_PUBLIC_CONTENT")).toEqual({
+      label: "当前无公开作品",
+      tone: "success",
+    });
+    expect(contentActivityDisplay("unknown", null)).toEqual({
+      label: "当前未知",
+      tone: "warning",
+    });
+    expect(contentActivityDisplay("last_known", "PUBLICATION_FOUND")).toEqual({
+      label: "最后可信结果",
+      tone: "warning",
+    });
+    expect(
+      contentActivityLatestAttemptLabel("RESULT_INCOMPLETE", "UNDETERMINED"),
+    ).toBe("结果不完整");
+    expect(
+      contentActivityLatestAttemptLabel("COMPLETE", "NO_PUBLIC_CONTENT"),
+    ).toBe("已完成：无公开作品");
+    expect(contentActivityTrustedResultLabel("PUBLICATION_FOUND")).toBe(
+      "发现公开作品",
+    );
+    expect(contentActivityTrustedResultLabel("NO_PUBLIC_CONTENT")).toBe(
+      "无公开作品",
+    );
+    expect(contentActivityCoverageLabel("FULL_CURRENT_PUBLIC_SET")).toBe(
+      "完整当前公开作品集",
+    );
+    expect(contentActivityCoverageLabel("INCOMPLETE")).toBe("覆盖不完整");
+    expect(contentActivityCoverageLabel("UNKNOWN")).toBe("覆盖范围未知");
   });
 
   it("selects the latest real metrics source timestamp", () => {

@@ -65,3 +65,13 @@ class Notes7dFilter(StrEnum):
     ONE_TO_TWO = "one_to_two"
     THREE_PLUS = "three_plus"
     MISSING = "missing"
+
+
+class ContentActivityFilter(StrEnum):
+    """Closed trusted-current publication cutoffs for the influencer library."""
+
+    ACTIVE_WITHIN_7D = "active_within_7d"
+    INACTIVE_30D = "inactive_30d"
+    INACTIVE_60D = "inactive_60d"
+    INACTIVE_90D = "inactive_90d"
+    INACTIVE_180D = "inactive_180d"

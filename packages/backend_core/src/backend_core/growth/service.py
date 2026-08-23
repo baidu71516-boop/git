@@ -58,7 +58,7 @@ from backend_core.growth.targeting import (
     parse_targeting_policy,
 )
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
-from backend_core.influencers.freshness import FreshnessPolicy
+from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessPolicy
 from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
     PlatformAccountIdentitySummary,
@@ -89,6 +89,7 @@ class CandidatePoolService:
         session: AsyncSession,
         *,
         freshness_policy: FreshnessPolicy,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
     ) -> None:
         self.session = session
         self.repository = CandidatePoolRepository(session)
@@ -96,6 +97,11 @@ class CandidatePoolService:
         self.access = CampaignOutreachAccess(self.auth_repository)
         self.audit = AuditRepository(session)
         self.freshness_policy = freshness_policy
+        # Content Activity freshness is a distinct current-public evidence
+        # policy. It must not inherit Huitun/source freshness thresholds.
+        self.content_activity_freshness_policy = (
+            content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+        )
 
     @staticmethod
     def _department_id(context: AuthContext) -> UUID:
@@ -1097,7 +1103,20 @@ class CandidatePoolService:
             ):
                 increments = self.repository.add_evaluation_batch(
                     run=run,
-                    evaluations=((fact, evaluate_targeting(policy, fact)) for fact in facts),
+                    evaluations=(
+                        (
+                            fact,
+                            evaluate_targeting(
+                                policy,
+                                fact,
+                                as_of=run.as_of,
+                                content_activity_freshness_policy=(
+                                    self.content_activity_freshness_policy
+                                ),
+                            ),
+                        )
+                        for fact in facts
+                    ),
                 )
                 match_count += increments[0]
                 unknown_count += increments[1]

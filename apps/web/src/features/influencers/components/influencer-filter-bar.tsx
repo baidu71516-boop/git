@@ -16,6 +16,7 @@ import {
 import { useState } from "react";
 
 import type {
+  ContentActivityFilter,
   FreshnessStatus,
   InfluencerFilterOptions,
   InfluencerListQueryParams,
@@ -59,6 +60,18 @@ const notes7dFilterOptions = [
   { value: "one_to_two", label: "1-2篇" },
   { value: "three_plus", label: "3篇以上" },
   { value: "missing", label: "无数据" },
+];
+
+const contentActivityFilterOptions: Array<{
+  value: "all" | ContentActivityFilter;
+  label: string;
+}> = [
+  { value: "all", label: "全部" },
+  { value: "active_within_7d", label: "7 天内有更新" },
+  { value: "inactive_30d", label: "断更 ≥ 30 天" },
+  { value: "inactive_60d", label: "断更 ≥ 60 天" },
+  { value: "inactive_90d", label: "断更 ≥ 90 天" },
+  { value: "inactive_180d", label: "断更 ≥ 180 天" },
 ];
 
 type InfluencerFilterBarProps = {
@@ -248,6 +261,30 @@ export function InfluencerFilterBar({
             </div>
           </Col>
           <Col xs={24} sm={12} lg={3}>
+            <div className="influencer-filter-with-label">
+              <span className="influencer-filter-inline-label">内容活跃度</span>
+              <Select
+                aria-label="内容活跃度筛选"
+                className="full-width"
+                placeholder="全部"
+                value={query.content_activity_filter ?? "all"}
+                onChange={(value: "all" | ContentActivityFilter | undefined) =>
+                  onChange({
+                    content_activity_filter:
+                      value === "active_within_7d" ||
+                      value === "inactive_30d" ||
+                      value === "inactive_60d" ||
+                      value === "inactive_90d" ||
+                      value === "inactive_180d"
+                        ? value
+                        : undefined,
+                  })
+                }
+                options={contentActivityFilterOptions}
+              />
+            </div>
+          </Col>
+          <Col xs={24} sm={12} lg={3}>
             <Select
               aria-label="数据时效筛选"
               className="full-width"
@@ -279,7 +316,7 @@ export function InfluencerFilterBar({
               />
             </div>
           </Col>
-          <Col xs={24} sm={12} lg={4}>
+          <Col xs={24} sm={12} lg={3}>
             <div className="influencer-filter-with-label">
               <span className="influencer-filter-inline-label">联系方式</span>
               <Select
@@ -301,7 +338,7 @@ export function InfluencerFilterBar({
               />
             </div>
           </Col>
-          <Col xs={24} sm={12} lg={4}>
+          <Col xs={24} sm={12} lg={3}>
             <div className="influencer-filter-with-label">
               <span className="influencer-filter-inline-label">近60天笔记</span>
               <Select
@@ -325,7 +362,7 @@ export function InfluencerFilterBar({
               />
             </div>
           </Col>
-          <Col xs={24} sm={12} lg={4}>
+          <Col xs={24} sm={12} lg={3}>
             <div className="influencer-filter-with-label">
               <span className="influencer-filter-inline-label">近7天笔记</span>
               <Select

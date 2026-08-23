@@ -1,6 +1,10 @@
 import type { ReactNode } from "react";
 
 import type {
+  ContentActivityCoverageStatus,
+  ContentActivityObservationStatus,
+  ContentActivityReadStatus,
+  ContentActivityResult,
   CurrentMetricsSummary,
   FreshnessStatus,
   JsonValue,
@@ -89,6 +93,17 @@ const freshnessPresentation: Record<
   unknown: { label: "未知", tone: "unknown" },
 };
 
+const contentActivityStatePresentation: Record<
+  ContentActivityReadStatus,
+  { label: string; tone: "default" | "success" | "warning" }
+> = {
+  not_checked: { label: "未检测", tone: "default" },
+  current: { label: "可信", tone: "success" },
+  last_known: { label: "最后可信结果", tone: "warning" },
+  stale: { label: "检测已过期", tone: "warning" },
+  unknown: { label: "当前未知", tone: "warning" },
+};
+
 const shanghaiDateTime = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "Asia/Shanghai",
   year: "numeric",
@@ -165,6 +180,56 @@ export function freshnessSupportText(
 ): string | null {
   if (value !== "unknown") return null;
   return requiresRefresh ? "暂无可靠采集记录" : "暂无可更新数据";
+}
+
+export function contentActivityDisplay(
+  state: ContentActivityReadStatus | undefined,
+  result: ContentActivityResult | null | undefined,
+): { label: string; tone: "default" | "success" | "warning" } {
+  if (state === "current" && result === "NO_PUBLIC_CONTENT") {
+    return { label: "当前无公开作品", tone: "success" };
+  }
+  return contentActivityStatePresentation[state ?? "not_checked"];
+}
+
+export function contentActivityLatestAttemptLabel(
+  status: ContentActivityObservationStatus | null | undefined,
+  result: ContentActivityResult | null | undefined,
+): string {
+  if (!status) return "未检测";
+  if (status === "COMPLETE" && result === "PUBLICATION_FOUND") return "已完成";
+  if (status === "COMPLETE" && result === "NO_PUBLIC_CONTENT")
+    return "已完成：无公开作品";
+  if (status === "RESULT_INCOMPLETE") return "结果不完整";
+  if (status === "RESULT_UNTRUSTED") return "结果未获信任";
+  if (status === "IDENTITY_UNRESOLVED") return "账号身份未确认";
+  if (status === "ACCESS_RESTRICTED") return "当前不可访问";
+  if (status === "PROVIDER_AUTH_ERROR") return "检测服务认证异常";
+  if (status === "PROVIDER_RATE_LIMITED") return "检测服务限流";
+  if (status === "PROVIDER_ERROR") return "检测服务暂不可用";
+  return "检测结果未知";
+}
+
+/** A closed business label; never surface provider vocabulary or raw payloads. */
+export function contentActivityTrustedResultLabel(
+  result: ContentActivityResult | null | undefined,
+): string {
+  if (result === "PUBLICATION_FOUND") return "发现公开作品";
+  if (result === "NO_PUBLIC_CONTENT") return "无公开作品";
+  if (result === "AT_LEAST_LOOKBACK_INACTIVE") return "仅确认回看范围";
+  return "—";
+}
+
+/** Make the evidence coverage explicit without implying a wider provider scope. */
+export function contentActivityCoverageLabel(
+  coverage: ContentActivityCoverageStatus | null | undefined,
+): string {
+  if (coverage === "FULL_CURRENT_PUBLIC_SET") return "完整当前公开作品集";
+  if (coverage === "LATEST_BOUND_PROVEN") return "已证明的最新范围";
+  if (coverage === "LOOKBACK_BOUNDED") return "受限回看范围";
+  if (coverage === "INCOMPLETE") return "覆盖不完整";
+  if (coverage === "UNKNOWN") return "覆盖范围未知";
+  return "—";
 }
 
 export function latestMetricsTimestamp(

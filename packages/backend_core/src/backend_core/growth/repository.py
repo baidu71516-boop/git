@@ -9,11 +9,18 @@ from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
-from sqlalchemy import and_, exists, func, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from backend_core.auth.models import Operator
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+    ProviderAccountIdentityVerificationState,
+)
+from backend_core.content_activity.models import ContentActivityObservation, ProviderAccountIdentity
 from backend_core.growth.enums import CandidatePoolKind, CandidateResult, Phase3AOperationScope
 from backend_core.growth.models import (
     CandidatePool,
@@ -26,6 +33,7 @@ from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
+    ContentActivityFact,
     SellerTargetingPolicy,
     TargetingEvaluation,
 )
@@ -535,6 +543,10 @@ class CandidatePoolRepository:
                 buyer=pool.kind is CandidatePoolKind.POTENTIAL_BUYER,
                 as_of=as_of,
                 freshness_policy=freshness_policy,
+                include_content_activity=(
+                    isinstance(policy, SellerTargetingPolicy)
+                    and policy.content_activity is not None
+                ),
             )
             yield facts
 
@@ -576,6 +588,7 @@ class CandidatePoolRepository:
         buyer: bool,
         as_of: datetime,
         freshness_policy: FreshnessPolicy,
+        include_content_activity: bool = False,
     ) -> tuple[CandidateFactBundle, ...]:
         account_ids = tuple(account.id for account in accounts)
         influencer_ids = tuple({account.influencer_id for account in accounts})
@@ -616,6 +629,11 @@ class CandidatePoolRepository:
             .all()
         )
         freshness = await self._freshness_by_account(account_ids)
+        content_activity_by_account = (
+            await self._content_activity_facts_as_of(account_ids=account_ids, as_of=as_of)
+            if include_content_activity
+            else {}
+        )
         provenance = (
             await self._buyer_provenance(account_ids, source_collection_job_id) if buyer else {}
         )
@@ -665,6 +683,7 @@ class CandidatePoolRepository:
                     freshness_status=freshness_status,
                     freshness_observed_at=last_observed,
                     source_updated_at=_utc(state.source_updated_at) if state is not None else None,
+                    content_activity=content_activity_by_account.get(account.id),
                     source_collection_job_id=source_collection_job_id,
                     collection_industry=(
                         collection_context.industry if collection_context else None
@@ -678,6 +697,191 @@ class CandidatePoolRepository:
                 )
             )
         return tuple(result)
+
+    async def _content_activity_facts_as_of(
+        self,
+        *,
+        account_ids: tuple[UUID, ...],
+        as_of: datetime,
+    ) -> dict[UUID, ContentActivityFact]:
+        """Hydrate immutable activity evidence as it stood at one Candidate Run instant.
+
+        The mutable projection is optimized for present-tense library reads, but
+        a deferred Candidate Run must not change merely because a provider check
+        completes after its already-persisted ``as_of``.  Two fixed, set-based
+        window queries reconstruct the latest attempt and latest usable trusted
+        current-public observation per account at that instant.  A same-instant
+        tie is deliberately recorded as ambiguous rather than arbitrarily
+        ordered.  Candidate evaluation then fails closed even when one member
+        of the tie happens to have a UUID that sorts first.
+        """
+
+        if not account_ids:
+            return {}
+        as_of_utc = _utc(as_of)
+        if as_of_utc is None:  # pragma: no cover - typed non-null guard
+            raise ValueError("content activity as_of is required")
+
+        latest_ranked = (
+            select(
+                ContentActivityObservation.id.label("observation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ContentActivityObservation.platform_account_id,
+                    order_by=(
+                        ContentActivityObservation.observed_at.desc(),
+                        ContentActivityObservation.id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+                func.count()
+                .over(
+                    partition_by=(
+                        ContentActivityObservation.platform_account_id,
+                        ContentActivityObservation.observed_at,
+                    )
+                )
+                .label("same_instant_attempt_count"),
+            )
+            .where(
+                ContentActivityObservation.platform_account_id.in_(account_ids),
+                ContentActivityObservation.observed_at <= as_of_utc,
+            )
+            .subquery()
+        )
+        latest_attempt_rows = (
+            await self.session.execute(
+                select(
+                    ContentActivityObservation,
+                    latest_ranked.c.same_instant_attempt_count,
+                )
+                .join(
+                    latest_ranked,
+                    ContentActivityObservation.id == latest_ranked.c.observation_id,
+                )
+                .where(latest_ranked.c.row_rank == 1)
+            )
+        ).all()
+
+        identity_valid_at_as_of = and_(
+            ProviderAccountIdentity.verified_at <= as_of_utc,
+            or_(
+                ProviderAccountIdentity.verification_state
+                == ProviderAccountIdentityVerificationState.VERIFIED_CURRENT,
+                and_(
+                    ProviderAccountIdentity.verification_state
+                    == ProviderAccountIdentityVerificationState.SUPERSEDED,
+                    ProviderAccountIdentity.superseded_at > as_of_utc,
+                ),
+                and_(
+                    ProviderAccountIdentity.verification_state
+                    == ProviderAccountIdentityVerificationState.REVOKED,
+                    ProviderAccountIdentity.revoked_at > as_of_utc,
+                ),
+            ),
+        )
+        trusted_ranked = (
+            select(
+                ContentActivityObservation.id.label("observation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ContentActivityObservation.platform_account_id,
+                    order_by=(
+                        ContentActivityObservation.observed_at.desc(),
+                        ContentActivityObservation.id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+                func.count()
+                .over(
+                    partition_by=(
+                        ContentActivityObservation.platform_account_id,
+                        ContentActivityObservation.observed_at,
+                    )
+                )
+                .label("same_instant_count"),
+            )
+            .join(
+                ProviderAccountIdentity,
+                and_(
+                    ProviderAccountIdentity.id
+                    == ContentActivityObservation.provider_account_identity_id,
+                    ProviderAccountIdentity.platform_account_id
+                    == ContentActivityObservation.platform_account_id,
+                    ProviderAccountIdentity.platform == ContentActivityObservation.platform,
+                ),
+            )
+            .where(
+                ContentActivityObservation.platform_account_id.in_(account_ids),
+                ContentActivityObservation.observed_at <= as_of_utc,
+                ContentActivityObservation.observation_status
+                == ContentActivityObservationStatus.COMPLETE,
+                ContentActivityObservation.coverage_status
+                == ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                ContentActivityObservation.activity_result.in_(
+                    (
+                        ContentActivityResult.PUBLICATION_FOUND,
+                        ContentActivityResult.NO_PUBLIC_CONTENT,
+                    )
+                ),
+                identity_valid_at_as_of,
+            )
+            .subquery()
+        )
+        trusted_observations = tuple(
+            await self.session.scalars(
+                select(ContentActivityObservation)
+                .join(
+                    trusted_ranked,
+                    ContentActivityObservation.id == trusted_ranked.c.observation_id,
+                )
+                .where(
+                    trusted_ranked.c.row_rank == 1,
+                    trusted_ranked.c.same_instant_count == 1,
+                )
+            )
+        )
+
+        latest_by_account = {
+            observation.platform_account_id: observation
+            for observation, _same_instant_attempt_count in latest_attempt_rows
+        }
+        latest_same_instant_attempt_count_by_account = {
+            observation.platform_account_id: int(same_instant_attempt_count)
+            for observation, same_instant_attempt_count in latest_attempt_rows
+        }
+        trusted_by_account = {
+            observation.platform_account_id: observation for observation in trusted_observations
+        }
+        facts: dict[UUID, ContentActivityFact] = {}
+        for account_id in set(latest_by_account) | set(trusted_by_account):
+            latest = latest_by_account.get(account_id)
+            trusted = trusted_by_account.get(account_id)
+            facts[account_id] = ContentActivityFact(
+                trusted_observed_at=_utc(trusted.observed_at) if trusted is not None else None,
+                trusted_observation_status=(
+                    trusted.observation_status if trusted is not None else None
+                ),
+                trusted_coverage_status=(trusted.coverage_status if trusted is not None else None),
+                trusted_activity_result=(trusted.activity_result if trusted is not None else None),
+                last_publication_at=(
+                    _utc(trusted.last_publication_at) if trusted is not None else None
+                ),
+                latest_attempt_observed_at=_utc(latest.observed_at) if latest is not None else None,
+                latest_attempt_observation_status=(
+                    latest.observation_status if latest is not None else None
+                ),
+                latest_attempt_coverage_status=(
+                    latest.coverage_status if latest is not None else None
+                ),
+                latest_attempt_activity_result=(
+                    latest.activity_result if latest is not None else None
+                ),
+                latest_attempt_same_instant_count=(
+                    latest_same_instant_attempt_count_by_account.get(account_id)
+                ),
+            )
+        return facts
 
     @staticmethod
     def _strict_metric(value: object) -> int | None:

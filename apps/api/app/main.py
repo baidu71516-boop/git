@@ -18,6 +18,8 @@ from app.http.auth import router as auth_router
 from app.http.campaigns import router as campaigns_router
 from app.http.candidate_pools import router as candidate_pools_router
 from app.http.collection_jobs import router as collection_jobs_router
+from app.http.content_activity import router as content_activity_router
+from app.http.content_activity_tasks import ContentActivityTaskDispatcher
 from app.http.departments import router as departments_router
 from app.http.errors import register_exception_handlers
 from app.http.health import router as health_router
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.import_storage = LocalStorageAdapter(settings.import_data_dir, initialize_root=False)
     app.state.import_task_dispatcher = ImportTaskDispatcher(celery_client)
     app.state.targeting_task_dispatcher = TargetingTaskDispatcher(celery_client)
+    app.state.content_activity_task_dispatcher = ContentActivityTaskDispatcher(celery_client)
     try:
         yield
     finally:
@@ -74,6 +77,7 @@ app.include_router(departments_router)
 app.include_router(auth_router)
 app.include_router(operators_router)
 app.include_router(admin_router)
+app.include_router(content_activity_router)
 app.include_router(collection_jobs_router)
 app.include_router(candidate_pools_router)
 app.include_router(campaigns_router)

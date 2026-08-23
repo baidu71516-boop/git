@@ -2,6 +2,13 @@
 
 from backend_core.audit.models import AuditLog
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.content_activity.models import (
+    ContentActivityObservation,
+    ContentActivityProjection,
+    ContentActivityRefreshRequest,
+    ProviderAccountIdentity,
+    ProviderAccountIdentityVerification,
+)
 from backend_core.growth.models import (
     Campaign,
     CampaignMember,
@@ -47,6 +54,9 @@ __all__ = [
     "Campaign",
     "CampaignMember",
     "CollectionJob",
+    "ContentActivityObservation",
+    "ContentActivityProjection",
+    "ContentActivityRefreshRequest",
     "Department",
     "DepartmentPermission",
     "ImportJob",
@@ -65,6 +75,8 @@ __all__ = [
     "RefreshQueueItem",
     "Operator",
     "Phase3AIdempotencyRecord",
+    "ProviderAccountIdentity",
+    "ProviderAccountIdentityVerification",
     "MessageTemplate",
     "MessageTemplateVersion",
     "OutreachEvent",

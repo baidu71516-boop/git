@@ -1,0 +1,70 @@
+{
+  "contract_id": "TIKHUB_XHS_APP_V2_GET_USER_POSTED_NOTES_RESPONSE_SCHEMA_V1",
+  "capability_policy_version": "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+  "provider": "TIKHUB",
+  "provider_product": "XIAOHONGSHU_APP_V2",
+  "endpoint": "/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+  "request_contract": {
+    "method": "GET",
+    "query": {
+      "user_id": "verified_current_xiaohongshu_userid",
+      "cursor": ""
+    },
+    "page_budget": 1,
+    "next_page_behavior": "forbidden"
+  },
+  "semantic_success": {
+    "field_path": "$.code",
+    "accepted_type": "integer",
+    "accepted_value": 200
+  },
+  "response_schema": {
+    "top_level_required_keys": ["code", "data"],
+    "top_level_allowed_keys": ["code", "data"],
+    "payload_path": "$.data.data",
+    "payload_required_keys": ["has_more", "notes"],
+    "payload_allowed_keys": ["has_more", "notes"],
+    "has_more_path": "$.data.data.has_more",
+    "has_more_type": "boolean",
+    "notes_path": "$.data.data.notes",
+    "notes_type": "array",
+    "note_entry_required_keys": ["note"],
+    "note_entry_allowed_keys": ["note", "cursor"],
+    "cursor_type_when_present": "non_blank_opaque_string",
+    "note_required_keys": ["note_id", "type", "create_time"],
+    "note_allowed_keys": ["note_id", "type", "create_time", "is_top"],
+    "note_id_path": "$.data.data.notes[*].note.note_id",
+    "type_path": "$.data.data.notes[*].note.type",
+    "create_time_path": "$.data.data.notes[*].note.create_time",
+    "is_top_path": "$.data.data.notes[*].note.is_top",
+    "allowed_types": {
+      "normal": "IMAGE_TEXT",
+      "video": "VIDEO"
+    },
+    "create_time_type": "positive_unix_seconds_integer",
+    "is_top_type_when_present": "boolean"
+  },
+  "static_source_reference": {
+    "source": "TikHub official Xiaohongshu App V2 guide",
+    "reference_id": "XIAOHONGSHU_APP_V2_GET_USER_POSTED_NOTES",
+    "assertion": "The first request uses user_id with an empty cursor; notes are at data.data.notes, continuation evidence is notes[-1].cursor, and publication fields are note_id, type, and create_time."
+  },
+  "sanitized_fixture_digests": {
+    "positive": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_success_v1.json",
+      "sha256": "d6fb4eebb79fd3654d231513cde8031f880fdc607d7e6dcf8703c81a6ebeb122"
+    },
+    "negative_semantic_failure": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_semantic_failure_v1.json",
+      "sha256": "775bbce4bbe92442323e8818a151700caaf6126bb58fe58de978f8e6b6194aac"
+    },
+    "negative_unknown_type": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_unknown_type_v1.json",
+      "sha256": "dd7028a6d20ff6a3c8381146949a0b16b573776ae699b094af004ed6239d4f83"
+    },
+    "negative_has_more": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_has_more_v1.json",
+      "sha256": "04cc72160dfd62807807f59747dac15c695a741d2417a082b503abcdcedcac78"
+    }
+  }
+}

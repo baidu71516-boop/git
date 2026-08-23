@@ -1,0 +1,42 @@
+{
+  "contract_id": "TIKHUB_XHS_APP_V2_GET_USER_INFO_RESPONSE_SCHEMA_V1",
+  "capability_policy_version": "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+  "provider": "TIKHUB",
+  "provider_product": "XIAOHONGSHU_APP_V2",
+  "endpoint": "/api/v1/xiaohongshu/app_v2/get_user_info",
+  "request_contract": {
+    "method": "GET",
+    "query": {
+      "share_text": "bounded_ephemeral_bootstrap_input"
+    }
+  },
+  "semantic_success": {
+    "field_path": "$.code",
+    "accepted_type": "integer",
+    "accepted_value": 200
+  },
+  "response_schema": {
+    "top_level_required_keys": ["code", "data"],
+    "top_level_allowed_keys": ["code", "data"],
+    "payload_path": "$.data.data",
+    "payload_required_keys": ["userid"],
+    "payload_allowed_keys": ["userid"],
+    "userid_path": "$.data.data.userid",
+    "userid_type": "non_blank_opaque_string"
+  },
+  "static_source_reference": {
+    "source": "TikHub official public API documentation",
+    "reference_id": "420136396e0",
+    "assertion": "The resolver response uses top-level code=200 for semantic success and data.data.userid for the returned canonical identity."
+  },
+  "sanitized_fixture_digests": {
+    "positive": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_info_success_v1.json",
+      "sha256": "86c9240edcb3c0858cc7c56eeeba6fd4b0826424a1b931954b6a4fbe37eba805"
+    },
+    "negative": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_info_semantic_failure_v1.json",
+      "sha256": "234055e40a4ffb2d81a61e4f6d559992dc8b620effa70f47c2ef322cb64de4a4"
+    }
+  }
+}

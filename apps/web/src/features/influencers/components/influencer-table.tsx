@@ -18,6 +18,7 @@ import {
   platformLabel,
 } from "../formatters";
 import type { InfluencerListItem, PlatformAccountSummary } from "../types";
+import { ContentActivityStatusText } from "./content-activity-status-text";
 import { FreshnessStatusText } from "./freshness-status-text";
 
 const { Text } = Typography;
@@ -71,7 +72,9 @@ function buildColumns(
       key: "influencer",
       width: 210,
       render: (_, item) => {
-        const account = item.platform_accounts[0];
+        const account = item.platform_accounts.find(
+          (candidate) => candidate.is_active,
+        );
         return (
           <div className="influencer-primary-cell">
             {renderLinkOrButton({
@@ -174,16 +177,18 @@ function buildColumns(
       title: "数据时效",
       key: "freshness",
       width: 136,
-      render: (_, item) => {
-        const account = item.platform_accounts[0];
-        return (
-          <FreshnessStatusText
-            status={account?.freshness_status ?? item.freshness_status}
-            requiresRefresh={account?.requires_refresh ?? item.requires_refresh}
-            freshnessAgeDays={account?.freshness_age_days ?? null}
-          />
-        );
-      },
+      render: (_, item) => (
+        <FreshnessStatusText
+          status={item.freshness_status}
+          requiresRefresh={item.requires_refresh}
+        />
+      ),
+    },
+    {
+      title: "内容活跃度",
+      key: "content_activity",
+      width: 170,
+      render: (_, item) => <ContentActivityCell item={item} />,
     },
     {
       title: "联系方式",
@@ -262,6 +267,23 @@ function buildColumns(
   ];
 }
 
+function ContentActivityCell({ item }: { item: InfluencerListItem }) {
+  const xhsAccounts = item.platform_accounts.filter(
+    (account) => account.is_active && account.platform === "xiaohongshu",
+  );
+  if (xhsAccounts.length > 1) {
+    return (
+      <Text type="secondary">
+        多个小红书账号
+        <br />
+        请查看详情
+      </Text>
+    );
+  }
+  const [account] = xhsAccounts;
+  return account ? <ContentActivityStatusText account={account} /> : "—";
+}
+
 function accountSummary(
   item: InfluencerListItem,
   account: PlatformAccountSummary,
@@ -320,7 +342,7 @@ export function InfluencerTable({
       columns={columns}
       dataSource={items}
       pagination={false}
-      scroll={{ x: 1272 }}
+      scroll={{ x: 1442 }}
       onRow={() => ({ className: "influencer-row" })}
     />
   );

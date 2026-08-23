@@ -2,7 +2,8 @@
 
 import asyncio
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -11,6 +12,13 @@ from backend_core.audit.repository import AuditRepository
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.auth.service import AuthContext
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityPublicationType,
+    ContentActivityResult,
+)
+from backend_core.content_activity.models import ContentActivityProjection
 from backend_core.influencers.enums import (
     ContactType,
     ContactValidationStatus,
@@ -19,7 +27,11 @@ from backend_core.influencers.enums import (
     InfluencerStatus,
     Platform,
 )
-from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    FreshnessStatus,
+)
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -58,8 +70,9 @@ class FakeInfluencerRepository:
         *,
         as_of: datetime | None = None,
         policy: FreshnessPolicy | None = None,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]:
-        self.calls.append(("list", (query, as_of, policy)))
+        self.calls.append(("list", (query, as_of, policy, content_activity_freshness_policy)))
         return self.list_result
 
     async def get_influencer_detail(self, influencer_id: UUID) -> InfluencerDetailRecord | None:
@@ -233,6 +246,61 @@ def make_metrics(value: object) -> InfluencerCurrentMetrics:
         last_import_row_id=uuid4(),
         created_at=NOW,
         updated_at=NOW,
+    )
+
+
+def make_content_activity_projection(
+    *,
+    account_id: UUID = ACCOUNT_ID,
+    trusted_observed_at: datetime = NOW - timedelta(days=1),
+    trusted_result: ContentActivityResult = ContentActivityResult.PUBLICATION_FOUND,
+    last_publication_at: datetime | None = NOW - timedelta(days=60),
+    latest_observed_at: datetime | None = None,
+    latest_status: ContentActivityObservationStatus | None = None,
+    latest_coverage: ContentActivityCoverageStatus | None = None,
+    latest_result: ContentActivityResult | None = None,
+) -> ContentActivityProjection:
+    has_publication = trusted_result is ContentActivityResult.PUBLICATION_FOUND
+    resolved_latest_observed_at = latest_observed_at or trusted_observed_at
+    resolved_latest_status = latest_status or ContentActivityObservationStatus.COMPLETE
+    resolved_latest_coverage = (
+        latest_coverage or ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+    )
+    resolved_latest_result = latest_result or trusted_result
+    trusted_observation_id = uuid4()
+    latest_attempt_observation_id = (
+        trusted_observation_id
+        if (
+            resolved_latest_observed_at == trusted_observed_at
+            and resolved_latest_status is ContentActivityObservationStatus.COMPLETE
+            and resolved_latest_coverage is ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+            and resolved_latest_result is trusted_result
+        )
+        else uuid4()
+    )
+    return ContentActivityProjection(
+        id=uuid4(),
+        platform_account_id=account_id,
+        platform=Platform.XIAOHONGSHU,
+        latest_attempt_observation_id=latest_attempt_observation_id,
+        latest_attempt_observed_at=resolved_latest_observed_at,
+        latest_attempt_observation_status=resolved_latest_status,
+        latest_attempt_coverage_status=resolved_latest_coverage,
+        latest_attempt_activity_result=resolved_latest_result,
+        latest_attempt_provider_error_class=None,
+        latest_attempt_provider_error_code=None,
+        trusted_observation_id=trusted_observation_id,
+        trusted_observed_at=trusted_observed_at,
+        trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+        trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+        trusted_activity_result=trusted_result,
+        trusted_capability_policy_version="TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+        last_publication_at=last_publication_at if has_publication else None,
+        latest_publication_id_namespace="xiaohongshu.noteid" if has_publication else None,
+        latest_publication_id="fixture-note" if has_publication else None,
+        latest_publication_type=(ContentActivityPublicationType.VIDEO if has_publication else None),
+        co_latest_publication_count=1 if has_publication else None,
+        version=1,
     )
 
 
@@ -414,6 +482,135 @@ def test_list_and_detail_map_legacy_unknown_without_faking_observed_time() -> No
             assert account.freshness_status is FreshnessStatus.UNKNOWN
             assert account.freshness_age_days is None
             assert account.requires_refresh is True
+
+    asyncio.run(scenario())
+
+
+def test_content_activity_is_account_scoped_and_computes_transient_inactivity() -> None:
+    async def scenario() -> None:
+        second_account_id = UUID(int=ACCOUNT_ID.int + 10)
+        record = make_detail_record()
+        second_account = make_account(account_id=second_account_id, source=DataSource.GENERIC)
+        record = replace(
+            record,
+            platform_accounts=(record.platform_accounts[0], second_account),
+            content_activity_projections=(
+                make_content_activity_projection(account_id=second_account_id),
+            ),
+        )
+        repository = FakeInfluencerRepository()
+        repository.detail_result = record
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        detail = await service.get_influencer_detail(
+            make_context(Role.VIEWER),
+            INFLUENCER_ID,
+        )
+
+        first, second = detail.platform_accounts
+        assert first.content_activity_state.value == "not_checked"
+        assert second.content_activity_state.value == "current"
+        assert second.content_activity_last_publication_at == NOW - timedelta(days=60)
+        assert second.content_activity_inactive_days == 60
+        assert second.content_activity_trusted_observed_at == NOW - timedelta(days=1)
+        assert second.content_activity_latest_attempt_observation_status is (
+            ContentActivityObservationStatus.COMPLETE
+        )
+
+    asyncio.run(scenario())
+
+
+def test_content_activity_inactive_days_uses_utc_floor_with_offset_timestamp() -> None:
+    async def scenario() -> None:
+        publication_at = (NOW - timedelta(days=60) + timedelta(seconds=1)).astimezone(
+            timezone(timedelta(hours=8))
+        )
+        repository = FakeInfluencerRepository()
+        repository.detail_result = replace(
+            make_detail_record(),
+            content_activity_projections=(
+                make_content_activity_projection(last_publication_at=publication_at),
+            ),
+        )
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        detail = await service.get_influencer_detail(make_context(Role.VIEWER), INFLUENCER_ID)
+        account = detail.platform_accounts[0]
+
+        assert account.content_activity_state.value == "current"
+        assert account.content_activity_last_publication_at == publication_at.astimezone(UTC)
+        assert account.content_activity_inactive_days == 59
+
+    asyncio.run(scenario())
+
+
+def test_content_activity_no_public_or_stale_never_emits_inactivity_days() -> None:
+    async def scenario() -> None:
+        repository = FakeInfluencerRepository()
+        record = make_detail_record()
+        repository.detail_result = replace(
+            record,
+            content_activity_projections=(
+                make_content_activity_projection(
+                    trusted_result=ContentActivityResult.NO_PUBLIC_CONTENT,
+                    last_publication_at=None,
+                ),
+            ),
+        )
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        empty = await service.get_influencer_detail(make_context(Role.VIEWER), INFLUENCER_ID)
+        empty_account = empty.platform_accounts[0]
+        assert empty_account.content_activity_state.value == "current"
+        assert empty_account.content_activity_inactive_days is None
+        assert empty_account.content_activity_last_publication_at is None
+
+        repository.detail_result = replace(
+            record,
+            content_activity_projections=(
+                make_content_activity_projection(
+                    trusted_observed_at=NOW - timedelta(days=8),
+                ),
+            ),
+        )
+        stale = await service.get_influencer_detail(make_context(Role.VIEWER), INFLUENCER_ID)
+        stale_account = stale.platform_accounts[0]
+        assert stale_account.content_activity_state.value == "stale"
+        assert stale_account.content_activity_inactive_days is None
+        assert stale_account.content_activity_last_publication_at is None
+
+    asyncio.run(scenario())
+
+
+def test_content_activity_later_provider_failure_is_last_known_not_current() -> None:
+    async def scenario() -> None:
+        repository = FakeInfluencerRepository()
+        repository.detail_result = replace(
+            make_detail_record(),
+            content_activity_projections=(
+                make_content_activity_projection(
+                    latest_observed_at=NOW,
+                    latest_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                    latest_coverage=ContentActivityCoverageStatus.UNKNOWN,
+                    latest_result=ContentActivityResult.UNDETERMINED,
+                ),
+            ),
+        )
+        service = InfluencerService(repository, now_factory=lambda: NOW)
+
+        detail = await service.get_influencer_detail(make_context(Role.VIEWER), INFLUENCER_ID)
+        account = detail.platform_accounts[0]
+
+        assert account.content_activity_state.value == "last_known"
+        assert account.content_activity_trusted_observed_at == NOW - timedelta(days=1)
+        assert account.content_activity_last_publication_at is None
+        assert account.content_activity_inactive_days is None
+        assert account.content_activity_latest_attempt_observation_status is (
+            ContentActivityObservationStatus.PROVIDER_ERROR
+        )
+        assert account.content_activity_latest_attempt_result is (
+            ContentActivityResult.UNDETERMINED
+        )
 
     asyncio.run(scenario())
 

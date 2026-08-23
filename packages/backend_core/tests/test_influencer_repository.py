@@ -8,6 +8,13 @@ from uuid import UUID, uuid4
 
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import Department, Operator
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityPublicationType,
+    ContentActivityResult,
+)
+from backend_core.content_activity.models import ContentActivityProjection
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.imports.enums import (
@@ -31,6 +38,7 @@ from backend_core.influencers.enums import (
     ContactFilter,
     ContactType,
     ContactValidationStatus,
+    ContentActivityFilter,
     CRMStage,
     DataSource,
     InfluencerStatus,
@@ -38,7 +46,11 @@ from backend_core.influencers.enums import (
     Notes60dFilter,
     Platform,
 )
-from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    FreshnessStatus,
+)
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
@@ -298,6 +310,74 @@ async def add_account(
     session.add(account)
     await session.flush()
     return account
+
+
+async def add_content_activity_projection(
+    session: AsyncSession,
+    account: InfluencerPlatformAccount,
+    *,
+    trusted_observed_at: datetime | None,
+    trusted_result: ContentActivityResult = ContentActivityResult.PUBLICATION_FOUND,
+    last_publication_at: datetime | None = None,
+    latest_observed_at: datetime | None = None,
+    latest_status: ContentActivityObservationStatus | None = None,
+    latest_coverage: ContentActivityCoverageStatus | None = None,
+    latest_result: ContentActivityResult | None = None,
+) -> ContentActivityProjection:
+    """Persist only sanitized projection facts needed by the library read tests."""
+
+    has_trusted = trusted_observed_at is not None
+    has_publication = has_trusted and trusted_result is ContentActivityResult.PUBLICATION_FOUND
+    resolved_latest_observed_at = latest_observed_at or trusted_observed_at or NOW
+    resolved_latest_status = latest_status or ContentActivityObservationStatus.COMPLETE
+    resolved_latest_coverage = (
+        latest_coverage or ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+    )
+    resolved_latest_result = latest_result or trusted_result
+    trusted_observation_id = uuid4() if has_trusted else None
+    latest_attempt_observation_id = (
+        trusted_observation_id
+        if (
+            trusted_observation_id is not None
+            and resolved_latest_observed_at == trusted_observed_at
+            and resolved_latest_status is ContentActivityObservationStatus.COMPLETE
+            and resolved_latest_coverage is ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+            and resolved_latest_result is trusted_result
+        )
+        else uuid4()
+    )
+    projection = ContentActivityProjection(
+        platform_account_id=account.id,
+        platform=account.platform,
+        latest_attempt_observation_id=latest_attempt_observation_id,
+        latest_attempt_observed_at=resolved_latest_observed_at,
+        latest_attempt_observation_status=resolved_latest_status,
+        latest_attempt_coverage_status=resolved_latest_coverage,
+        latest_attempt_activity_result=resolved_latest_result,
+        latest_attempt_provider_error_class=None,
+        latest_attempt_provider_error_code=None,
+        trusted_observation_id=trusted_observation_id,
+        trusted_observed_at=trusted_observed_at,
+        trusted_observation_status=(
+            ContentActivityObservationStatus.COMPLETE if has_trusted else None
+        ),
+        trusted_coverage_status=(
+            ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET if has_trusted else None
+        ),
+        trusted_activity_result=trusted_result if has_trusted else None,
+        trusted_capability_policy_version=(
+            "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1" if has_trusted else None
+        ),
+        last_publication_at=(last_publication_at if has_publication else None),
+        latest_publication_id_namespace=("xiaohongshu.noteid" if has_publication else None),
+        latest_publication_id="fixture-note" if has_publication else None,
+        latest_publication_type=(ContentActivityPublicationType.VIDEO if has_publication else None),
+        co_latest_publication_count=1 if has_publication else None,
+        version=1,
+    )
+    session.add(projection)
+    await session.flush()
+    return projection
 
 
 async def add_contact(
@@ -1199,7 +1279,100 @@ def test_combined_contact_and_notes_filters_have_fixed_query_count() -> None:
 
             assert total == len(records) == 50
             assert all(len(record.huitun_freshness) == 1 for record in records)
-            assert len(statements) == 6
+            # The platform-account Content Activity projection is hydrated in
+            # one additional set query, not once per list row.
+            assert len(statements) == 7
+
+    asyncio.run(scenario())
+
+
+def test_content_activity_filters_require_fresh_complete_publication_projection() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            active = await add_influencer(session, name="activity-recent")
+            inactive = await add_influencer(session, name="activity-inactive")
+            stale = await add_influencer(session, name="activity-stale")
+            no_public = await add_influencer(session, name="activity-empty")
+            incomplete = await add_influencer(session, name="activity-incomplete")
+            last_known = await add_influencer(session, name="activity-last-known")
+            active_account = await add_account(session, active, name="recent-account")
+            inactive_account = await add_account(session, inactive, name="inactive-account")
+            stale_account = await add_account(session, stale, name="stale-account")
+            empty_account = await add_account(session, no_public, name="empty-account")
+            incomplete_account = await add_account(session, incomplete, name="incomplete-account")
+            last_known_account = await add_account(session, last_known, name="last-known-account")
+            await add_content_activity_projection(
+                session,
+                active_account,
+                trusted_observed_at=NOW - timedelta(days=1),
+                last_publication_at=NOW - timedelta(days=3),
+            )
+            await add_content_activity_projection(
+                session,
+                inactive_account,
+                trusted_observed_at=NOW - timedelta(days=1),
+                last_publication_at=NOW - timedelta(days=60),
+            )
+            await add_content_activity_projection(
+                session,
+                stale_account,
+                trusted_observed_at=NOW - timedelta(days=8),
+                last_publication_at=NOW - timedelta(days=100),
+            )
+            await add_content_activity_projection(
+                session,
+                empty_account,
+                trusted_observed_at=NOW - timedelta(days=1),
+                trusted_result=ContentActivityResult.NO_PUBLIC_CONTENT,
+            )
+            await add_content_activity_projection(
+                session,
+                incomplete_account,
+                trusted_observed_at=None,
+                latest_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                latest_coverage=ContentActivityCoverageStatus.INCOMPLETE,
+                latest_result=ContentActivityResult.UNDETERMINED,
+            )
+            await add_content_activity_projection(
+                session,
+                last_known_account,
+                trusted_observed_at=NOW - timedelta(days=1),
+                last_publication_at=NOW - timedelta(days=60),
+                latest_observed_at=NOW,
+                latest_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                latest_coverage=ContentActivityCoverageStatus.UNKNOWN,
+                latest_result=ContentActivityResult.UNDETERMINED,
+            )
+            await session.commit()
+
+            repository = InfluencerRepository(session)
+            common = {
+                "as_of": NOW,
+                "policy": FreshnessPolicy(),
+                "content_activity_freshness_policy": (
+                    ContentActivityFreshnessPolicy.from_day_threshold(7)
+                ),
+            }
+            recent_rows, recent_total = await repository.list_influencers(
+                InfluencerListQuery(
+                    content_activity_filter=ContentActivityFilter.ACTIVE_WITHIN_7D,
+                    page_size=100,
+                ),
+                **common,
+            )
+            inactive_rows, inactive_total = await repository.list_influencers(
+                InfluencerListQuery(
+                    content_activity_filter=ContentActivityFilter.INACTIVE_60D,
+                    page_size=100,
+                ),
+                **common,
+            )
+
+            assert recent_total == len(recent_rows) == 1
+            assert [row.influencer.id for row in recent_rows] == [active.id]
+            assert inactive_total == len(inactive_rows) == 1
+            assert [row.influencer.id for row in inactive_rows] == [inactive.id]
+            assert len(inactive_rows[0].content_activity_projections) == 1
 
     asyncio.run(scenario())
 

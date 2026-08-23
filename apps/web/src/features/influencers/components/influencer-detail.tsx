@@ -6,12 +6,16 @@ import { AppTooltip } from "@/components/ui/app-tooltip";
 import {
   contactTypeLabel,
   crmStageDisplay,
+  contentActivityCoverageLabel,
   formatExactFollowers,
   formatFollowers,
   formatMetricsTimestamp,
+  contentActivityLatestAttemptLabel,
+  contentActivityTrustedResultLabel,
   platformLabel,
 } from "../formatters";
 import type { InfluencerDetail as InfluencerDetailData } from "../types";
+import { ContentActivityStatusText } from "./content-activity-status-text";
 import { FreshnessStatusText } from "./freshness-status-text";
 
 const { Title } = Typography;
@@ -153,6 +157,20 @@ function PlatformMetricGrid({
     followersCount === null ? "—" : formatFollowers(followersCount);
   const followersTooltip =
     followersCount === null ? null : formatExactFollowers(followersCount);
+  const isXhs = account.platform === "xiaohongshu";
+  const hasActivityAttempt = Boolean(
+    account.content_activity_latest_attempt_observed_at ||
+    account.content_activity_trusted_observed_at,
+  );
+  const useTrustedCoverage = ["current", "last_known", "stale"].includes(
+    account.content_activity_state ?? "not_checked",
+  );
+  const activityCoverage = useTrustedCoverage
+    ? account.content_activity_trusted_coverage_status
+    : account.content_activity_latest_attempt_coverage_status;
+  const trustedResult = useTrustedCoverage
+    ? account.content_activity_trusted_result
+    : null;
 
   return (
     <div
@@ -205,6 +223,75 @@ function PlatformMetricGrid({
           account.requires_refresh ? "是" : "否",
           `${account.id}-requires-refresh`,
         )}
+        {isXhs
+          ? rowItem(
+              "内容活跃度",
+              <ContentActivityStatusText
+                account={account}
+                showLastPublication={false}
+              />,
+              `${account.id}-content-activity-state`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "可信结果",
+              contentActivityTrustedResultLabel(trustedResult),
+              `${account.id}-content-activity-trusted-result`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "最后公开作品",
+              formatDateForDetailField(
+                account.content_activity_last_publication_at ?? null,
+              ),
+              `${account.id}-content-activity-last-publication`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "断更天数",
+              account.content_activity_inactive_days !== null &&
+                account.content_activity_inactive_days !== undefined
+                ? `${account.content_activity_inactive_days} 天`
+                : "—",
+              `${account.id}-content-activity-inactive-days`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "最后可信检测",
+              formatDateForDetailField(
+                account.content_activity_trusted_observed_at ?? null,
+              ),
+              `${account.id}-content-activity-trusted-observed`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "最新检测状态",
+              contentActivityLatestAttemptLabel(
+                account.content_activity_latest_attempt_observation_status,
+                account.content_activity_latest_attempt_result,
+              ),
+              `${account.id}-content-activity-latest-attempt`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "覆盖范围",
+              contentActivityCoverageLabel(activityCoverage),
+              `${account.id}-content-activity-coverage`,
+            )
+          : null}
+        {isXhs
+          ? rowItem(
+              "内容数据来源",
+              hasActivityAttempt ? "小红书公开作品可信检测" : "—",
+              `${account.id}-content-activity-source`,
+            )
+          : null}
         {rowItem(
           metric?.source === "huitun" ? "灰豚来源更新时间" : "来源数据更新时间",
           metric?.source_updated_at

@@ -7,6 +7,40 @@ export type OwnerSummary = {
 export type FreshnessStatus =
   "unknown" | "fresh" | "aging" | "stale" | "very_stale";
 
+export type ContentActivityReadStatus =
+  "not_checked" | "current" | "last_known" | "stale" | "unknown";
+
+export type ContentActivityObservationStatus =
+  | "COMPLETE"
+  | "IDENTITY_UNRESOLVED"
+  | "ACCESS_RESTRICTED"
+  | "PROVIDER_AUTH_ERROR"
+  | "PROVIDER_RATE_LIMITED"
+  | "PROVIDER_ERROR"
+  | "RESULT_INCOMPLETE"
+  | "RESULT_UNTRUSTED"
+  | "UNKNOWN";
+
+export type ContentActivityCoverageStatus =
+  | "FULL_CURRENT_PUBLIC_SET"
+  | "LATEST_BOUND_PROVEN"
+  | "LOOKBACK_BOUNDED"
+  | "INCOMPLETE"
+  | "UNKNOWN";
+
+export type ContentActivityResult =
+  | "PUBLICATION_FOUND"
+  | "NO_PUBLIC_CONTENT"
+  | "AT_LEAST_LOOKBACK_INACTIVE"
+  | "UNDETERMINED";
+
+export type ContentActivityFilter =
+  | "active_within_7d"
+  | "inactive_30d"
+  | "inactive_60d"
+  | "inactive_90d"
+  | "inactive_180d";
+
 export type PlatformAccountSummary = {
   id: string;
   platform: string;
@@ -22,6 +56,17 @@ export type PlatformAccountSummary = {
   freshness_status: FreshnessStatus | null;
   freshness_age_days: number | null;
   requires_refresh: boolean;
+  content_activity_state?: ContentActivityReadStatus;
+  content_activity_trusted_observed_at?: string | null;
+  content_activity_trusted_observation_status?: ContentActivityObservationStatus | null;
+  content_activity_trusted_coverage_status?: ContentActivityCoverageStatus | null;
+  content_activity_trusted_result?: ContentActivityResult | null;
+  content_activity_last_publication_at?: string | null;
+  content_activity_inactive_days?: number | null;
+  content_activity_latest_attempt_observed_at?: string | null;
+  content_activity_latest_attempt_observation_status?: ContentActivityObservationStatus | null;
+  content_activity_latest_attempt_coverage_status?: ContentActivityCoverageStatus | null;
+  content_activity_latest_attempt_result?: ContentActivityResult | null;
 };
 
 export type CurrentMetricsSummary = {
@@ -81,6 +126,7 @@ export type InfluencerListQueryParams = {
   notes_7d_filter?: "zero" | "one_to_two" | "three_plus" | "missing";
   notes_60d_filter?:
     "zero" | "one_to_two" | "three_to_nine" | "ten_or_more" | "missing";
+  content_activity_filter?: ContentActivityFilter;
   freshness_status?: FreshnessStatus;
   requires_refresh?: "true" | "false";
   last_huitun_observed_before?: string;

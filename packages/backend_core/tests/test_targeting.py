@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from itertools import permutations
 from uuid import uuid4
 
 import pytest
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
+    ContentActivityConstraint,
+    ContentActivityFact,
     IntegerRange,
     SellerTargetingPolicy,
     TargetingEvaluation,
@@ -22,8 +30,12 @@ from backend_core.growth.targeting import (
     evaluate_seller,
     reduce_criterion_results,
 )
+from backend_core.imports.hashing import hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, Platform
+from backend_core.influencers.freshness import ContentActivityFreshnessPolicy
 from pydantic import ValidationError
+
+CONTENT_ACTIVITY_AS_OF = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
 def _facts(**changes: object) -> CandidateFactBundle:
@@ -45,6 +57,18 @@ def _facts(**changes: object) -> CandidateFactBundle:
     return CandidateFactBundle.model_validate(values)
 
 
+def _content_activity_fact(**changes: object) -> ContentActivityFact:
+    values: dict[str, object] = {
+        "trusted_observed_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "trusted_observation_status": ContentActivityObservationStatus.COMPLETE,
+        "trusted_coverage_status": ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+        "trusted_activity_result": ContentActivityResult.PUBLICATION_FOUND,
+        "last_publication_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=90),
+    }
+    values.update(changes)
+    return ContentActivityFact.model_validate(values)
+
+
 def test_seller_match_plus_match_is_match() -> None:
     policy = SellerTargetingPolicy(
         followers=IntegerRange(minimum=100, maximum=100),
@@ -54,6 +78,211 @@ def test_seller_match_plus_match_is_match() -> None:
     result = evaluate_seller(policy, _facts())
 
     assert result.result is TargetingEvaluationResult.MATCH
+
+
+def test_content_activity_inactive_threshold_uses_captured_as_of_timestamp() -> None:
+    policy = SellerTargetingPolicy(
+        content_activity=ContentActivityConstraint(minimum_inactive_days=60)
+    )
+
+    result = evaluate_seller(
+        policy,
+        _facts(
+            content_activity=_content_activity_fact(
+                last_publication_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=60)
+            )
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+        content_activity_freshness_policy=ContentActivityFreshnessPolicy.from_day_threshold(7),
+    )
+
+    assert result.result is TargetingEvaluationResult.MATCH
+    assert result.reason_codes == (TargetingReasonCode.CONTENT_ACTIVITY_MATCH,)
+    criterion = result.redacted_evidence["criteria"][0]
+    assert criterion["observed"]["inactive_days"] == 60
+
+
+def test_content_activity_recent_publication_is_not_match() -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(content_activity=ContentActivityConstraint(minimum_inactive_days=60)),
+        _facts(
+            content_activity=_content_activity_fact(
+                last_publication_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=10)
+            )
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.NOT_MATCH
+    assert result.reason_codes == (TargetingReasonCode.CONTENT_ACTIVITY_RECENT,)
+
+
+def test_content_activity_same_instant_attempts_are_unorderable_and_unknown() -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(content_activity=ContentActivityConstraint(minimum_inactive_days=60)),
+        _facts(
+            content_activity=_content_activity_fact(
+                latest_attempt_same_instant_count=2,
+            )
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.UNKNOWN
+    assert result.reason_codes == (TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,)
+
+
+def test_content_activity_and_tag_constraint_combine_without_cross_signal_shortcut() -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(
+            tags_exact_any=("beauty",),
+            content_activity=ContentActivityConstraint(minimum_inactive_days=60),
+        ),
+        _facts(
+            source_tags=("beauty",),
+            content_activity=_content_activity_fact(
+                last_publication_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=90)
+            ),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.MATCH
+    assert [item["criterion"] for item in result.redacted_evidence["criteria"]] == [
+        "tags_exact_any",
+        "content_activity",
+    ]
+    assert result.redacted_evidence["criteria"][1]["observed"]["inactive_days"] == 90
+
+
+@pytest.mark.parametrize(
+    ("fact", "reason"),
+    [
+        (
+            None,
+            TargetingReasonCode.CONTENT_ACTIVITY_MISSING,
+        ),
+        (
+            _content_activity_fact(
+                trusted_observation_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                trusted_coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                trusted_activity_result=ContentActivityResult.UNDETERMINED,
+                last_publication_at=None,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+        ),
+        (
+            _content_activity_fact(
+                trusted_observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                trusted_coverage_status=ContentActivityCoverageStatus.INCOMPLETE,
+                trusted_activity_result=ContentActivityResult.UNDETERMINED,
+                last_publication_at=None,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE,
+        ),
+        (
+            _content_activity_fact(
+                trusted_observed_at=None,
+                trusted_observation_status=None,
+                trusted_coverage_status=None,
+                trusted_activity_result=None,
+                last_publication_at=None,
+                latest_attempt_observed_at=CONTENT_ACTIVITY_AS_OF,
+                latest_attempt_observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                latest_attempt_coverage_status=ContentActivityCoverageStatus.INCOMPLETE,
+                latest_attempt_activity_result=ContentActivityResult.UNDETERMINED,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE,
+        ),
+        (
+            _content_activity_fact(
+                trusted_observed_at=None,
+                trusted_observation_status=None,
+                trusted_coverage_status=None,
+                trusted_activity_result=None,
+                last_publication_at=None,
+                latest_attempt_observed_at=CONTENT_ACTIVITY_AS_OF,
+                latest_attempt_observation_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                latest_attempt_coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                latest_attempt_activity_result=ContentActivityResult.UNDETERMINED,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+        ),
+        (
+            _content_activity_fact(
+                latest_attempt_observed_at=CONTENT_ACTIVITY_AS_OF,
+                latest_attempt_observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                latest_attempt_coverage_status=ContentActivityCoverageStatus.INCOMPLETE,
+                latest_attempt_activity_result=ContentActivityResult.UNDETERMINED,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE,
+        ),
+        (
+            _content_activity_fact(
+                latest_attempt_observed_at=CONTENT_ACTIVITY_AS_OF,
+                latest_attempt_observation_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                latest_attempt_coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                latest_attempt_activity_result=ContentActivityResult.UNDETERMINED,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+        ),
+        (
+            _content_activity_fact(
+                latest_attempt_observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+                latest_attempt_observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+                latest_attempt_coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                latest_attempt_activity_result=ContentActivityResult.UNDETERMINED,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+        ),
+        (
+            _content_activity_fact(
+                trusted_observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=8),
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_STALE,
+        ),
+        (
+            _content_activity_fact(
+                trusted_activity_result=ContentActivityResult.NO_PUBLIC_CONTENT,
+                last_publication_at=None,
+            ),
+            TargetingReasonCode.CONTENT_ACTIVITY_NO_PUBLIC_CONTENT,
+        ),
+    ],
+)
+def test_content_activity_uncertain_or_no_public_content_is_unknown(
+    fact: ContentActivityFact | None,
+    reason: TargetingReasonCode,
+) -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(content_activity=ContentActivityConstraint(minimum_inactive_days=60)),
+        _facts(content_activity=fact),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.UNKNOWN
+    assert result.reason_codes == (reason,)
+    criterion = result.redacted_evidence["criteria"][0]
+    assert criterion["observed"]["last_publication_at"] is None
+
+
+def test_content_activity_constraint_does_not_change_existing_seller_v1_defaults() -> None:
+    policy = SellerTargetingPolicy.model_validate(
+        {"schema_version": 1, "policy_type": "SELLER_V1", "tags_exact_any": ["beauty"]}
+    )
+
+    assert policy.content_activity is None
+    legacy_definition = policy.model_dump(mode="json")
+    assert legacy_definition.pop("content_activity") is None
+    assert policy.canonical_hash == hash_document(legacy_definition)
+    assert (
+        SellerTargetingPolicy(
+            tags_exact_any=("beauty",),
+            content_activity=ContentActivityConstraint(minimum_inactive_days=60),
+        ).canonical_hash
+        != policy.canonical_hash
+    )
+    assert evaluate_seller(policy, _facts()).result is TargetingEvaluationResult.MATCH
 
 
 def test_seller_contact_availability_uses_canonical_contact_types() -> None:

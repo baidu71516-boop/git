@@ -37,6 +37,10 @@ export type TargetingPolicyDefinition =
       notes_7d?: { minimum?: number | null; maximum?: number | null } | null;
       notes_60d?: { minimum?: number | null; maximum?: number | null } | null;
       freshness?: { allowed_statuses?: string[] } | null;
+      content_activity?: {
+        schema_version?: number;
+        minimum_inactive_days?: number;
+      } | null;
       platforms?: string[];
       sources?: string[];
     }

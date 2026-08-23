@@ -12,7 +12,12 @@ celery_app = Celery(
     "influencer_outreach",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.health", "app.tasks.imports", "app.tasks.targeting"],
+    include=[
+        "app.tasks.health",
+        "app.tasks.imports",
+        "app.tasks.targeting",
+        "app.tasks.content_activity",
+    ],
 )
 celery_app.conf.update(
     accept_content=["json"],
@@ -28,6 +33,8 @@ celery_app.conf.update(
         "imports.reconcile_import_tasks": {"queue": "default"},
         "targeting.materialize_candidate_pool_run": {"queue": "targeting"},
         "targeting.reconcile_pending_candidate_pool_runs": {"queue": "default"},
+        "content_activity.refresh_request": {"queue": "analytics"},
+        "content_activity.reconcile_refresh_requests": {"queue": "default"},
     },
     beat_schedule={
         "reconcile-durable-import-tasks": {
@@ -38,6 +45,11 @@ celery_app.conf.update(
         "reconcile-pending-candidate-pool-runs": {
             "task": "targeting.reconcile_pending_candidate_pool_runs",
             "schedule": 60,
+            "options": {"queue": "default"},
+        },
+        "reconcile-content-activity-refresh-requests": {
+            "task": "content_activity.reconcile_refresh_requests",
+            "schedule": settings.content_activity_refresh_reconcile_interval_seconds,
             "options": {"queue": "default"},
         },
     },

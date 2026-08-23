@@ -118,6 +118,39 @@ function safeList(value: unknown): string {
         .join("、")
     : "—";
 }
+
+function criterionConfiguredValue(
+  value: unknown,
+  criterion: string | null,
+): string {
+  const item =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  if (criterion === "content_activity") {
+    const days = safeString(item.minimum_inactive_days);
+    return days ? `断更不少于 ${days} 天` : "—";
+  }
+  return safeList(item.allowed ?? item.minimum ?? item.maximum);
+}
+
+function criterionObservedValue(
+  value: unknown,
+  criterion: string | null,
+): string {
+  const item =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  if (criterion === "content_activity") {
+    const inactiveDays = safeString(item.inactive_days);
+    if (inactiveDays) return `已断更 ${inactiveDays} 天`;
+    const publication = safeString(item.last_publication_at);
+    if (publication) return `最后公开：${candidateDateTime(publication)}`;
+  }
+  return safeString(item.value ?? item.status) ?? "—";
+}
+
 function EvidenceContent({
   member,
   policy,
@@ -167,24 +200,14 @@ function EvidenceContent({
           {
             title: "配置",
             dataIndex: "configured",
-            render: (value: unknown) => {
-              const item =
-                value && typeof value === "object" && !Array.isArray(value)
-                  ? (value as Record<string, unknown>)
-                  : {};
-              return safeList(item.allowed ?? item.minimum ?? item.maximum);
-            },
+            render: (value: unknown, record: Record<string, unknown>) =>
+              criterionConfiguredValue(value, safeString(record.criterion)),
           },
           {
             title: "观察值",
             dataIndex: "observed",
-            render: (value: unknown) => {
-              const item =
-                value && typeof value === "object" && !Array.isArray(value)
-                  ? (value as Record<string, unknown>)
-                  : {};
-              return safeString(item.value ?? item.status) ?? "—";
-            },
+            render: (value: unknown, record: Record<string, unknown>) =>
+              criterionObservedValue(value, safeString(record.criterion)),
           },
           {
             title: "原因",

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -25,9 +25,14 @@ from pydantic import (
     model_validator,
 )
 
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
 from backend_core.imports.hashing import canonical_value, hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
-from backend_core.influencers.freshness import FreshnessStatus
+from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessStatus
 
 
 class FrozenTargetingContract(BaseModel):
@@ -54,6 +59,14 @@ class TargetingReasonCode(StrEnum):
     COLLECTION_CONTEXT_MISSING = "COLLECTION_CONTEXT_MISSING"
     CONTACT_AVAILABLE = "CONTACT_AVAILABLE"
     CONTACT_EVIDENCE_REDACTED = "CONTACT_EVIDENCE_REDACTED"
+    CONTENT_ACTIVITY_INCOMPLETE = "CONTENT_ACTIVITY_INCOMPLETE"
+    CONTENT_ACTIVITY_MATCH = "CONTENT_ACTIVITY_MATCH"
+    CONTENT_ACTIVITY_MISSING = "CONTENT_ACTIVITY_MISSING"
+    CONTENT_ACTIVITY_NO_PUBLIC_CONTENT = "CONTENT_ACTIVITY_NO_PUBLIC_CONTENT"
+    CONTENT_ACTIVITY_RECENT = "CONTENT_ACTIVITY_RECENT"
+    CONTENT_ACTIVITY_STALE = "CONTENT_ACTIVITY_STALE"
+    CONTENT_ACTIVITY_UNKNOWN = "CONTENT_ACTIVITY_UNKNOWN"
+    CONTENT_ACTIVITY_UNTRUSTED = "CONTENT_ACTIVITY_UNTRUSTED"
     CREATOR_CATEGORY_UNMAPPED = "CREATOR_CATEGORY_UNMAPPED"
     CREATOR_CLASSIFICATION_MISSING = "CREATOR_CLASSIFICATION_MISSING"
     EMAIL_AVAILABLE = "EMAIL_AVAILABLE"
@@ -143,6 +156,51 @@ class FreshnessConstraint(FrozenTargetingContract):
         return tuple(sorted(value, key=lambda item: item.value))
 
 
+class ContentActivityConstraint(FrozenTargetingContract):
+    """Require an exact trusted current-public inactivity threshold for Seller targeting."""
+
+    schema_version: Literal[1] = 1
+    minimum_inactive_days: StrictInt = Field(ge=1, le=3_650)
+
+
+class ContentActivityFact(FrozenTargetingContract):
+    """Trusted-current Content Activity fields for one account candidate.
+
+    Absence and every non-exact state are valid fact inputs: the evaluator maps
+    them to ``UNKNOWN`` rather than rejecting an entire materialization batch.
+    """
+
+    schema_version: Literal[1] = 1
+    trusted_observed_at: datetime | None = None
+    trusted_observation_status: ContentActivityObservationStatus | None = None
+    trusted_coverage_status: ContentActivityCoverageStatus | None = None
+    trusted_activity_result: ContentActivityResult | None = None
+    last_publication_at: datetime | None = None
+    # Latest-attempt fields are deliberately separate from trusted-current
+    # evidence.  They let Candidate evidence distinguish a never-trusted
+    # incomplete/provider failure from an account that simply has no check,
+    # without allowing a failed attempt to overwrite a fresh trusted fact.
+    latest_attempt_observed_at: datetime | None = None
+    latest_attempt_observation_status: ContentActivityObservationStatus | None = None
+    latest_attempt_coverage_status: ContentActivityCoverageStatus | None = None
+    latest_attempt_activity_result: ContentActivityResult | None = None
+    # More than one immutable attempt at the exact newest observation instant
+    # is unorderable evidence.  The repository preserves this cardinality so
+    # targeting never picks a UUID-sorted winner and treats it as current.
+    latest_attempt_same_instant_count: int | None = Field(default=None, ge=1)
+
+    @field_validator(
+        "trusted_observed_at",
+        "last_publication_at",
+        "latest_attempt_observed_at",
+    )
+    @classmethod
+    def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("content activity fact timestamps must be timezone-aware")
+        return value.astimezone(UTC) if value is not None else None
+
+
 def _normalized_strings(
     value: object,
     *,
@@ -177,6 +235,7 @@ class SellerTargetingPolicy(FrozenTargetingContract):
     notes_7d: IntegerRange | None = None
     notes_60d: IntegerRange | None = None
     freshness: FreshnessConstraint | None = None
+    content_activity: ContentActivityConstraint | None = None
     platforms: tuple[Platform, ...] = ()
     sources: tuple[DataSource, ...] = ()
 
@@ -201,7 +260,14 @@ class SellerTargetingPolicy(FrozenTargetingContract):
 
     @property
     def canonical_hash(self) -> str:
-        return hash_document(self.model_dump(mode="json"))
+        # Existing persisted SELLER_V1 definitions predate this optional D1A
+        # constraint. Omitting an absent constraint preserves their historical
+        # canonical hash exactly; a configured constraint remains part of the
+        # versioned definition and therefore changes the hash.
+        canonical = self.model_dump(mode="json")
+        if canonical["content_activity"] is None:
+            del canonical["content_activity"]
+        return hash_document(canonical)
 
 
 class TaxonomyAlias(FrozenTargetingContract):
@@ -406,6 +472,7 @@ class CandidateFactBundle(FrozenTargetingContract):
     freshness_status: FreshnessStatus | None = None
     freshness_observed_at: datetime | None = None
     source_updated_at: datetime | None = None
+    content_activity: ContentActivityFact | None = None
     source_collection_job_id: UUID | None = None
     collection_industry: str | None = Field(default=None, max_length=160)
     collection_subdirection: str | None = Field(default=None, max_length=200)
@@ -473,10 +540,19 @@ class TargetingEvaluation(FrozenTargetingContract):
 
 _EMAIL_VALUE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 _PHONE_VALUE = re.compile(r"(?<!\d)\+?\d(?:[\d\s().-]{5,}\d)(?!\d)")
+_CANONICAL_UUID_VALUE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 
 def _is_sensitive(value: object) -> bool:
     if isinstance(value, str):
+        # Canonical UUIDs are system identifiers, not phone numbers.  Their
+        # numeric segments can otherwise match the permissive phone pattern
+        # below and make redacted targeting evidence nondeterministic.
+        if _CANONICAL_UUID_VALUE.fullmatch(value):
+            return False
         digits = sum(character.isdigit() for character in value)
         return bool(
             _EMAIL_VALUE.search(value) or (7 <= digits <= 15 and _PHONE_VALUE.search(value))
@@ -640,9 +716,283 @@ def _freshness_evaluation(
     )
 
 
+def _content_activity_unknown(
+    *,
+    configured: ContentActivityConstraint,
+    reason_code: TargetingReasonCode,
+    fact: ContentActivityFact | None,
+    as_of: datetime | None,
+) -> CriterionEvaluation:
+    """Build one explicit fail-closed Content Activity criterion result."""
+
+    return CriterionEvaluation(
+        criterion="content_activity",
+        result=TargetingEvaluationResult.UNKNOWN,
+        reason_code=reason_code,
+        configured={
+            "schema_version": configured.schema_version,
+            "minimum_inactive_days": configured.minimum_inactive_days,
+        },
+        observed={
+            "as_of": as_of,
+            "trusted_observed_at": (fact.trusted_observed_at if fact is not None else None),
+            "trusted_observation_status": (
+                fact.trusted_observation_status if fact is not None else None
+            ),
+            "trusted_coverage_status": (fact.trusted_coverage_status if fact is not None else None),
+            "trusted_activity_result": (fact.trusted_activity_result if fact is not None else None),
+            "latest_attempt_observed_at": (
+                fact.latest_attempt_observed_at if fact is not None else None
+            ),
+            "latest_attempt_observation_status": (
+                fact.latest_attempt_observation_status if fact is not None else None
+            ),
+            "latest_attempt_coverage_status": (
+                fact.latest_attempt_coverage_status if fact is not None else None
+            ),
+            "latest_attempt_activity_result": (
+                fact.latest_attempt_activity_result if fact is not None else None
+            ),
+            "latest_attempt_same_instant_count": (
+                fact.latest_attempt_same_instant_count if fact is not None else None
+            ),
+            # A timestamp from a non-current/incomplete/untrusted fact is not
+            # evidence of the creator's present public activity.  Omit it
+            # from sales-visible Candidate evidence instead of inviting an
+            # accidental inactivity inference.
+            "last_publication_at": None,
+        },
+    )
+
+
+def _latest_attempt_supersedes_trusted_fact(
+    fact: ContentActivityFact,
+    *,
+    evaluation_time: datetime,
+) -> bool:
+    """Return whether a later/contradictory attempt makes old trust last-known only.
+
+    A successful newer complete observation replaces the trusted projection. A
+    later timeout, partial page, or untrusted result deliberately does not
+    erase that historical fact, but it prevents Candidate targeting from
+    asserting the old fact as current. Equal instants are usable only when all
+    decision-bearing status axes agree; otherwise they are unorderable and
+    fail closed.
+    """
+
+    if (fact.latest_attempt_same_instant_count or 0) > 1:
+        return True
+
+    latest_observed_at = fact.latest_attempt_observed_at
+    trusted_observed_at = fact.trusted_observed_at
+    if latest_observed_at is None or trusted_observed_at is None:
+        return False
+    if latest_observed_at > evaluation_time:
+        return True
+    if latest_observed_at > trusted_observed_at:
+        return True
+    if latest_observed_at < trusted_observed_at:
+        return False
+    return (
+        fact.latest_attempt_observation_status != fact.trusted_observation_status
+        or fact.latest_attempt_coverage_status != fact.trusted_coverage_status
+        or fact.latest_attempt_activity_result != fact.trusted_activity_result
+    )
+
+
+def _latest_attempt_unknown_reason(fact: ContentActivityFact) -> TargetingReasonCode:
+    """Classify a post-trusted attempt without turning it into a current fact."""
+
+    if (
+        fact.latest_attempt_observation_status is ContentActivityObservationStatus.RESULT_INCOMPLETE
+        or fact.latest_attempt_coverage_status is ContentActivityCoverageStatus.INCOMPLETE
+    ):
+        return TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE
+    return TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED
+
+
+def _content_activity_evaluation(
+    facts: CandidateFactBundle,
+    configured: ContentActivityConstraint,
+    *,
+    as_of: datetime | None,
+    freshness_policy: ContentActivityFreshnessPolicy,
+) -> CriterionEvaluation:
+    """Evaluate a current trusted-public publication timestamp, never an estimate.
+
+    A Content Activity projection is intentionally a separate evidence stream
+    from source-data freshness.  It is usable only if the exact three-part
+    trusted truth is present at the Candidate Run's captured ``as_of``.
+    """
+
+    fact = facts.content_activity
+    if fact is None:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_MISSING,
+            fact=None,
+            as_of=as_of,
+        )
+    if as_of is None:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNKNOWN,
+            fact=fact,
+            as_of=None,
+        )
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("content activity as_of must be timezone-aware")
+    evaluation_time = as_of.astimezone(UTC)
+
+    # A projection has trusted fields only after a complete accepted result.
+    # When it has never had one, retain the latest-attempt classification so
+    # Candidate results are safely UNKNOWN *and* diagnostically distinguish
+    # partial pagination/provider failure from an account never checked.
+    if fact.trusted_observation_status is None:
+        if (
+            fact.latest_attempt_observation_status
+            == ContentActivityObservationStatus.RESULT_INCOMPLETE
+            or fact.latest_attempt_coverage_status == ContentActivityCoverageStatus.INCOMPLETE
+        ):
+            return _content_activity_unknown(
+                configured=configured,
+                reason_code=TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE,
+                fact=fact,
+                as_of=evaluation_time,
+            )
+        if fact.latest_attempt_observation_status is not None:
+            return _content_activity_unknown(
+                configured=configured,
+                reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+                fact=fact,
+                as_of=evaluation_time,
+            )
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_MISSING,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    if _latest_attempt_supersedes_trusted_fact(fact, evaluation_time=evaluation_time):
+        # Preserve the old trusted observation in durable history/projection,
+        # but do not use it as a CURRENT_PUBLIC_VISIBLE targeting fact after a
+        # later incomplete or failed attempt. This is last-known evidence only.
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=_latest_attempt_unknown_reason(fact),
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    # A partial collection is not a current-public result even if it happens
+    # to contain an old publication.  Keep this distinct in durable evidence.
+    if (
+        fact.trusted_observation_status == ContentActivityObservationStatus.RESULT_INCOMPLETE
+        or fact.trusted_coverage_status == ContentActivityCoverageStatus.INCOMPLETE
+    ):
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_INCOMPLETE,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if fact.trusted_observation_status in {
+        ContentActivityObservationStatus.RESULT_UNTRUSTED,
+        ContentActivityObservationStatus.IDENTITY_UNRESOLVED,
+        ContentActivityObservationStatus.ACCESS_RESTRICTED,
+        ContentActivityObservationStatus.PROVIDER_AUTH_ERROR,
+        ContentActivityObservationStatus.PROVIDER_RATE_LIMITED,
+        ContentActivityObservationStatus.PROVIDER_ERROR,
+    }:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if (
+        fact.trusted_observation_status != ContentActivityObservationStatus.COMPLETE
+        or fact.trusted_coverage_status != ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+    ):
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNKNOWN,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if fact.trusted_activity_result == ContentActivityResult.NO_PUBLIC_CONTENT:
+        # A complete empty public set establishes no publication timestamp. It
+        # must not turn into an invented infinite inactivity duration.
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_NO_PUBLIC_CONTENT,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if fact.trusted_activity_result != ContentActivityResult.PUBLICATION_FOUND:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNKNOWN,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if fact.last_publication_at is None:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if not freshness_policy.is_current(fact.trusted_observed_at, evaluation_time):
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_STALE,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    last_publication_at = fact.last_publication_at.astimezone(UTC)
+    if last_publication_at > evaluation_time:
+        return _content_activity_unknown(
+            configured=configured,
+            reason_code=TargetingReasonCode.CONTENT_ACTIVITY_UNTRUSTED,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    cutoff = evaluation_time - timedelta(days=configured.minimum_inactive_days)
+    matches = last_publication_at <= cutoff
+    return CriterionEvaluation(
+        criterion="content_activity",
+        result=(
+            TargetingEvaluationResult.MATCH if matches else TargetingEvaluationResult.NOT_MATCH
+        ),
+        reason_code=(
+            TargetingReasonCode.CONTENT_ACTIVITY_MATCH
+            if matches
+            else TargetingReasonCode.CONTENT_ACTIVITY_RECENT
+        ),
+        configured={
+            "schema_version": configured.schema_version,
+            "minimum_inactive_days": configured.minimum_inactive_days,
+        },
+        observed={
+            "as_of": evaluation_time,
+            "trusted_observed_at": fact.trusted_observed_at,
+            "last_publication_at": last_publication_at,
+            # This is display/evidence only.  The decision above uses the
+            # exact timestamp cutoff, never rounded day arithmetic.
+            "inactive_days": int((evaluation_time - last_publication_at).total_seconds() // 86_400),
+        },
+    )
+
+
 def evaluate_seller(
     policy: SellerTargetingPolicy,
     facts: CandidateFactBundle,
+    *,
+    as_of: datetime | None = None,
+    content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
 ) -> TargetingEvaluation:
     """Evaluate configured Seller criteria with frozen NOT_MATCH precedence."""
 
@@ -686,6 +1036,17 @@ def evaluate_seller(
         )
     if policy.freshness is not None:
         criteria.append(_freshness_evaluation(facts, policy.freshness))
+    if policy.content_activity is not None:
+        criteria.append(
+            _content_activity_evaluation(
+                facts,
+                policy.content_activity,
+                as_of=as_of,
+                freshness_policy=(
+                    content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+                ),
+            )
+        )
     if policy.platforms:
         criteria.append(
             _set_evaluation(
@@ -870,9 +1231,17 @@ def evaluate_buyer(
 def evaluate_targeting(
     policy: SellerTargetingPolicy | BuyerTargetingPolicy,
     facts: CandidateFactBundle,
+    *,
+    as_of: datetime | None = None,
+    content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
 ) -> TargetingEvaluation:
     if isinstance(policy, SellerTargetingPolicy):
-        return evaluate_seller(policy, facts)
+        return evaluate_seller(
+            policy,
+            facts,
+            as_of=as_of,
+            content_activity_freshness_policy=content_activity_freshness_policy,
+        )
     return evaluate_buyer(policy, facts)
 
 
@@ -880,6 +1249,8 @@ __all__ = [
     "AccountSignalFact",
     "AccountSignalValueState",
     "BuyerTargetingPolicy",
+    "ContentActivityConstraint",
+    "ContentActivityFact",
     "CandidateFactBundle",
     "CollectionContextSnapshot",
     "CriterionEvaluation",

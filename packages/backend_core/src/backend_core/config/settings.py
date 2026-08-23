@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -75,6 +76,37 @@ class Settings(BaseSettings):
     import_task_preview_max_run_attempts: int = Field(default=3, ge=1)
     import_task_confirm_max_run_attempts: int = Field(default=3, ge=1)
 
+    # Content Activity is disabled by default.  Enabling provider traffic requires
+    # an explicit feature/config/governance gate and never happens incidentally.
+    content_activity_enabled: bool = False
+    content_activity_xhs_enabled: bool = False
+    content_activity_provider_governance_approved: bool = False
+    content_activity_provider_max_calls_per_run: int = Field(default=0, ge=0, le=1_000)
+    content_activity_xhs_max_calls_per_account: int = Field(default=1, ge=1, le=1)
+    content_activity_refresh_batch_size: int = Field(default=20, ge=1, le=100)
+    content_activity_refresh_concurrency: int = Field(default=1, ge=1, le=1)
+    # These govern the durable request ledger, rather than provider HTTP calls.
+    # They remain deliberately small so a queue outage cannot turn into an
+    # unbounded provider replay once governance has approved the feature.
+    content_activity_refresh_max_attempts: int = Field(default=3, ge=1, le=8)
+    content_activity_refresh_lease_seconds: int = Field(default=120, ge=2, le=3_600)
+    content_activity_refresh_retry_backoff_base_seconds: int = Field(default=5, ge=1, le=300)
+    content_activity_refresh_retry_backoff_max_seconds: int = Field(default=300, ge=1, le=3_600)
+    content_activity_refresh_reconcile_interval_seconds: int = Field(default=30, ge=1, le=3_600)
+    content_activity_refresh_reconcile_batch_size: int = Field(default=100, ge=1, le=1_000)
+    content_activity_trusted_freshness_days: int = Field(default=7, ge=1)
+    content_activity_http_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    content_activity_http_read_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
+    content_activity_http_pool_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
+    content_activity_http_total_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    content_activity_http_max_response_bytes: int = Field(
+        default=256 * 1024,
+        ge=1024,
+        le=2 * 1024 * 1024,
+    )
+    tikhub_base_url: str = ""
+    tikhub_api_key: SecretStr | None = None
+
     @property
     def secure_cookies(self) -> bool:
         return self.app_env == "production"
@@ -115,6 +147,58 @@ class Settings(BaseSettings):
                 "IMPORT_TASK_RUN_BACKOFF_BASE_SECONDS must not exceed "
                 "IMPORT_TASK_RUN_BACKOFF_MAX_SECONDS"
             )
+        if self.content_activity_xhs_enabled and not self.content_activity_enabled:
+            raise ValueError("CONTENT_ACTIVITY_XHS_ENABLED requires CONTENT_ACTIVITY_ENABLED")
+        if (
+            self.content_activity_refresh_retry_backoff_base_seconds
+            > self.content_activity_refresh_retry_backoff_max_seconds
+        ):
+            raise ValueError(
+                "CONTENT_ACTIVITY_REFRESH_RETRY_BACKOFF_BASE_SECONDS must not exceed "
+                "CONTENT_ACTIVITY_REFRESH_RETRY_BACKOFF_MAX_SECONDS"
+            )
+        if self.content_activity_enabled:
+            if not self.content_activity_xhs_enabled:
+                raise ValueError(
+                    "D1A CONTENT_ACTIVITY_ENABLED requires CONTENT_ACTIVITY_XHS_ENABLED"
+                )
+            if not self.content_activity_provider_governance_approved:
+                raise ValueError(
+                    "CONTENT_ACTIVITY_ENABLED requires "
+                    "CONTENT_ACTIVITY_PROVIDER_GOVERNANCE_APPROVED"
+                )
+            if self.content_activity_provider_max_calls_per_run < 1:
+                raise ValueError(
+                    "CONTENT_ACTIVITY_ENABLED requires "
+                    "CONTENT_ACTIVITY_PROVIDER_MAX_CALLS_PER_RUN >= 1"
+                )
+            parsed_tikhub_url = urlsplit(self.tikhub_base_url)
+            if (
+                parsed_tikhub_url.scheme != "https"
+                or not parsed_tikhub_url.netloc
+                or parsed_tikhub_url.username is not None
+                or parsed_tikhub_url.password is not None
+                or parsed_tikhub_url.path not in ("", "/")
+                or parsed_tikhub_url.query
+                or parsed_tikhub_url.fragment
+            ):
+                raise ValueError(
+                    "TIKHUB_BASE_URL must be an HTTPS origin when Content Activity is enabled"
+                )
+            tikhub_api_key = (
+                self.tikhub_api_key.get_secret_value() if self.tikhub_api_key is not None else ""
+            )
+            if not tikhub_api_key.strip():
+                raise ValueError("TIKHUB_API_KEY is required and must be non-blank when enabled")
+            if self.content_activity_http_total_timeout_seconds < max(
+                self.content_activity_http_connect_timeout_seconds,
+                self.content_activity_http_read_timeout_seconds,
+                self.content_activity_http_pool_timeout_seconds,
+            ):
+                raise ValueError(
+                    "CONTENT_ACTIVITY_HTTP_TOTAL_TIMEOUT_SECONDS must be at least every "
+                    "component timeout"
+                )
         return self
 
 

@@ -1,0 +1,36 @@
+{
+  "contract_id": "TIKHUB_XHS_APP_V2_CURRENT_PUBLIC_VISIBILITY_POLICY_V1",
+  "capability_policy_version": "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+  "provider": "TIKHUB",
+  "provider_product": "XIAOHONGSHU_APP_V2",
+  "endpoint": "/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+  "current_public_membership": {
+    "positive_basis": "Membership in the exact, schema-recognized complete current-public posted-notes listing.",
+    "row_level_deny_mapping": "none_in_v1",
+    "unknown_decision_bearing_field_behavior": "RESULT_UNTRUSTED",
+    "supported_content_types": ["normal", "video"],
+    "sticky_behavior": "is_top is eligible but never supplies ordering"
+  },
+  "completeness": {
+    "first_response_has_more": false,
+    "has_more_type": "boolean",
+    "single_response_coherence": "SINGLE_RESPONSE_COHERENT_ONLY",
+    "page_budget": 1,
+    "multi_page_behavior": "RESULT_INCOMPLETE_INCOMPLETE_UNDETERMINED_AND_STOP"
+  },
+  "static_source_reference": {
+    "source": "TikHub official Xiaohongshu App V2 guide",
+    "reference_id": "XIAOHONGSHU_APP_V2_GET_USER_POSTED_NOTES",
+    "assertion": "The endpoint exposes a current posted-notes listing with an explicit has_more marker; v1 accepts no unproven row-level visibility or access field."
+  },
+  "sanitized_fixture_digests": {
+    "positive_membership": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_success_v1.json",
+      "sha256": "d6fb4eebb79fd3654d231513cde8031f880fdc607d7e6dcf8703c81a6ebeb122"
+    },
+    "negative_unknown_visibility": {
+      "path": "packages/backend_core/tests/fixtures/content_activity/xhs_get_user_posted_notes_unknown_visibility_v1.json",
+      "sha256": "e7fd46c666aa260202e8521e555601e61faf3101780f2887c87bd176696b76ce"
+    }
+  }
+}
