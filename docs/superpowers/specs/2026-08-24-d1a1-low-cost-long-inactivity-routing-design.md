@@ -43,8 +43,8 @@ For usable evidence:
 | Observation | `LONG_INACTIVITY >= 30` | `>= 60` | `>= 90` / `>= 180` |
 | --- | --- | --- | --- |
 | `notes_7d > 0` | `NOT_MATCH` | `NOT_MATCH` | `NOT_MATCH` |
-| `notes_7d == 0`, `notes_60d == 0` | `UNKNOWN` | `MATCH` | `UNKNOWN` |
-| `notes_7d == 0`, `notes_60d > 0` | `UNKNOWN` | `NOT_MATCH` | `UNKNOWN` |
+| `notes_7d == 0`, `notes_60d == 0` | `MATCH` | `MATCH` | `UNKNOWN` |
+| `notes_7d == 0`, `notes_60d > 0` | `UNKNOWN` | `NOT_MATCH` | `NOT_MATCH` |
 
 The `notes_7d > 0` row proves recent activity and may cheaply exclude every
 supported long-inactivity threshold.  The zero-60-day row is deliberately
@@ -68,11 +68,18 @@ fallback-eligible but causes no provider call by itself.
 The new service/domain primitive accepts execution-only
 `planned_assignable_target` and `max_provider_enrichment` parameters.  They
 are not part of the immutable seller rule.  It evaluates the supplied
-deterministically ordered candidates cheaply first, counts already assignable
-matches, and considers unknown candidates in that order only while the target
-is unmet and provider budget remains.  It stops immediately when either limit
-is met.  The primitive exposes an API-compatible boundary; it does not couple
-to unfinished C3A UI/Candidate-Run orchestration.
+deterministically ordered candidates cheaply first and considers unresolved
+activity candidates only while the full Candidate policy still needs eligible
+candidates and provider budget remains.  A `LONG_INACTIVITY` match alone is
+not assignable: the upper execution planner must supply or maintain the
+authoritative complete-policy eligibility count when D1A.1 does not own that
+evaluation.  For example, a target of 30 with 18 fully eligible candidates
+needs 12 additional *fully eligible* candidates; D1A.1 must not stop merely
+because it has found 12 activity matches that fail another Candidate
+criterion.  It stops immediately when the upper planner reports the target
+met or its own provider budget is met.  The primitive exposes an
+API-compatible boundary; it does not couple to unfinished C3A
+UI/Candidate-Run orchestration.
 
 Manual refresh uses the same explicit bounded path and existing provider
 governance plus lease/locking protections.  There is no page-open trigger,
