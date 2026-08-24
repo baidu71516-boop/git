@@ -9,9 +9,10 @@ uses a provider credential.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections import deque
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,8 @@ from backend_core.content_activity.models import (
 )
 from backend_core.content_activity.service import ContentActivityError, ContentActivityService
 from backend_core.content_activity.tikhub_xhs import (
+    HttpRequestLimits,
+    HttpTransportResponse,
     HttpxAsyncTransport,
     TikHubXhsClient,
     XhsActivityAttempt,
@@ -185,6 +188,25 @@ class DelayedByteStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+@dataclass(slots=True)
+class ImmediateTransport:
+    """A deterministic completed response used to exercise adapter-side parsing."""
+
+    response: HttpTransportResponse
+    calls: int = 0
+
+    async def get(
+        self,
+        *,
+        path: str,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        limits: HttpRequestLimits,
+    ) -> HttpTransportResponse:
+        self.calls += 1
+        return self.response
 
 
 def _enabled_settings(
@@ -566,6 +588,94 @@ def test_postgres_provider_deadline_settles_request_and_releases_resources(
                 )
                 trusted_projection = await _projection(session, account.id)
                 trusted_publication_at = trusted_projection.last_publication_at
+
+                # The transport has already completed. This intentionally makes
+                # JSON parsing and V1 validation consume the provider deadline
+                # synchronously, without a live endpoint or background thread.
+                large_notes = [
+                    {
+                        "note": {
+                            "note_id": f"large-parse-{index:05d}",
+                            "type": "normal",
+                            "create_time": 1719579078,
+                        }
+                    }
+                    for index in range(25_000)
+                ]
+                large_body = json.dumps(
+                    {"code": 200, "data": {"data": {"has_more": False, "notes": large_notes}}},
+                    separators=(",", ":"),
+                ).encode()
+                assert 1_800_000 <= len(large_body) < 2 * 1024 * 1024
+                parse_transport = ImmediateTransport(
+                    HttpTransportResponse(status_code=200, body=large_body)
+                )
+                parse_settings = Settings(
+                    **{
+                        **settings.model_dump(),
+                        "content_activity_http_connect_timeout_seconds": 0.02,
+                        "content_activity_http_read_timeout_seconds": 0.02,
+                        "content_activity_http_pool_timeout_seconds": 0.02,
+                        "content_activity_http_total_timeout_seconds": 0.05,
+                        "content_activity_http_max_response_bytes": 2 * 1024 * 1024,
+                    }
+                )
+                service.client = TikHubXhsClient(
+                    parse_settings,
+                    transport=parse_transport,
+                    clock=lambda: RUN_AS_OF,
+                )
+                parse_timeout_request = (
+                    await service.create_xhs_refresh_requests(
+                        platform_account_ids=(account.id,),
+                        idempotency_key="provider-deadline-large-parse",
+                        operator_id=None,
+                        department_id=None,
+                        ip="192.0.2.42",
+                        user_agent="content-activity-runtime-postgres-test",
+                    )
+                )[0]
+                started_at = asyncio.get_running_loop().time()
+                parse_timed_out = await service.process_refresh_request(
+                    parse_timeout_request.request_token
+                )
+                parse_elapsed = asyncio.get_running_loop().time() - started_at
+
+                assert parse_timed_out.claimed
+                assert parse_timed_out.state is ContentActivityRefreshRequestState.FAILED
+                assert parse_timed_out.observation_id is not None
+                assert parse_elapsed >= 0.05
+                assert parse_elapsed < 1.0
+                assert parse_transport.calls == 1
+
+                after_parse_timeout = await _projection(session, account.id)
+                assert (
+                    after_parse_timeout.latest_attempt_observation_id
+                    == parse_timed_out.observation_id
+                )
+                assert (
+                    after_parse_timeout.latest_attempt_observation_status
+                    is ContentActivityObservationStatus.PROVIDER_ERROR
+                )
+                assert (
+                    after_parse_timeout.latest_attempt_provider_error_class
+                    is ContentActivityProviderErrorClass.TIMEOUT
+                )
+                assert after_parse_timeout.latest_attempt_provider_error_code == "TRANSPORT_TIMEOUT"
+                assert after_parse_timeout.trusted_observation_id == trusted_observation_id
+                assert after_parse_timeout.last_publication_at == trusted_publication_at
+
+                persisted_parse_request = await session.scalar(
+                    select(ContentActivityRefreshRequest)
+                    .where(
+                        ContentActivityRefreshRequest.request_token
+                        == parse_timeout_request.request_token
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                assert persisted_parse_request is not None
+                assert persisted_parse_request.lease_expires_at is None
+                assert persisted_parse_request.state is ContentActivityRefreshRequestState.FAILED
 
                 deadline_body = b'{"code":200,"data":{"data":{"has_more":false,"notes":[]}}}'
                 chunk_size = max(1, (len(deadline_body) + 9) // 10)

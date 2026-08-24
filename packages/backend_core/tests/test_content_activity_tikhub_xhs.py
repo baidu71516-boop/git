@@ -140,6 +140,22 @@ def _drip_chunks(body: bytes, *, count: int) -> tuple[bytes, ...]:
     return tuple(body[index : index + chunk_size] for index in range(0, len(body), chunk_size))
 
 
+def _large_valid_activity_payload() -> bytes:
+    """Near-limit, deterministic V1 payload that makes validation materially synchronous."""
+
+    notes = [
+        {
+            "note": {
+                "note_id": f"large-parse-{index:05d}",
+                "type": "normal",
+                "create_time": 1719579078,
+            }
+        }
+        for index in range(25_000)
+    ]
+    return _activity_payload(has_more=False, notes=notes)
+
+
 def test_v1_registry_artifacts_and_source_controlled_fixture_digests_are_intact() -> None:
     assert_xhs_v1_registry_integrity()
 
@@ -227,20 +243,18 @@ def test_activity_schema_uses_max_not_provider_order_and_preserves_tied_count() 
     assert attempt.co_latest_publication_count == 2
     assert attempt.item_count == 3
     assert attempt.request_count == 1
-    assert transport.calls == [
-        {
-            "path": XHS_GET_USER_POSTED_NOTES_ENDPOINT,
-            "params": {"user_id": "synthetic-userid", "cursor": ""},
-            "headers": {"Authorization": "Bearer synthetic-test-token"},
-            "limits": HttpRequestLimits(
-                connect_timeout_seconds=2.0,
-                read_timeout_seconds=8.0,
-                pool_timeout_seconds=2.0,
-                total_timeout_seconds=10.0,
-                max_response_bytes=256 * 1024,
-            ),
-        }
-    ]
+    assert len(transport.calls) == 1
+    request = transport.calls[0]
+    assert request["path"] == XHS_GET_USER_POSTED_NOTES_ENDPOINT
+    assert request["params"] == {"user_id": "synthetic-userid", "cursor": ""}
+    assert request["headers"] == {"Authorization": "Bearer synthetic-test-token"}
+    assert isinstance(request["limits"], HttpRequestLimits)
+    assert request["limits"].connect_timeout_seconds == 2.0
+    assert request["limits"].read_timeout_seconds == 8.0
+    assert request["limits"].pool_timeout_seconds == 2.0
+    assert request["limits"].total_timeout_seconds == 10.0
+    assert request["limits"].max_response_bytes == 256 * 1024
+    assert request["limits"].absolute_deadline is not None
 
 
 def test_has_more_true_stops_after_one_call_and_never_preserves_partial_maximum() -> None:
@@ -632,6 +646,64 @@ def test_fast_drip_completes_inside_total_wall_clock_deadline() -> None:
             await http_client.aclose()
 
     asyncio.run(scenario())
+
+
+def test_large_valid_parse_past_absolute_deadline_fails_closed() -> None:
+    """A parsed but late 25,000-note payload cannot become trusted evidence."""
+
+    response_body = _large_valid_activity_payload()
+    assert 1_800_000 <= len(response_body) < 2 * 1024 * 1024
+    transport = RecordingTransport(HttpTransportResponse(status_code=200, body=response_body))
+    client = TikHubXhsClient(
+        _enabled_settings(
+            content_activity_http_connect_timeout_seconds=0.02,
+            content_activity_http_read_timeout_seconds=0.02,
+            content_activity_http_pool_timeout_seconds=0.02,
+            content_activity_http_total_timeout_seconds=0.05,
+            content_activity_http_max_response_bytes=2 * 1024 * 1024,
+        ),
+        transport=transport,
+        clock=lambda: OBSERVED_AT,
+    )
+
+    async def scenario() -> None:
+        started_at = asyncio.get_running_loop().time()
+        attempt = await client.observe_posted_notes(verified_userid="synthetic-userid")
+        elapsed = asyncio.get_running_loop().time() - started_at
+
+        assert elapsed >= 0.05
+        assert elapsed < 1.0
+        assert not attempt.trusted
+        assert attempt.observation_status is ContentActivityObservationStatus.PROVIDER_ERROR
+        assert attempt.coverage_status is ContentActivityCoverageStatus.UNKNOWN
+        assert attempt.activity_result is ContentActivityResult.UNDETERMINED
+        assert attempt.provider_error_class is ContentActivityProviderErrorClass.TIMEOUT
+        assert attempt.provider_error_code == "TRANSPORT_TIMEOUT"
+        assert attempt.item_count == 0
+
+    asyncio.run(scenario())
+    assert len(transport.calls) == 1
+
+
+def test_small_valid_parse_completes_inside_absolute_deadline() -> None:
+    """The absolute deadline still accepts a normal complete response in budget."""
+
+    transport = RecordingTransport(_response("xhs_get_user_posted_notes_success_v1.json"))
+    client = TikHubXhsClient(
+        _enabled_settings(
+            content_activity_http_connect_timeout_seconds=0.02,
+            content_activity_http_read_timeout_seconds=0.02,
+            content_activity_http_pool_timeout_seconds=0.02,
+            content_activity_http_total_timeout_seconds=0.05,
+        ),
+        transport=transport,
+        clock=lambda: OBSERVED_AT,
+    )
+
+    attempt = asyncio.run(client.observe_posted_notes(verified_userid="synthetic-userid"))
+
+    assert attempt.trusted
+    assert attempt.activity_result is ContentActivityResult.PUBLICATION_FOUND
 
 
 def test_httpx_read_timeout_still_precedes_later_total_wall_clock_deadline() -> None:

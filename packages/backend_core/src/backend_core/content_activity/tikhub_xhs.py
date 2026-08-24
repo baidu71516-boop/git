@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Protocol, TypeGuard
 
@@ -81,6 +81,9 @@ class HttpRequestLimits:
     pool_timeout_seconds: float
     total_timeout_seconds: float
     max_response_bytes: int
+    # Created once by the adapter at provider-call entry.  Direct transport
+    # callers leave this unset and receive a deadline at transport entry.
+    absolute_deadline: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,11 +134,14 @@ class HttpxAsyncTransport:
             write=limits.total_timeout_seconds,
             pool=limits.pool_timeout_seconds,
         )
+        deadline = limits.absolute_deadline
+        if deadline is None:
+            deadline = asyncio.get_running_loop().time() + limits.total_timeout_seconds
         # HTTPX applies the limits above per connect/read/write/pool operation.
         # This outer scope is the provider-call deadline: it begins immediately
         # before request start and stays active through headers, every stream
         # chunk, size validation, and body assembly.
-        async with asyncio.timeout(limits.total_timeout_seconds):
+        async with asyncio.timeout_at(deadline):
             async with self._client.stream(
                 "GET",
                 path,
@@ -309,14 +315,20 @@ class TikHubXhsClient:
             )
 
         try:
+            headers = self._provider_headers()
+            deadline = self._provider_deadline()
+            limits = replace(self._limits, absolute_deadline=deadline)
             # The transport owns its own exact request-start deadline.  Keep an
             # adapter scope too so parsed/validated completion cannot outlive
             # the configured provider-call budget.
-            async with asyncio.timeout(self._limits.total_timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 response = await self._request(
                     path=XHS_GET_USER_INFO_ENDPOINT,
                     params={"share_text": bootstrap_input},
+                    headers=headers,
+                    limits=limits,
                 )
+                self._require_unexpired_provider_deadline(deadline)
                 http_failure = _identity_http_failure(response.status_code)
                 if http_failure is not None:
                     return http_failure
@@ -332,6 +344,7 @@ class TikHubXhsClient:
                 try:
                     userid = parse_xhs_user_info_response(response.body)
                 except XhsSemanticFailure:
+                    self._require_unexpired_provider_deadline(deadline)
                     return _identity_failure(
                         observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
                         error_class=ContentActivityProviderErrorClass.SEMANTIC_FAILURE,
@@ -340,6 +353,7 @@ class TikHubXhsClient:
                         request_count=1,
                     )
                 except XhsSchemaViolation as exc:
+                    self._require_unexpired_provider_deadline(deadline)
                     return _identity_failure(
                         observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
                         error_class=ContentActivityProviderErrorClass.SCHEMA_DRIFT,
@@ -348,6 +362,7 @@ class TikHubXhsClient:
                         request_count=1,
                     )
 
+                self._require_unexpired_provider_deadline(deadline)
                 return XhsIdentityResolution(
                     observation_status=ContentActivityObservationStatus.COMPLETE,
                     userid=userid,
@@ -428,14 +443,20 @@ class TikHubXhsClient:
             )
 
         try:
+            headers = self._provider_headers()
+            deadline = self._provider_deadline()
+            limits = replace(self._limits, absolute_deadline=deadline)
             # See the resolver path above.  This keeps the deadline active
             # until the full response has been parsed into a trusted-or-failed
             # attempt, not merely until headers or a partial stream arrive.
-            async with asyncio.timeout(self._limits.total_timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 response = await self._request(
                     path=XHS_GET_USER_POSTED_NOTES_ENDPOINT,
                     params={"user_id": verified_userid, "cursor": ""},
+                    headers=headers,
+                    limits=limits,
                 )
+                self._require_unexpired_provider_deadline(deadline)
                 http_failure = _activity_http_failure(response.status_code, now)
                 if http_failure is not None:
                     return http_failure
@@ -453,6 +474,7 @@ class TikHubXhsClient:
                 try:
                     parsed = parse_xhs_posted_notes_response(response.body, observed_at=now)
                 except XhsSemanticFailure:
+                    self._require_unexpired_provider_deadline(deadline)
                     return _activity_failure(
                         observed_at=now,
                         observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
@@ -463,6 +485,7 @@ class TikHubXhsClient:
                         request_count=1,
                     )
                 except XhsSchemaViolation as exc:
+                    self._require_unexpired_provider_deadline(deadline)
                     return _activity_failure(
                         observed_at=now,
                         observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
@@ -474,6 +497,7 @@ class TikHubXhsClient:
                     )
 
                 if parsed.has_more:
+                    self._require_unexpired_provider_deadline(deadline)
                     return _activity_failure(
                         observed_at=now,
                         observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
@@ -485,6 +509,7 @@ class TikHubXhsClient:
                         request_count=1,
                     )
                 if not parsed.publications:
+                    self._require_unexpired_provider_deadline(deadline)
                     return XhsActivityAttempt(
                         observation_status=ContentActivityObservationStatus.COMPLETE,
                         coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
@@ -511,6 +536,7 @@ class TikHubXhsClient:
                     key=lambda publication: publication.publication_id,
                 )
                 representative = latest[0]
+                self._require_unexpired_provider_deadline(deadline)
                 return XhsActivityAttempt(
                     observation_status=ContentActivityObservationStatus.COMPLETE,
                     coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
@@ -578,19 +604,43 @@ class TikHubXhsClient:
             max_response_bytes=self._settings.content_activity_http_max_response_bytes,
         )
 
-    async def _request(self, *, path: str, params: Mapping[str, str]) -> HttpTransportResponse:
+    async def _request(
+        self,
+        *,
+        path: str,
+        params: Mapping[str, str],
+        headers: Mapping[str, str],
+        limits: HttpRequestLimits,
+    ) -> HttpTransportResponse:
         if self._transport is None:
             raise OSError("transport unavailable")
+        return await self._transport.get(
+            path=path,
+            params=params,
+            headers=headers,
+            limits=limits,
+        )
+
+    def _provider_headers(self) -> Mapping[str, str]:
+        """Resolve a configured token before the provider-call clock starts."""
+
         token = self._settings.tikhub_api_key
         token_value = token.get_secret_value() if token is not None else ""
         if not token_value.strip():
             raise OSError("token unavailable")
-        return await self._transport.get(
-            path=path,
-            params=params,
-            headers={"Authorization": f"Bearer {token_value}"},
-            limits=self._limits,
-        )
+        return {"Authorization": f"Bearer {token_value}"}
+
+    def _provider_deadline(self) -> float:
+        """Start one monotonic end-to-end deadline for a provider call."""
+
+        return asyncio.get_running_loop().time() + self._limits.total_timeout_seconds
+
+    @staticmethod
+    def _require_unexpired_provider_deadline(deadline: float) -> None:
+        """Reject synchronous work that ran past an active timeout callback."""
+
+        if asyncio.get_running_loop().time() >= deadline:
+            raise TimeoutError
 
 
 def parse_xhs_user_info_response(response_body: bytes) -> str:
