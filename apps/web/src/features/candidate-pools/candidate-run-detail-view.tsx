@@ -41,6 +41,7 @@ import {
   CANDIDATE_MEMBER_PAGE_SIZES,
 } from "./api";
 import {
+  candidateSelectionIdentitiesEqual,
   candidateSelectionActions,
   candidateSelectionCount,
   candidateSelectionPageState,
@@ -873,8 +874,10 @@ export function CandidateRunDetailView({
   ): boolean {
     const currentSelection = selectionIdentityRef.current;
     if (
-      currentSelection.generation !== generation ||
-      !candidateSelectionScopesEqual(currentSelection.scope, scope)
+      !candidateSelectionIdentitiesEqual(currentSelection, {
+        scope,
+        generation,
+      })
     ) {
       return false;
     }

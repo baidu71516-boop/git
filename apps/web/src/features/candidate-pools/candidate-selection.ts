@@ -10,6 +10,11 @@ export type CandidateSelectionScope = {
   runId: string;
 };
 
+export type CandidateSelectionIdentity = {
+  scope: CandidateSelectionScope;
+  generation: number;
+};
+
 export type CandidateSelectionState =
   | {
       scope: CandidateSelectionScope;
@@ -101,6 +106,16 @@ export function candidateSelectionScopesEqual(
 ): boolean {
   return (
     left.candidatePoolId === right.candidatePoolId && left.runId === right.runId
+  );
+}
+
+export function candidateSelectionIdentitiesEqual(
+  left: CandidateSelectionIdentity,
+  right: CandidateSelectionIdentity,
+): boolean {
+  return (
+    left.generation === right.generation &&
+    candidateSelectionScopesEqual(left.scope, right.scope)
   );
 }
 

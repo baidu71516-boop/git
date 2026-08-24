@@ -4,6 +4,7 @@ import {
   CANDIDATE_SELECTION_MAX_MEMBER_IDS,
   candidateSelectionActions,
   candidateSelectionCount,
+  candidateSelectionIdentitiesEqual,
   candidateSelectionMembers,
   candidateSelectionPageState,
   candidateSelectionPayload,
@@ -342,5 +343,25 @@ describe("Candidate Pool selection domain", () => {
     );
     expect(staleClear).toBe(selected);
     expect(candidateSelectionCount(staleClear)).toBe(1);
+  });
+
+  it("does not let an old A completion affect a fresh A selection after A-B-A", () => {
+    const oldIdentity = { scope, generation: 0 };
+    const freshIdentity = { scope, generation: 2 };
+    const freshSelection = reduce([
+      candidateSelectionActions.toggleMember(member("fresh"), true),
+    ]);
+    const afterOldCompletion = candidateSelectionIdentitiesEqual(
+      freshIdentity,
+      oldIdentity,
+    )
+      ? reduceCandidateSelection(
+          freshSelection,
+          candidateSelectionActions.clearAll(oldIdentity.scope),
+        )
+      : freshSelection;
+
+    expect(afterOldCompletion).toBe(freshSelection);
+    expect(candidateSelectionCount(afterOldCompletion)).toBe(1);
   });
 });
