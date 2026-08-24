@@ -432,15 +432,16 @@
 
 .candidate-results-toolbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 14px;
+  gap: 8px 18px;
   min-height: 58px;
-  padding: 0 18px;
+  padding: 8px 18px;
   border-bottom: 1px solid #eef2f6;
 }
 
 .candidate-results-toolbar .ant-tabs {
+  flex: 1 1 260px;
   min-width: 0;
 }
 
@@ -448,10 +449,49 @@
   margin: 0;
 }
 
+.candidate-results-toolbar-controls {
+  display: flex;
+  flex: 1 1 560px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 14px;
+  min-width: 0;
+}
+
+.candidate-bulk-actions {
+  display: flex;
+  flex: 1 1 400px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px 12px;
+}
+
 .candidate-page-size-control {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.candidate-account {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.candidate-account > span:first-child,
+.candidate-account-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidate-account-meta {
+  color: var(--app-text-secondary);
+  font-size: 12px;
 }
 
 .candidate-run-history-header {
@@ -513,6 +553,16 @@
     align-items: flex-start;
     flex-direction: column;
     padding: 8px 12px;
+  }
+
+  .candidate-results-toolbar-controls,
+  .candidate-bulk-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .candidate-page-size-control {
+    margin-left: 0;
   }
 
   .candidate-pool-table .ant-table {

@@ -115,9 +115,9 @@ function selectedCandidateLabel(
     selection.mode === "ALL_MATCH" &&
     selectedCount === selection.matchCount
   ) {
-    return `已选择全部 ${selectedCount} 位符合条件达人`;
+    return `✓ 已全选 ${selectedCount} 人`;
   }
-  return `已选择 ${selectedCount} 位候选达人`;
+  return `已选 ${selectedCount} 人`;
 }
 
 function ambiguityErrorMessage(error: unknown): string | null {
@@ -224,13 +224,18 @@ function Identity({ member }: { member: CandidateMember }) {
 function Account({ member }: { member: CandidateMember }) {
   const account = member.platform_account;
   return (
-    <span>
-      {platformLabel(account.platform)} · {account.account_name}
-      {account.account_handle ? (
-        <Text type="secondary"> · @{account.account_handle}</Text>
+    <span className="candidate-account" title={`候选记录 ${member.id}`}>
+      <span>
+        {platformLabel(account.platform)} · {account.account_name}
+      </span>
+      {account.account_handle || !account.is_active ? (
+        <span className="candidate-account-meta">
+          {account.account_handle ? `@${account.account_handle}` : null}
+          {!account.is_active
+            ? `${account.account_handle ? " · " : ""}账号已停用`
+            : null}
+        </span>
       ) : null}
-      {!account.is_active ? <Text type="secondary"> · 账号已停用</Text> : null}
-      <Text type="secondary"> · 候选记录 {member.id}</Text>
     </span>
   );
 }
@@ -1006,13 +1011,60 @@ export function CandidateRunDetailView({
                   { key: "UNKNOWN", label: "信息不足" },
                 ]}
               />
-              <Space wrap>
+              <div className="candidate-results-toolbar-controls">
+                {canWrite ? (
+                  <div className="candidate-bulk-actions">
+                    <Text type="secondary">{selectedLabel}</Text>
+                    <Space size="small" wrap>
+                      <Button
+                        size="small"
+                        disabled={!pageSelection.selectedCount}
+                        onClick={deselectCurrentPage}
+                      >
+                        取消本页
+                      </Button>
+                      <Button
+                        size="small"
+                        disabled={!selectedCount}
+                        onClick={() =>
+                          dispatchSelection(
+                            candidateSelectionActions.clearAll(selection.scope),
+                          )
+                        }
+                      >
+                        清空
+                      </Button>
+                      {run.match_count > 0 && selection.mode !== "ALL_MATCH" ? (
+                        <Button
+                          size="small"
+                          onClick={() =>
+                            dispatchSelection(
+                              candidateSelectionActions.selectAllMatch(
+                                run.match_count,
+                              ),
+                            )
+                          }
+                        >
+                          全选 {run.match_count} 人
+                        </Button>
+                      ) : null}
+                      <Button
+                        type="primary"
+                        size="small"
+                        disabled={!selectionPayload}
+                        onClick={openCampaignSelector}
+                      >
+                        加入拓客活动
+                      </Button>
+                    </Space>
+                  </div>
+                ) : null}
                 <span className="candidate-page-size-control">
                   <Text id="candidate-member-page-size-label" type="secondary">
-                    每页数量
+                    每页
                   </Text>
                   <Select<CandidateMemberPageSize>
-                    aria-labelledby="candidate-member-page-size-label"
+                    aria-label="每页数量"
                     options={CANDIDATE_MEMBER_PAGE_SIZES.map((value) => ({
                       value,
                       label: String(value),
@@ -1033,48 +1085,7 @@ export function CandidateRunDetailView({
                     }}
                   />
                 </span>
-                {canWrite ? (
-                  <>
-                    <Text type="secondary">{selectedLabel}</Text>
-                    <Button
-                      disabled={!pageSelection.selectedCount}
-                      onClick={deselectCurrentPage}
-                    >
-                      取消本页选择
-                    </Button>
-                    <Button
-                      disabled={!selectedCount}
-                      onClick={() =>
-                        dispatchSelection(
-                          candidateSelectionActions.clearAll(selection.scope),
-                        )
-                      }
-                    >
-                      清空选择
-                    </Button>
-                    {run.match_count > 0 ? (
-                      <Button
-                        onClick={() =>
-                          dispatchSelection(
-                            candidateSelectionActions.selectAllMatch(
-                              run.match_count,
-                            ),
-                          )
-                        }
-                      >
-                        选择全部 {run.match_count} 位符合条件达人
-                      </Button>
-                    ) : null}
-                    <Button
-                      type="primary"
-                      disabled={!selectionPayload}
-                      onClick={openCampaignSelector}
-                    >
-                      加入拓客活动
-                    </Button>
-                  </>
-                ) : null}
-              </Space>
+              </div>
             </div>
             {membersQuery.isPending ? (
               <Skeleton active paragraph={{ rows: 7 }} />

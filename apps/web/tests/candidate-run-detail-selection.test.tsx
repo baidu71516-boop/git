@@ -346,13 +346,13 @@ describe("Candidate Run bulk selection", () => {
       name: memberCheckboxName("two"),
     });
     fireEvent.click(rowCheckbox("two"));
-    expect(screen.getByText("已选择 2 位候选达人")).toBeInTheDocument();
+    expect(screen.getByText("已选 2 人")).toBeInTheDocument();
     await choosePageSize(
       screen.getByRole("combobox", { name: "每页数量" }),
       "100",
     );
     await waitFor(() => expect(rowCheckbox("one")).toBeChecked());
-    expect(screen.getByText("已选择 2 位候选达人")).toBeInTheDocument();
+    expect(screen.getByText("已选 2 人")).toBeInTheDocument();
   });
 
   it("keeps the rendered selection lifecycle scoped across A-B-A", () => {
@@ -489,11 +489,9 @@ describe("Candidate Run bulk selection", () => {
     renderView(queryClient);
 
     await screen.findByRole("button", {
-      name: "选择全部 2 位符合条件达人",
+      name: "全选 2 人",
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "选择全部 2 位符合条件达人" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "全选 2 人" }));
     fireEvent.click(screen.getByRole("button", { name: "加入拓客活动" }));
     fireEvent.click(await screen.findByRole("radio", { name: /目标拓客活动/ }));
     const dialog = screen.getByRole("dialog");
@@ -553,7 +551,10 @@ describe("Candidate Run bulk selection", () => {
       ),
     ).toBeInTheDocument();
     expect(rowCheckbox("one")).toBeChecked();
-    expect(screen.getAllByText("已选择全部 2 位符合条件达人")).toHaveLength(2);
+    expect(screen.getAllByText("✓ 已全选 2 人")).toHaveLength(2);
+    expect(
+      screen.queryByRole("button", { name: "全选 2 人" }),
+    ).not.toBeInTheDocument();
   });
 
   for (const lateCompletion of [
@@ -626,7 +627,7 @@ describe("Candidate Run bulk selection", () => {
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
       expect(rowCheckbox("next")).toBeChecked();
       expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getAllByText("已选择 1 位候选达人")).not.toHaveLength(0);
+      expect(screen.getAllByText("已选 1 人")).not.toHaveLength(0);
     });
   }
 });
