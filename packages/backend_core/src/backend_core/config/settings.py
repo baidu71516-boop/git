@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     content_activity_refresh_reconcile_interval_seconds: int = Field(default=30, ge=1, le=3_600)
     content_activity_refresh_reconcile_batch_size: int = Field(default=100, ge=1, le=1_000)
     content_activity_trusted_freshness_days: int = Field(default=7, ge=1)
+    grey_dolphin_activity_freshness_days: int = Field(default=7, ge=1)
     content_activity_http_connect_timeout_seconds: float = Field(default=2.0, gt=0, le=60)
     content_activity_http_read_timeout_seconds: float = Field(default=8.0, gt=0, le=60)
     content_activity_http_pool_timeout_seconds: float = Field(default=2.0, gt=0, le=60)

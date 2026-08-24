@@ -34,12 +34,18 @@ from backend_core.growth.targeting import (
     CandidateFactBundle,
     CollectionContextSnapshot,
     ContentActivityFact,
+    GreyDolphinActivityFact,
     SellerTargetingPolicy,
     TargetingEvaluation,
 )
-from backend_core.imports.enums import ImportJobFileStatus, ImportJobStatus, ImportRowAction
+from backend_core.imports.enums import (
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportRowAction,
+    ImportSourceType,
+)
 from backend_core.imports.models import CollectionJob, ImportJob, ImportJobFile, ImportRow
-from backend_core.influencers.enums import ContactType, Platform
+from backend_core.influencers.enums import ContactType, DataSource, Platform
 from backend_core.influencers.freshness import FreshnessPolicy
 from backend_core.influencers.models import (
     Influencer,
@@ -545,7 +551,7 @@ class CandidatePoolRepository:
                 freshness_policy=freshness_policy,
                 include_content_activity=(
                     isinstance(policy, SellerTargetingPolicy)
-                    and policy.content_activity is not None
+                    and (policy.content_activity is not None or policy.long_inactivity is not None)
                 ),
             )
             yield facts
@@ -595,11 +601,25 @@ class CandidatePoolRepository:
         metrics_rows = tuple(
             (
                 await self.session.execute(
-                    select(InfluencerCurrentMetrics).where(
-                        InfluencerCurrentMetrics.platform_account_id.in_(account_ids)
+                    select(InfluencerCurrentMetrics, ImportRow, ImportJob, ImportJobFile)
+                    .outerjoin(
+                        ImportRow,
+                        and_(
+                            ImportRow.id == InfluencerCurrentMetrics.last_import_row_id,
+                            ImportRow.import_job_id == InfluencerCurrentMetrics.last_import_job_id,
+                        ),
                     )
+                    .outerjoin(ImportJob, ImportJob.id == ImportRow.import_job_id)
+                    .outerjoin(
+                        ImportJobFile,
+                        and_(
+                            ImportJobFile.id == ImportRow.import_job_file_id,
+                            ImportJobFile.import_job_id == ImportRow.import_job_id,
+                        ),
+                    )
+                    .where(InfluencerCurrentMetrics.platform_account_id.in_(account_ids))
                 )
-            ).scalars()
+            ).all()
         )
         contacts = tuple(
             (
@@ -640,9 +660,9 @@ class CandidatePoolRepository:
 
         account_sources = {account.id: account.source for account in accounts}
         metrics_by_account = {
-            row.platform_account_id: row
-            for row in metrics_rows
-            if account_sources.get(row.platform_account_id) == row.source
+            metric.platform_account_id: (metric, import_row, import_job, import_file)
+            for metric, import_row, import_job, import_file in metrics_rows
+            if account_sources.get(metric.platform_account_id) == metric.source
         }
         contacts_by_influencer: dict[UUID, set[ContactType]] = defaultdict(set)
         for influencer_id, contact_type in contacts:
@@ -655,7 +675,11 @@ class CandidatePoolRepository:
 
         result: list[CandidateFactBundle] = []
         for account in accounts:
-            metric = metrics_by_account.get(account.id)
+            metric_context = metrics_by_account.get(account.id)
+            metric = metric_context[0] if metric_context is not None else None
+            metric_import_row = metric_context[1] if metric_context is not None else None
+            metric_import_job = metric_context[2] if metric_context is not None else None
+            metric_import_file = metric_context[3] if metric_context is not None else None
             state, state_import_row = state_by_account.get(account.id, (None, None))
             metric_values = metric.metrics if metric is not None else {}
             creator_tags, creator_import_job_ids = self._creator_classification(
@@ -684,6 +708,13 @@ class CandidatePoolRepository:
                     freshness_observed_at=last_observed,
                     source_updated_at=_utc(state.source_updated_at) if state is not None else None,
                     content_activity=content_activity_by_account.get(account.id),
+                    grey_dolphin_activity=self._grey_dolphin_activity_fact(
+                        account=account,
+                        metric=metric,
+                        import_row=metric_import_row,
+                        import_job=metric_import_job,
+                        import_file=metric_import_file,
+                    ),
                     source_collection_job_id=source_collection_job_id,
                     collection_industry=(
                         collection_context.industry if collection_context else None
@@ -697,6 +728,61 @@ class CandidatePoolRepository:
                 )
             )
         return tuple(result)
+
+    @classmethod
+    def _grey_dolphin_activity_fact(
+        cls,
+        *,
+        account: InfluencerPlatformAccount,
+        metric: InfluencerCurrentMetrics | None,
+        import_row: ImportRow | None,
+        import_job: ImportJob | None,
+        import_file: ImportJobFile | None,
+    ) -> GreyDolphinActivityFact | None:
+        """Return only a provenance-bound coherent Huitun aggregate snapshot.
+
+        ``InfluencerCurrentMetrics.metrics`` stores both counters together, so
+        the row is the atomic coherence boundary.  Its exact last-import row
+        must also be a confirmed manual Huitun export with a real source
+        acquisition time; imported-at, account creation source, and a later
+        unrelated Huitun observation never make an aggregate usable.
+        """
+
+        if (
+            account.source is not DataSource.HUITUN
+            or metric is None
+            or metric.source is not DataSource.HUITUN
+            or import_row is None
+            or import_job is None
+            or import_file is None
+            or import_row.id != metric.last_import_row_id
+            or import_row.import_job_id != metric.last_import_job_id
+            or import_row.committed_at is None
+            or import_row.committed_action
+            not in {
+                ImportRowAction.CREATE,
+                ImportRowAction.UPDATE,
+                ImportRowAction.NO_CHANGE,
+            }
+            or import_job.id != metric.last_import_job_id
+            or import_job.status is not ImportJobStatus.COMPLETED
+            or import_job.confirmed_revision is None
+            or import_row.preview_revision != import_job.confirmed_revision
+            or import_job.source_type is not ImportSourceType.MANUAL_HUITUN_EXPORT
+            or import_file.status is not ImportJobFileStatus.READY
+            or import_file.source_acquired_at is None
+            or import_file.source_acquired_at_confirmation_required
+        ):
+            return None
+        metrics = metric.metrics if isinstance(metric.metrics, dict) else {}
+        return GreyDolphinActivityFact(
+            observed_at=_utc(import_file.source_acquired_at),
+            source_updated_at=_utc(metric.source_updated_at),
+            notes_7d=cls._strict_metric(metrics.get("notes_7d")),
+            notes_60d=cls._strict_metric(metrics.get("notes_60d")),
+            import_job_id=metric.last_import_job_id,
+            import_row_id=metric.last_import_row_id,
+        )
 
     async def _content_activity_facts_as_of(
         self,

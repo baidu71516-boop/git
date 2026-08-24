@@ -41,6 +41,10 @@ export type TargetingPolicyDefinition =
         schema_version?: number;
         minimum_inactive_days?: number;
       } | null;
+      long_inactivity?: {
+        schema_version?: number;
+        minimum_inactive_days?: 30 | 60 | 90 | 180;
+      } | null;
       platforms?: string[];
       sources?: string[];
     }

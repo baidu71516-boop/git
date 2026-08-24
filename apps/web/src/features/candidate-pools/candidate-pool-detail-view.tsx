@@ -91,6 +91,12 @@ function PolicyDefinition({
           ? `断更不少于 ${seller.content_activity.minimum_inactive_days} 天`
           : null,
       ],
+      [
+        "长期断更",
+        seller.long_inactivity?.minimum_inactive_days != null
+          ? `断更不少于 ${seller.long_inactivity.minimum_inactive_days} 天`
+          : null,
+      ],
       ["标签", seller.tags_exact_any?.join("、") ?? null],
       ["平台", seller.platforms?.join("、") ?? null],
       ["数据来源", seller.sources?.join("、") ?? null],

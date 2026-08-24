@@ -175,6 +175,35 @@ class ContentActivityFreshnessPolicy:
         return evaluation_time - self.max_age <= observed <= evaluation_time
 
 
+@dataclass(frozen=True, slots=True)
+class GreyDolphinActivityFreshnessPolicy:
+    """UTC validity for one imported Grey Dolphin aggregate snapshot.
+
+    This is deliberately separate from both source-data freshness and trusted
+    public-content freshness: it only decides whether a coherent `notes_7d` /
+    `notes_60d` observation may support a coarse business decision.
+    """
+
+    max_age: timedelta = timedelta(days=7)
+
+    def __post_init__(self) -> None:
+        if self.max_age < timedelta(0):
+            raise ValueError("Grey Dolphin activity max_age must be nonnegative")
+
+    @classmethod
+    def from_day_threshold(cls, days: int = 7) -> GreyDolphinActivityFreshnessPolicy:
+        if type(days) is not int or days < 0:
+            raise ValueError("Grey Dolphin activity freshness days must be a nonnegative integer")
+        return cls(max_age=timedelta(days=days))
+
+    def is_current(self, observed_at: datetime | None, as_of: datetime) -> bool:
+        if observed_at is None:
+            return False
+        observed = _as_utc(observed_at, name="grey_dolphin_observed_at")
+        evaluation_time = _as_utc(as_of, name="as_of")
+        return evaluation_time - self.max_age <= observed <= evaluation_time
+
+
 def _as_utc(value: datetime, *, name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
@@ -183,6 +212,7 @@ def _as_utc(value: datetime, *, name: str) -> datetime:
 
 __all__ = [
     "ContentActivityFreshnessPolicy",
+    "GreyDolphinActivityFreshnessPolicy",
     "FreshnessEvaluation",
     "FreshnessPolicy",
     "FreshnessStatus",

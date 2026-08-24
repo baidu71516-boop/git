@@ -58,7 +58,11 @@ from backend_core.growth.targeting import (
     parse_targeting_policy,
 )
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
-from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessPolicy
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    GreyDolphinActivityFreshnessPolicy,
+)
 from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
     PlatformAccountIdentitySummary,
@@ -90,6 +94,7 @@ class CandidatePoolService:
         *,
         freshness_policy: FreshnessPolicy,
         content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
+        grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy | None = None,
     ) -> None:
         self.session = session
         self.repository = CandidatePoolRepository(session)
@@ -101,6 +106,9 @@ class CandidatePoolService:
         # policy. It must not inherit Huitun/source freshness thresholds.
         self.content_activity_freshness_policy = (
             content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+        )
+        self.grey_dolphin_activity_freshness_policy = (
+            grey_dolphin_activity_freshness_policy or GreyDolphinActivityFreshnessPolicy()
         )
 
     @staticmethod
@@ -1112,6 +1120,9 @@ class CandidatePoolService:
                                 as_of=run.as_of,
                                 content_activity_freshness_policy=(
                                     self.content_activity_freshness_policy
+                                ),
+                                grey_dolphin_activity_freshness_policy=(
+                                    self.grey_dolphin_activity_freshness_policy
                                 ),
                             ),
                         )

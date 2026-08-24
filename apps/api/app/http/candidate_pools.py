@@ -23,7 +23,11 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import TargetingPolicyDefinition
-from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessPolicy
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    GreyDolphinActivityFreshnessPolicy,
+)
 from fastapi import APIRouter, Depends, Header, Query, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -91,6 +95,11 @@ def get_candidate_pool_service(
         ),
         content_activity_freshness_policy=ContentActivityFreshnessPolicy.from_day_threshold(
             settings.content_activity_trusted_freshness_days,
+        ),
+        grey_dolphin_activity_freshness_policy=(
+            GreyDolphinActivityFreshnessPolicy.from_day_threshold(
+                settings.grey_dolphin_activity_freshness_days,
+            )
         ),
     )
 

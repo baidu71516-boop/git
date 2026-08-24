@@ -127,9 +127,11 @@ function criterionConfiguredValue(
     value && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
-  if (criterion === "content_activity") {
+  if (criterion === "content_activity" || criterion === "long_inactivity") {
     const days = safeString(item.minimum_inactive_days);
-    return days ? `断更不少于 ${days} 天` : "—";
+    return days
+      ? `${criterion === "long_inactivity" ? "长期断更" : "断更"}不少于 ${days} 天`
+      : "—";
   }
   return safeList(item.allowed ?? item.minimum ?? item.maximum);
 }
@@ -147,6 +149,22 @@ function criterionObservedValue(
     if (inactiveDays) return `已断更 ${inactiveDays} 天`;
     const publication = safeString(item.last_publication_at);
     if (publication) return `最后公开：${candidateDateTime(publication)}`;
+  }
+  if (criterion === "long_inactivity") {
+    const source = safeString(item.source);
+    if (source === "GREY_DOLPHIN") {
+      if (safeString(item.notes_60d) === "0")
+        return "近60天无更新 · 来源：灰豚";
+      const notes7d = safeString(item.notes_7d);
+      if (notes7d !== null && notes7d !== "0")
+        return "近7天有更新 · 来源：灰豚";
+      return "断更状态：未知 · 来源：灰豚";
+    }
+    if (source === "TRUSTED_CONTENT_ACTIVITY") {
+      const inactiveDays = safeString(item.inactive_days);
+      if (inactiveDays) return `断更 ${inactiveDays} 天 · 来源：API验证`;
+    }
+    return "断更状态：未知";
   }
   return safeString(item.value ?? item.status) ?? "—";
 }

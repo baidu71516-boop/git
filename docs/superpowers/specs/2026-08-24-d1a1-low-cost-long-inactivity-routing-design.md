@@ -31,6 +31,11 @@ activity table.  This avoids duplicating imported source data while retaining
 the source, observed time, precision, status, and the two original values in
 the decision/audit result.  A migration is therefore not expected.
 
+`GREY_DOLPHIN_ACTIVITY_FRESHNESS_DAYS` controls this source-specific TTL and
+defaults to seven days.  It is intentionally separate from the trusted
+Content Activity TTL and is a configurable operational policy, not a permanent
+business assertion.
+
 ## Grey Dolphin interpretation
 
 Grey Dolphin evidence is usable only when both values are non-negative

@@ -32,7 +32,11 @@ from backend_core.content_activity.enums import (
 )
 from backend_core.imports.hashing import canonical_value, hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
-from backend_core.influencers.freshness import ContentActivityFreshnessPolicy, FreshnessStatus
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessStatus,
+    GreyDolphinActivityFreshnessPolicy,
+)
 
 
 class FrozenTargetingContract(BaseModel):
@@ -76,6 +80,13 @@ class TargetingReasonCode(StrEnum):
     FRESHNESS_MATCH = "FRESHNESS_MATCH"
     FRESHNESS_MISSING = "FRESHNESS_MISSING"
     FRESHNESS_NOT_MATCH = "FRESHNESS_NOT_MATCH"
+    LONG_INACTIVITY_CACHE_MATCH = "LONG_INACTIVITY_CACHE_MATCH"
+    LONG_INACTIVITY_CACHE_RECENT = "LONG_INACTIVITY_CACHE_RECENT"
+    LONG_INACTIVITY_GREY_DOLPHIN_INVALID = "LONG_INACTIVITY_GREY_DOLPHIN_INVALID"
+    LONG_INACTIVITY_GREY_DOLPHIN_MATCH = "LONG_INACTIVITY_GREY_DOLPHIN_MATCH"
+    LONG_INACTIVITY_GREY_DOLPHIN_RECENT = "LONG_INACTIVITY_GREY_DOLPHIN_RECENT"
+    LONG_INACTIVITY_GREY_DOLPHIN_STALE = "LONG_INACTIVITY_GREY_DOLPHIN_STALE"
+    LONG_INACTIVITY_UNKNOWN = "LONG_INACTIVITY_UNKNOWN"
     NO_COMPARISON_RULE = "NO_COMPARISON_RULE"
     NO_CURRENT_CONTACT = "NO_CURRENT_CONTACT"
     NO_CURRENT_EMAIL = "NO_CURRENT_EMAIL"
@@ -163,6 +174,20 @@ class ContentActivityConstraint(FrozenTargetingContract):
     minimum_inactive_days: StrictInt = Field(ge=1, le=3_650)
 
 
+class LongInactivityConstraint(FrozenTargetingContract):
+    """D1A.1 business threshold, independent from trusted Content Activity."""
+
+    schema_version: Literal[1] = 1
+    minimum_inactive_days: StrictInt
+
+    @field_validator("minimum_inactive_days")
+    @classmethod
+    def require_d1a1_threshold(cls, value: int) -> int:
+        if value not in {30, 60, 90, 180}:
+            raise ValueError("LONG_INACTIVITY supports only 30, 60, 90, or 180 days")
+        return value
+
+
 class ContentActivityFact(FrozenTargetingContract):
     """Trusted-current Content Activity fields for one account candidate.
 
@@ -201,6 +226,26 @@ class ContentActivityFact(FrozenTargetingContract):
         return value.astimezone(UTC) if value is not None else None
 
 
+class GreyDolphinActivityFact(FrozenTargetingContract):
+    """One coherent Huitun aggregate snapshot; never trusted-public evidence."""
+
+    schema_version: Literal[1] = 1
+    source: Literal[DataSource.HUITUN] = DataSource.HUITUN
+    observed_at: datetime | None = None
+    source_updated_at: datetime | None = None
+    notes_7d: StrictInt | None = Field(default=None, ge=0)
+    notes_60d: StrictInt | None = Field(default=None, ge=0)
+    import_job_id: UUID | None = None
+    import_row_id: UUID | None = None
+
+    @field_validator("observed_at", "source_updated_at")
+    @classmethod
+    def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("Grey Dolphin activity timestamps must be timezone-aware")
+        return value.astimezone(UTC) if value is not None else None
+
+
 def _normalized_strings(
     value: object,
     *,
@@ -236,6 +281,7 @@ class SellerTargetingPolicy(FrozenTargetingContract):
     notes_60d: IntegerRange | None = None
     freshness: FreshnessConstraint | None = None
     content_activity: ContentActivityConstraint | None = None
+    long_inactivity: LongInactivityConstraint | None = None
     platforms: tuple[Platform, ...] = ()
     sources: tuple[DataSource, ...] = ()
 
@@ -267,6 +313,8 @@ class SellerTargetingPolicy(FrozenTargetingContract):
         canonical = self.model_dump(mode="json")
         if canonical["content_activity"] is None:
             del canonical["content_activity"]
+        if canonical["long_inactivity"] is None:
+            del canonical["long_inactivity"]
         return hash_document(canonical)
 
 
@@ -473,6 +521,7 @@ class CandidateFactBundle(FrozenTargetingContract):
     freshness_observed_at: datetime | None = None
     source_updated_at: datetime | None = None
     content_activity: ContentActivityFact | None = None
+    grey_dolphin_activity: GreyDolphinActivityFact | None = None
     source_collection_job_id: UUID | None = None
     collection_industry: str | None = Field(default=None, max_length=160)
     collection_subdirection: str | None = Field(default=None, max_length=200)
@@ -987,12 +1036,138 @@ def _content_activity_evaluation(
     )
 
 
+def _long_inactivity_evaluation(
+    facts: CandidateFactBundle,
+    configured: LongInactivityConstraint,
+    *,
+    as_of: datetime | None,
+    content_activity_freshness_policy: ContentActivityFreshnessPolicy,
+    grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy,
+) -> CriterionEvaluation:
+    """Route exact cache first, then coarse Grey Dolphin business evidence.
+
+    Grey Dolphin is intentionally evaluated here rather than being copied into
+    ``ContentActivityFact``: its aggregate notes counters can support only the
+    frozen business conclusions below and never become a trusted-public fact.
+    """
+
+    exact = _content_activity_evaluation(
+        facts,
+        ContentActivityConstraint(minimum_inactive_days=configured.minimum_inactive_days),
+        as_of=as_of,
+        freshness_policy=content_activity_freshness_policy,
+    )
+    if exact.result is not TargetingEvaluationResult.UNKNOWN:
+        return CriterionEvaluation(
+            criterion="long_inactivity",
+            result=exact.result,
+            reason_code=(
+                TargetingReasonCode.LONG_INACTIVITY_CACHE_MATCH
+                if exact.result is TargetingEvaluationResult.MATCH
+                else TargetingReasonCode.LONG_INACTIVITY_CACHE_RECENT
+            ),
+            configured={
+                "schema_version": configured.schema_version,
+                "minimum_inactive_days": configured.minimum_inactive_days,
+            },
+            observed={
+                "source": "TRUSTED_CONTENT_ACTIVITY",
+                "precision": "EXACT",
+                **exact.observed,
+            },
+        )
+
+    grey = facts.grey_dolphin_activity
+    configured_document = {
+        "schema_version": configured.schema_version,
+        "minimum_inactive_days": configured.minimum_inactive_days,
+    }
+    if grey is None or as_of is None:
+        return CriterionEvaluation(
+            criterion="long_inactivity",
+            result=TargetingEvaluationResult.UNKNOWN,
+            reason_code=TargetingReasonCode.LONG_INACTIVITY_UNKNOWN,
+            configured=configured_document,
+            observed={
+                "source": "GREY_DOLPHIN",
+                "precision": "COARSE",
+                "observed_at": None,
+                "notes_7d": None,
+                "notes_60d": None,
+                "cache_reason": exact.reason_code,
+            },
+        )
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("long inactivity as_of must be timezone-aware")
+    evaluation_time = as_of.astimezone(UTC)
+    observed = {
+        "source": "GREY_DOLPHIN",
+        "precision": "COARSE",
+        "observed_at": grey.observed_at,
+        "source_updated_at": grey.source_updated_at,
+        "notes_7d": grey.notes_7d,
+        "notes_60d": grey.notes_60d,
+        "cache_reason": exact.reason_code,
+    }
+    if grey.notes_7d is None or grey.notes_60d is None or grey.notes_7d > grey.notes_60d:
+        return CriterionEvaluation(
+            criterion="long_inactivity",
+            result=TargetingEvaluationResult.UNKNOWN,
+            reason_code=TargetingReasonCode.LONG_INACTIVITY_GREY_DOLPHIN_INVALID,
+            configured=configured_document,
+            observed=observed,
+        )
+    if not grey_dolphin_activity_freshness_policy.is_current(grey.observed_at, evaluation_time):
+        return CriterionEvaluation(
+            criterion="long_inactivity",
+            result=TargetingEvaluationResult.UNKNOWN,
+            reason_code=TargetingReasonCode.LONG_INACTIVITY_GREY_DOLPHIN_STALE,
+            configured=configured_document,
+            observed=observed,
+        )
+
+    minimum = configured.minimum_inactive_days
+    # Any note inside the recent seven-day window disproves all P0 thresholds.
+    if grey.notes_7d > 0:
+        result = TargetingEvaluationResult.NOT_MATCH
+    elif grey.notes_60d == 0:
+        # A zero 60-day counter safely proves both 30+ and 60+, but no more.
+        result = (
+            TargetingEvaluationResult.MATCH
+            if minimum in {30, 60}
+            else TargetingEvaluationResult.UNKNOWN
+        )
+    elif minimum in {60, 90, 180}:
+        # A note somewhere in the last 60 days rules out all of these spans.
+        result = TargetingEvaluationResult.NOT_MATCH
+    else:
+        # The note could be on either side of the 30-day boundary.
+        result = TargetingEvaluationResult.UNKNOWN
+
+    return CriterionEvaluation(
+        criterion="long_inactivity",
+        result=result,
+        reason_code=(
+            TargetingReasonCode.LONG_INACTIVITY_GREY_DOLPHIN_MATCH
+            if result is TargetingEvaluationResult.MATCH
+            else (
+                TargetingReasonCode.LONG_INACTIVITY_GREY_DOLPHIN_RECENT
+                if result is TargetingEvaluationResult.NOT_MATCH
+                else TargetingReasonCode.LONG_INACTIVITY_UNKNOWN
+            )
+        ),
+        configured=configured_document,
+        observed=observed,
+    )
+
+
 def evaluate_seller(
     policy: SellerTargetingPolicy,
     facts: CandidateFactBundle,
     *,
     as_of: datetime | None = None,
     content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
+    grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy | None = None,
 ) -> TargetingEvaluation:
     """Evaluate configured Seller criteria with frozen NOT_MATCH precedence."""
 
@@ -1044,6 +1219,20 @@ def evaluate_seller(
                 as_of=as_of,
                 freshness_policy=(
                     content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+                ),
+            )
+        )
+    if policy.long_inactivity is not None:
+        criteria.append(
+            _long_inactivity_evaluation(
+                facts,
+                policy.long_inactivity,
+                as_of=as_of,
+                content_activity_freshness_policy=(
+                    content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+                ),
+                grey_dolphin_activity_freshness_policy=(
+                    grey_dolphin_activity_freshness_policy or GreyDolphinActivityFreshnessPolicy()
                 ),
             )
         )
@@ -1234,6 +1423,7 @@ def evaluate_targeting(
     *,
     as_of: datetime | None = None,
     content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
+    grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy | None = None,
 ) -> TargetingEvaluation:
     if isinstance(policy, SellerTargetingPolicy):
         return evaluate_seller(
@@ -1241,6 +1431,7 @@ def evaluate_targeting(
             facts,
             as_of=as_of,
             content_activity_freshness_policy=content_activity_freshness_policy,
+            grey_dolphin_activity_freshness_policy=grey_dolphin_activity_freshness_policy,
         )
     return evaluate_buyer(policy, facts)
 
@@ -1257,6 +1448,8 @@ __all__ = [
     "FreshnessConstraint",
     "FrozenTargetingContract",
     "IntegerRange",
+    "GreyDolphinActivityFact",
+    "LongInactivityConstraint",
     "SellerTargetingPolicy",
     "TargetingEvaluation",
     "TargetingEvaluationResult",

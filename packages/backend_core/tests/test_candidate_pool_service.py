@@ -88,6 +88,7 @@ from backend_core.influencers.freshness import FreshnessPolicy
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
+    InfluencerCurrentMetrics,
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
@@ -144,6 +145,7 @@ async def _account(
     *,
     owner: Operator,
     source_tags: list[str] | None = None,
+    source: DataSource = DataSource.GENERIC,
 ) -> InfluencerPlatformAccount:
     influencer = Influencer(
         display_name="Targeting Candidate",
@@ -162,7 +164,7 @@ async def _account(
         account_handle="targeting-candidate",
         profile_url=f"https://example.invalid/{uuid4().hex}",
         normalized_profile_url=f"https://example.invalid/{uuid4().hex}",
-        source=DataSource.GENERIC,
+        source=source,
         source_tags=source_tags if source_tags is not None else ["beauty"],
         is_active=True,
     )
@@ -455,6 +457,116 @@ def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_histor
                 assert len(activity_history_reads) == 2
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", track_statement)
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_grey_dolphin_activity_fact_requires_one_confirmed_coherent_metric_snapshot() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(
+                    session,
+                    owner=context.operator,
+                    source=DataSource.HUITUN,
+                )
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="beauty",
+                )
+                stored_file = StoredImportFile(
+                    sha256=uuid4().hex * 2,
+                    storage_key=f"targeting/{uuid4().hex}.csv",
+                    size=1,
+                    detected_type=StoredFileType.CSV,
+                    detected_mime="text/csv",
+                    expires_at=NOW + timedelta(days=1),
+                )
+                session.add(stored_file)
+                await session.flush()
+                job = ImportJob(
+                    collection_job_id=collection.id,
+                    department_id=context.department.id,
+                    operator_id=context.operator.id,
+                    source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                    status=ImportJobStatus.COMPLETED,
+                    preview_revision=1,
+                    confirmed_revision=1,
+                )
+                session.add(job)
+                await session.flush()
+                import_file = ImportJobFile(
+                    import_job_id=job.id,
+                    stored_file_id=stored_file.id,
+                    position=1,
+                    original_filename="huitun.csv",
+                    status=ImportJobFileStatus.READY,
+                    source_acquired_at=NOW - timedelta(days=1),
+                    source_acquired_at_origin=SourceAcquiredAtOrigin.SERVER_DEFAULT,
+                    source_acquired_at_confirmation_required=False,
+                )
+                session.add(import_file)
+                await session.flush()
+                row = ImportRow(
+                    import_job_id=job.id,
+                    import_job_file_id=import_file.id,
+                    row_number=2,
+                    raw_data={},
+                    normalized_data={},
+                    matched_influencer_id=account.influencer_id,
+                    matched_platform_account_id=account.id,
+                    match_type=ImportMatchType.PLATFORM_ACCOUNT_ID,
+                    action=ImportRowAction.NO_CHANGE,
+                    merge_plan=None,
+                    warnings=[],
+                    errors=[],
+                    preview_revision=1,
+                    plan_hash=uuid4().hex * 2,
+                    committed_action=ImportRowAction.NO_CHANGE,
+                    committed_at=NOW,
+                )
+                session.add(row)
+                await session.flush()
+                session.add(
+                    InfluencerCurrentMetrics(
+                        influencer_id=account.influencer_id,
+                        platform_account_id=account.id,
+                        source=DataSource.HUITUN,
+                        source_updated_at=NOW - timedelta(days=1),
+                        metrics={"notes_7d": 0, "notes_60d": 0},
+                        metrics_hash=uuid4().hex * 2,
+                        last_import_job_id=job.id,
+                        last_import_row_id=row.id,
+                    )
+                )
+                await session.commit()
+
+                fact = (
+                    await CandidatePoolRepository(session)._hydrate_fact_batch(
+                        accounts=(account,),
+                        collection_context=None,
+                        source_collection_job_id=None,
+                        buyer=False,
+                        as_of=NOW,
+                        freshness_policy=FreshnessPolicy(),
+                        include_content_activity=True,
+                    )
+                )[0]
+
+                assert fact.grey_dolphin_activity is not None
+                assert fact.grey_dolphin_activity.observed_at == NOW - timedelta(days=1)
+                assert fact.grey_dolphin_activity.notes_7d == 0
+                assert fact.grey_dolphin_activity.notes_60d == 0
+                assert fact.grey_dolphin_activity.import_row_id == row.id
+        finally:
             await engine.dispose()
 
     asyncio.run(scenario())

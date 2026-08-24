@@ -18,7 +18,9 @@ from backend_core.growth.targeting import (
     CollectionContextSnapshot,
     ContentActivityConstraint,
     ContentActivityFact,
+    GreyDolphinActivityFact,
     IntegerRange,
+    LongInactivityConstraint,
     SellerTargetingPolicy,
     TargetingEvaluation,
     TargetingEvaluationResult,
@@ -32,7 +34,10 @@ from backend_core.growth.targeting import (
 )
 from backend_core.imports.hashing import hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, Platform
-from backend_core.influencers.freshness import ContentActivityFreshnessPolicy
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    GreyDolphinActivityFreshnessPolicy,
+)
 from pydantic import ValidationError
 
 CONTENT_ACTIVITY_AS_OF = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
@@ -67,6 +72,118 @@ def _content_activity_fact(**changes: object) -> ContentActivityFact:
     }
     values.update(changes)
     return ContentActivityFact.model_validate(values)
+
+
+def _grey_dolphin_activity_fact(**changes: object) -> GreyDolphinActivityFact:
+    values: dict[str, object] = {
+        "observed_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "source_updated_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "notes_7d": 0,
+        "notes_60d": 0,
+        "import_job_id": uuid4(),
+        "import_row_id": uuid4(),
+    }
+    values.update(changes)
+    return GreyDolphinActivityFact.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("notes_7d", "notes_60d", "minimum", "expected"),
+    [
+        (1, 1, 30, TargetingEvaluationResult.NOT_MATCH),
+        (1, 1, 60, TargetingEvaluationResult.NOT_MATCH),
+        (1, 1, 90, TargetingEvaluationResult.NOT_MATCH),
+        (1, 1, 180, TargetingEvaluationResult.NOT_MATCH),
+        (0, 0, 30, TargetingEvaluationResult.MATCH),
+        (0, 0, 60, TargetingEvaluationResult.MATCH),
+        (0, 0, 90, TargetingEvaluationResult.UNKNOWN),
+        (0, 0, 180, TargetingEvaluationResult.UNKNOWN),
+        (0, 1, 30, TargetingEvaluationResult.UNKNOWN),
+        (0, 1, 60, TargetingEvaluationResult.NOT_MATCH),
+        (0, 1, 90, TargetingEvaluationResult.NOT_MATCH),
+        (0, 1, 180, TargetingEvaluationResult.NOT_MATCH),
+    ],
+)
+def test_long_inactivity_uses_frozen_grey_dolphin_truth_table(
+    notes_7d: int,
+    notes_60d: int,
+    minimum: int,
+    expected: TargetingEvaluationResult,
+) -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=minimum)
+        ),
+        _facts(
+            content_activity=None,
+            grey_dolphin_activity=_grey_dolphin_activity_fact(
+                notes_7d=notes_7d,
+                notes_60d=notes_60d,
+            ),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+        grey_dolphin_activity_freshness_policy=(
+            GreyDolphinActivityFreshnessPolicy.from_day_threshold(7)
+        ),
+    )
+
+    assert result.result is expected
+    criterion = result.redacted_evidence["criteria"][0]
+    assert criterion["criterion"] == "long_inactivity"
+    assert criterion["observed"]["source"] == "GREY_DOLPHIN"
+    assert "inactive_days" not in criterion["observed"]
+    assert "last_publication_at" not in criterion["observed"]
+
+
+def test_long_inactivity_prefers_fresh_trusted_content_activity_over_grey_dolphin() -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=60)),
+        _facts(
+            content_activity=_content_activity_fact(
+                last_publication_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=1)
+            ),
+            grey_dolphin_activity=_grey_dolphin_activity_fact(notes_7d=0, notes_60d=0),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.NOT_MATCH
+    criterion = result.redacted_evidence["criteria"][0]
+    assert criterion["observed"]["source"] == "TRUSTED_CONTENT_ACTIVITY"
+    assert criterion["reason_code"] == "LONG_INACTIVITY_CACHE_RECENT"
+
+
+@pytest.mark.parametrize(
+    ("fact", "reason"),
+    [
+        (
+            _grey_dolphin_activity_fact(observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=8)),
+            "LONG_INACTIVITY_GREY_DOLPHIN_STALE",
+        ),
+        (
+            _grey_dolphin_activity_fact(notes_7d=2, notes_60d=1),
+            "LONG_INACTIVITY_GREY_DOLPHIN_INVALID",
+        ),
+    ],
+)
+def test_long_inactivity_fails_closed_for_stale_or_inconsistent_grey_dolphin(
+    fact: GreyDolphinActivityFact,
+    reason: str,
+) -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=60)),
+        _facts(content_activity=None, grey_dolphin_activity=fact),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.UNKNOWN
+    assert result.reason_codes == (reason,)
+
+
+@pytest.mark.parametrize("minimum", (1, 29, 31, 59, 61, 365))
+def test_long_inactivity_rejects_thresholds_outside_frozen_p0(minimum: int) -> None:
+    with pytest.raises(ValidationError, match="30, 60, 90, or 180"):
+        LongInactivityConstraint(minimum_inactive_days=minimum)
 
 
 def test_seller_match_plus_match_is_match() -> None:
@@ -274,6 +391,7 @@ def test_content_activity_constraint_does_not_change_existing_seller_v1_defaults
     assert policy.content_activity is None
     legacy_definition = policy.model_dump(mode="json")
     assert legacy_definition.pop("content_activity") is None
+    assert legacy_definition.pop("long_inactivity") is None
     assert policy.canonical_hash == hash_document(legacy_definition)
     assert (
         SellerTargetingPolicy(
