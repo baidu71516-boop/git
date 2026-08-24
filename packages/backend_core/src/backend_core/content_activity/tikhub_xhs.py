@@ -10,6 +10,7 @@ cursor, or logs provider responses, request inputs, or Authorization material.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -68,7 +69,12 @@ class ProviderResponseTooLarge(XhsAdapterError):
 
 @dataclass(frozen=True, slots=True)
 class HttpRequestLimits:
-    """All provider calls use finite transport and body-size bounds."""
+    """Finite socket, wall-clock, and body-size bounds for provider calls.
+
+    ``httpx.Timeout`` limits individual transport operations.  The authoritative
+    ``total_timeout_seconds`` deadline is additionally enforced around the whole
+    provider interaction so a stream cannot extend a call by drip-feeding bytes.
+    """
 
     connect_timeout_seconds: float
     read_timeout_seconds: float
@@ -125,30 +131,38 @@ class HttpxAsyncTransport:
             write=limits.total_timeout_seconds,
             pool=limits.pool_timeout_seconds,
         )
-        async with self._client.stream(
-            "GET",
-            path,
-            params=params,
-            headers=headers,
-            timeout=timeout,
-        ) as response:
-            content_length = response.headers.get("content-length")
-            if content_length is not None:
-                try:
-                    declared_size = int(content_length)
-                except ValueError:
-                    declared_size = 0
-                if declared_size > limits.max_response_bytes:
-                    raise ProviderResponseTooLarge()
+        # HTTPX applies the limits above per connect/read/write/pool operation.
+        # This outer scope is the provider-call deadline: it begins immediately
+        # before request start and stays active through headers, every stream
+        # chunk, size validation, and body assembly.
+        async with asyncio.timeout(limits.total_timeout_seconds):
+            async with self._client.stream(
+                "GET",
+                path,
+                params=params,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                content_length = response.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        declared_size = int(content_length)
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > limits.max_response_bytes:
+                        raise ProviderResponseTooLarge()
 
-            chunks: list[bytes] = []
-            received_bytes = 0
-            async for chunk in response.aiter_bytes():
-                received_bytes += len(chunk)
-                if received_bytes > limits.max_response_bytes:
-                    raise ProviderResponseTooLarge()
-                chunks.append(chunk)
-            return HttpTransportResponse(status_code=response.status_code, body=b"".join(chunks))
+                chunks: list[bytes] = []
+                received_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    received_bytes += len(chunk)
+                    if received_bytes > limits.max_response_bytes:
+                        raise ProviderResponseTooLarge()
+                    chunks.append(chunk)
+                return HttpTransportResponse(
+                    status_code=response.status_code,
+                    body=b"".join(chunks),
+                )
 
     async def aclose(self) -> None:
         """Close only a client created by this transport instance."""
@@ -295,10 +309,53 @@ class TikHubXhsClient:
             )
 
         try:
-            response = await self._request(
-                path=XHS_GET_USER_INFO_ENDPOINT,
-                params={"share_text": bootstrap_input},
-            )
+            # The transport owns its own exact request-start deadline.  Keep an
+            # adapter scope too so parsed/validated completion cannot outlive
+            # the configured provider-call budget.
+            async with asyncio.timeout(self._limits.total_timeout_seconds):
+                response = await self._request(
+                    path=XHS_GET_USER_INFO_ENDPOINT,
+                    params={"share_text": bootstrap_input},
+                )
+                http_failure = _identity_http_failure(response.status_code)
+                if http_failure is not None:
+                    return http_failure
+                if len(response.body) > self._limits.max_response_bytes:
+                    return _identity_failure(
+                        observation_status=ContentActivityObservationStatus.IDENTITY_UNRESOLVED,
+                        error_class=ContentActivityProviderErrorClass.MALFORMED_RESPONSE,
+                        error_code="RESPONSE_TOO_LARGE",
+                        terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
+                        request_count=1,
+                    )
+
+                try:
+                    userid = parse_xhs_user_info_response(response.body)
+                except XhsSemanticFailure:
+                    return _identity_failure(
+                        observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+                        error_class=ContentActivityProviderErrorClass.SEMANTIC_FAILURE,
+                        error_code="SEMANTIC_CODE_REJECTED",
+                        terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
+                        request_count=1,
+                    )
+                except XhsSchemaViolation as exc:
+                    return _identity_failure(
+                        observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+                        error_class=ContentActivityProviderErrorClass.SCHEMA_DRIFT,
+                        error_code=exc.code,
+                        terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
+                        request_count=1,
+                    )
+
+                return XhsIdentityResolution(
+                    observation_status=ContentActivityObservationStatus.COMPLETE,
+                    userid=userid,
+                    provider_error_class=None,
+                    provider_error_code=None,
+                    terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
+                    request_count=1,
+                )
         except ProviderResponseTooLarge:
             return _identity_failure(
                 observation_status=ContentActivityObservationStatus.IDENTITY_UNRESOLVED,
@@ -323,46 +380,6 @@ class TikHubXhsClient:
                 terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
                 request_count=1,
             )
-
-        http_failure = _identity_http_failure(response.status_code)
-        if http_failure is not None:
-            return http_failure
-        if len(response.body) > self._limits.max_response_bytes:
-            return _identity_failure(
-                observation_status=ContentActivityObservationStatus.IDENTITY_UNRESOLVED,
-                error_class=ContentActivityProviderErrorClass.MALFORMED_RESPONSE,
-                error_code="RESPONSE_TOO_LARGE",
-                terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
-                request_count=1,
-            )
-
-        try:
-            userid = parse_xhs_user_info_response(response.body)
-        except XhsSemanticFailure:
-            return _identity_failure(
-                observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
-                error_class=ContentActivityProviderErrorClass.SEMANTIC_FAILURE,
-                error_code="SEMANTIC_CODE_REJECTED",
-                terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
-                request_count=1,
-            )
-        except XhsSchemaViolation as exc:
-            return _identity_failure(
-                observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
-                error_class=ContentActivityProviderErrorClass.SCHEMA_DRIFT,
-                error_code=exc.code,
-                terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
-                request_count=1,
-            )
-
-        return XhsIdentityResolution(
-            observation_status=ContentActivityObservationStatus.COMPLETE,
-            userid=userid,
-            provider_error_class=None,
-            provider_error_code=None,
-            terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
-            request_count=1,
-        )
 
     async def observe_posted_notes(
         self,
@@ -411,10 +428,104 @@ class TikHubXhsClient:
             )
 
         try:
-            response = await self._request(
-                path=XHS_GET_USER_POSTED_NOTES_ENDPOINT,
-                params={"user_id": verified_userid, "cursor": ""},
-            )
+            # See the resolver path above.  This keeps the deadline active
+            # until the full response has been parsed into a trusted-or-failed
+            # attempt, not merely until headers or a partial stream arrive.
+            async with asyncio.timeout(self._limits.total_timeout_seconds):
+                response = await self._request(
+                    path=XHS_GET_USER_POSTED_NOTES_ENDPOINT,
+                    params={"user_id": verified_userid, "cursor": ""},
+                )
+                http_failure = _activity_http_failure(response.status_code, now)
+                if http_failure is not None:
+                    return http_failure
+                if len(response.body) > self._limits.max_response_bytes:
+                    return _activity_failure(
+                        observed_at=now,
+                        observation_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                        coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                        error_class=ContentActivityProviderErrorClass.MALFORMED_RESPONSE,
+                        error_code="RESPONSE_TOO_LARGE",
+                        terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
+                        request_count=1,
+                    )
+
+                try:
+                    parsed = parse_xhs_posted_notes_response(response.body, observed_at=now)
+                except XhsSemanticFailure:
+                    return _activity_failure(
+                        observed_at=now,
+                        observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+                        coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                        error_class=ContentActivityProviderErrorClass.SEMANTIC_FAILURE,
+                        error_code="SEMANTIC_CODE_REJECTED",
+                        terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
+                        request_count=1,
+                    )
+                except XhsSchemaViolation as exc:
+                    return _activity_failure(
+                        observed_at=now,
+                        observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+                        coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+                        error_class=ContentActivityProviderErrorClass.SCHEMA_DRIFT,
+                        error_code=exc.code,
+                        terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
+                        request_count=1,
+                    )
+
+                if parsed.has_more:
+                    return _activity_failure(
+                        observed_at=now,
+                        observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                        coverage_status=ContentActivityCoverageStatus.INCOMPLETE,
+                        error_class=None,
+                        error_code=None,
+                        terminal_reason=ContentActivityScanTerminalReason.HAS_MORE_TRUE,
+                        item_count=parsed.raw_item_count,
+                        request_count=1,
+                    )
+                if not parsed.publications:
+                    return XhsActivityAttempt(
+                        observation_status=ContentActivityObservationStatus.COMPLETE,
+                        coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                        activity_result=ContentActivityResult.NO_PUBLIC_CONTENT,
+                        observed_at=now,
+                        last_publication_at=None,
+                        latest_publication_id=None,
+                        latest_publication_type=None,
+                        co_latest_publication_count=None,
+                        provider_error_class=None,
+                        provider_error_code=None,
+                        terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
+                        item_count=0,
+                        request_count=1,
+                    )
+
+                latest_at = max(publication.published_at for publication in parsed.publications)
+                latest = sorted(
+                    (
+                        publication
+                        for publication in parsed.publications
+                        if publication.published_at == latest_at
+                    ),
+                    key=lambda publication: publication.publication_id,
+                )
+                representative = latest[0]
+                return XhsActivityAttempt(
+                    observation_status=ContentActivityObservationStatus.COMPLETE,
+                    coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                    activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                    observed_at=now,
+                    last_publication_at=latest_at,
+                    latest_publication_id=representative.publication_id,
+                    latest_publication_type=representative.publication_type,
+                    co_latest_publication_count=len(latest),
+                    provider_error_class=None,
+                    provider_error_code=None,
+                    terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
+                    item_count=parsed.raw_item_count,
+                    request_count=1,
+                )
         except ProviderResponseTooLarge:
             return _activity_failure(
                 observed_at=now,
@@ -445,97 +556,6 @@ class TikHubXhsClient:
                 terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
                 request_count=1,
             )
-
-        http_failure = _activity_http_failure(response.status_code, now)
-        if http_failure is not None:
-            return http_failure
-        if len(response.body) > self._limits.max_response_bytes:
-            return _activity_failure(
-                observed_at=now,
-                observation_status=ContentActivityObservationStatus.PROVIDER_ERROR,
-                coverage_status=ContentActivityCoverageStatus.UNKNOWN,
-                error_class=ContentActivityProviderErrorClass.MALFORMED_RESPONSE,
-                error_code="RESPONSE_TOO_LARGE",
-                terminal_reason=ContentActivityScanTerminalReason.PROVIDER_FAILURE,
-                request_count=1,
-            )
-
-        try:
-            parsed = parse_xhs_posted_notes_response(response.body, observed_at=now)
-        except XhsSemanticFailure:
-            return _activity_failure(
-                observed_at=now,
-                observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
-                coverage_status=ContentActivityCoverageStatus.UNKNOWN,
-                error_class=ContentActivityProviderErrorClass.SEMANTIC_FAILURE,
-                error_code="SEMANTIC_CODE_REJECTED",
-                terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
-                request_count=1,
-            )
-        except XhsSchemaViolation as exc:
-            return _activity_failure(
-                observed_at=now,
-                observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
-                coverage_status=ContentActivityCoverageStatus.UNKNOWN,
-                error_class=ContentActivityProviderErrorClass.SCHEMA_DRIFT,
-                error_code=exc.code,
-                terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
-                request_count=1,
-            )
-
-        if parsed.has_more:
-            return _activity_failure(
-                observed_at=now,
-                observation_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
-                coverage_status=ContentActivityCoverageStatus.INCOMPLETE,
-                error_class=None,
-                error_code=None,
-                terminal_reason=ContentActivityScanTerminalReason.HAS_MORE_TRUE,
-                item_count=parsed.raw_item_count,
-                request_count=1,
-            )
-        if not parsed.publications:
-            return XhsActivityAttempt(
-                observation_status=ContentActivityObservationStatus.COMPLETE,
-                coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
-                activity_result=ContentActivityResult.NO_PUBLIC_CONTENT,
-                observed_at=now,
-                last_publication_at=None,
-                latest_publication_id=None,
-                latest_publication_type=None,
-                co_latest_publication_count=None,
-                provider_error_class=None,
-                provider_error_code=None,
-                terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
-                item_count=0,
-                request_count=1,
-            )
-
-        latest_at = max(publication.published_at for publication in parsed.publications)
-        latest = sorted(
-            (
-                publication
-                for publication in parsed.publications
-                if publication.published_at == latest_at
-            ),
-            key=lambda publication: publication.publication_id,
-        )
-        representative = latest[0]
-        return XhsActivityAttempt(
-            observation_status=ContentActivityObservationStatus.COMPLETE,
-            coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
-            activity_result=ContentActivityResult.PUBLICATION_FOUND,
-            observed_at=now,
-            last_publication_at=latest_at,
-            latest_publication_id=representative.publication_id,
-            latest_publication_type=representative.publication_type,
-            co_latest_publication_count=len(latest),
-            provider_error_class=None,
-            provider_error_code=None,
-            terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
-            item_count=parsed.raw_item_count,
-            request_count=1,
-        )
 
     @property
     def _calls_permitted(self) -> bool:

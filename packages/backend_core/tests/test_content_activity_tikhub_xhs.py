@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from hashlib import sha256
 from io import StringIO
@@ -75,6 +75,27 @@ class RecordingTransport:
         return self._responses.pop(0)
 
 
+class DelayedByteStream(httpx.AsyncByteStream):
+    """Deterministic drip stream that records cancellation-driven cleanup."""
+
+    def __init__(self, chunks: tuple[bytes, ...], *, delay_seconds: float) -> None:
+        self._chunks = chunks
+        self._delay_seconds = delay_seconds
+        self.first_chunk_ready = asyncio.Event()
+        self.closed = False
+        self.yielded_chunks = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            await asyncio.sleep(self._delay_seconds)
+            self.yielded_chunks += 1
+            self.first_chunk_ready.set()
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _fixture_body(name: str) -> bytes:
     return (FIXTURE_DIR / name).read_bytes()
 
@@ -110,6 +131,13 @@ def _activity_payload(*, has_more: bool, notes: list[dict[str, object]]) -> byte
         {"code": 200, "data": {"data": {"has_more": has_more, "notes": notes}}},
         separators=(",", ":"),
     ).encode()
+
+
+def _drip_chunks(body: bytes, *, count: int) -> tuple[bytes, ...]:
+    """Split a bounded test body into non-empty ordered streaming chunks."""
+
+    chunk_size = max(1, (len(body) + count - 1) // count)
+    return tuple(body[index : index + chunk_size] for index in range(0, len(body), chunk_size))
 
 
 def test_v1_registry_artifacts_and_source_controlled_fixture_digests_are_intact() -> None:
@@ -512,6 +540,202 @@ def test_httpx_transport_streams_a_bounded_body_and_does_not_retry() -> None:
 
     asyncio.run(scenario())
     assert len(calls) == 1
+
+
+def test_slow_drip_hits_total_wall_clock_deadline_and_closes_stream() -> None:
+    """Frequent reads cannot extend the provider-call deadline indefinitely."""
+
+    stream = DelayedByteStream(
+        _drip_chunks(_fixture_body("xhs_get_user_posted_notes_success_v1.json"), count=10),
+        delay_seconds=0.06,
+    )
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request, stream=stream)
+
+        http_client = httpx.AsyncClient(
+            base_url="https://tikhub.test",
+            transport=httpx.MockTransport(handler),
+        )
+        transport = HttpxAsyncTransport("https://tikhub.test", client=http_client)
+        client = TikHubXhsClient(
+            _enabled_settings(
+                content_activity_http_connect_timeout_seconds=0.05,
+                content_activity_http_read_timeout_seconds=0.15,
+                content_activity_http_pool_timeout_seconds=0.05,
+                content_activity_http_total_timeout_seconds=0.20,
+            ),
+            transport=transport,
+            clock=lambda: OBSERVED_AT,
+        )
+        try:
+            started_at = asyncio.get_running_loop().time()
+            attempt = await client.observe_posted_notes(verified_userid="synthetic-userid")
+            elapsed = asyncio.get_running_loop().time() - started_at
+
+            assert attempt.observation_status is ContentActivityObservationStatus.PROVIDER_ERROR
+            assert attempt.coverage_status is ContentActivityCoverageStatus.UNKNOWN
+            assert attempt.activity_result is ContentActivityResult.UNDETERMINED
+            assert attempt.provider_error_class is ContentActivityProviderErrorClass.TIMEOUT
+            assert attempt.provider_error_code == "TRANSPORT_TIMEOUT"
+            # Each 60 ms chunk beats the 150 ms socket read limit. The call must
+            # still take roughly its 200 ms wall-clock budget, not all 600 ms.
+            assert elapsed >= 0.15
+            assert elapsed < 0.50
+            assert stream.closed
+            assert 0 < stream.yielded_chunks < 10
+
+            yielded_at_timeout = stream.yielded_chunks
+            await asyncio.sleep(0.20)
+            assert stream.yielded_chunks == yielded_at_timeout
+        finally:
+            await http_client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_fast_drip_completes_inside_total_wall_clock_deadline() -> None:
+    """The deadline does not reject a streamed, valid response that finishes in budget."""
+
+    stream = DelayedByteStream(
+        _drip_chunks(_fixture_body("xhs_get_user_posted_notes_success_v1.json"), count=4),
+        delay_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request, stream=stream)
+
+        http_client = httpx.AsyncClient(
+            base_url="https://tikhub.test",
+            transport=httpx.MockTransport(handler),
+        )
+        transport = HttpxAsyncTransport("https://tikhub.test", client=http_client)
+        client = TikHubXhsClient(
+            _enabled_settings(
+                content_activity_http_connect_timeout_seconds=0.05,
+                content_activity_http_read_timeout_seconds=0.15,
+                content_activity_http_pool_timeout_seconds=0.05,
+                content_activity_http_total_timeout_seconds=0.20,
+            ),
+            transport=transport,
+            clock=lambda: OBSERVED_AT,
+        )
+        try:
+            attempt = await client.observe_posted_notes(verified_userid="synthetic-userid")
+
+            assert attempt.trusted
+            assert stream.closed
+            assert stream.yielded_chunks == 4
+        finally:
+            await http_client.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_httpx_read_timeout_still_precedes_later_total_wall_clock_deadline() -> None:
+    """A socket-read stall remains an HTTPX timeout when the total budget remains."""
+
+    async def scenario() -> None:
+        handler_finished = asyncio.Event()
+
+        async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Transfer-Encoding: chunked\r\n"
+                    b"Connection: close\r\n\r\n"
+                    b"2\r\n{}\r\n"
+                )
+                await writer.drain()
+                await asyncio.sleep(0.15)
+                writer.write(b"2\r\n{}\r\n0\r\n\r\n")
+                await writer.drain()
+            except (ConnectionError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except ConnectionError:
+                    pass
+                handler_finished.set()
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        http_client = httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}")
+        transport = HttpxAsyncTransport(f"http://127.0.0.1:{port}", client=http_client)
+        client = TikHubXhsClient(
+            _enabled_settings(
+                content_activity_http_connect_timeout_seconds=0.05,
+                content_activity_http_read_timeout_seconds=0.05,
+                content_activity_http_pool_timeout_seconds=0.05,
+                content_activity_http_total_timeout_seconds=0.30,
+            ),
+            transport=transport,
+            clock=lambda: OBSERVED_AT,
+        )
+        try:
+            started_at = asyncio.get_running_loop().time()
+            attempt = await client.observe_posted_notes(verified_userid="synthetic-userid")
+            elapsed = asyncio.get_running_loop().time() - started_at
+
+            assert attempt.observation_status is ContentActivityObservationStatus.PROVIDER_ERROR
+            assert attempt.provider_error_class is ContentActivityProviderErrorClass.TIMEOUT
+            assert attempt.provider_error_code == "TRANSPORT_TIMEOUT"
+            assert elapsed >= 0.04
+            assert elapsed < 0.20
+            await asyncio.wait_for(handler_finished.wait(), timeout=0.50)
+        finally:
+            await http_client.aclose()
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_external_cancellation_is_not_normalized_as_provider_timeout() -> None:
+    """Only this adapter's deadline becomes TimeoutError; caller cancellation escapes."""
+
+    stream = DelayedByteStream(
+        _drip_chunks(_fixture_body("xhs_get_user_posted_notes_success_v1.json"), count=10),
+        delay_seconds=0.05,
+    )
+
+    async def scenario() -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, request=request, stream=stream)
+
+        http_client = httpx.AsyncClient(
+            base_url="https://tikhub.test",
+            transport=httpx.MockTransport(handler),
+        )
+        transport = HttpxAsyncTransport("https://tikhub.test", client=http_client)
+        client = TikHubXhsClient(
+            _enabled_settings(
+                content_activity_http_connect_timeout_seconds=0.05,
+                content_activity_http_read_timeout_seconds=0.15,
+                content_activity_http_pool_timeout_seconds=0.05,
+                content_activity_http_total_timeout_seconds=0.50,
+            ),
+            transport=transport,
+            clock=lambda: OBSERVED_AT,
+        )
+        try:
+            task = asyncio.create_task(
+                client.observe_posted_notes(verified_userid="synthetic-userid")
+            )
+            await asyncio.wait_for(stream.first_chunk_ready.wait(), timeout=0.20)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert stream.closed
+        finally:
+            await http_client.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_httpx_transport_never_logs_provider_query_values_at_root_info_level() -> None:

@@ -11,13 +11,14 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -34,9 +35,14 @@ from backend_core.content_activity.enums import (
     ContentActivityResult,
     ContentActivityScanTerminalReason,
 )
-from backend_core.content_activity.models import ContentActivityProjection, ProviderAccountIdentity
+from backend_core.content_activity.models import (
+    ContentActivityProjection,
+    ContentActivityRefreshRequest,
+    ProviderAccountIdentity,
+)
 from backend_core.content_activity.service import ContentActivityError, ContentActivityService
 from backend_core.content_activity.tikhub_xhs import (
+    HttpxAsyncTransport,
     TikHubXhsClient,
     XhsActivityAttempt,
     XhsIdentityResolution,
@@ -162,10 +168,30 @@ class ScriptedXhsClient:
         return None
 
 
+class DelayedByteStream(httpx.AsyncByteStream):
+    """A local, credential-free slow stream for the real adapter runtime gate."""
+
+    def __init__(self, chunks: tuple[bytes, ...], *, delay_seconds: float) -> None:
+        self._chunks = chunks
+        self._delay_seconds = delay_seconds
+        self.closed = False
+        self.yielded_chunks = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self._chunks:
+            await asyncio.sleep(self._delay_seconds)
+            self.yielded_chunks += 1
+            yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _enabled_settings(
     database_url: URL,
     *,
     provider_max_calls_per_run: int = 1,
+    refresh_max_attempts: int = 3,
 ) -> Settings:
     """Enable only the in-process test double; never construct an HTTP client."""
 
@@ -176,6 +202,7 @@ def _enabled_settings(
         content_activity_xhs_enabled=True,
         content_activity_provider_governance_approved=True,
         content_activity_provider_max_calls_per_run=provider_max_calls_per_run,
+        content_activity_refresh_max_attempts=refresh_max_attempts,
         tikhub_base_url="https://unit-test.invalid",
         tikhub_api_key="test-only-key",
         _env_file=None,
@@ -487,6 +514,188 @@ def test_postgres_service_persists_projection_transition_contract(
                 assert after_empty.latest_publication_id is None
                 assert client.calls == [userid, userid, userid, userid]
         finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_provider_deadline_settles_request_and_releases_resources(
+    runtime_database_url: URL,
+) -> None:
+    """A real slow stream leaves no stuck lock, lease, slot, or trusted overwrite."""
+
+    async def scenario() -> None:
+        engine = create_async_engine(runtime_database_url, pool_pre_ping=True)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        http_client: httpx.AsyncClient | None = None
+        try:
+            async with factory() as session:
+                userid = f"runtime-deadline-{uuid4().hex}"
+                account = await _seed_xhs_account(
+                    session,
+                    label="provider-deadline",
+                    userid=userid,
+                )
+                await session.commit()
+
+                settings = _enabled_settings(runtime_database_url, refresh_max_attempts=1)
+                initial_client = ScriptedXhsClient(
+                    {
+                        userid: deque(
+                            (
+                                _publication_attempt(
+                                    observed_at=RUN_AS_OF,
+                                    published_at=RUN_AS_OF - timedelta(days=10),
+                                    note_id="before-deadline-timeout",
+                                ),
+                            )
+                        )
+                    }
+                )
+                service = ContentActivityService(
+                    session,
+                    settings,
+                    client=cast(TikHubXhsClient, initial_client),
+                    clock=IncrementingClock(RUN_AS_OF),
+                )
+                await _bind_identity(service, account=account, key="provider-deadline")
+                trusted_observation_id = await _request_and_process(
+                    service,
+                    account=account,
+                    key="provider-deadline-trusted",
+                )
+                trusted_projection = await _projection(session, account.id)
+                trusted_publication_at = trusted_projection.last_publication_at
+
+                deadline_body = b'{"code":200,"data":{"data":{"has_more":false,"notes":[]}}}'
+                chunk_size = max(1, (len(deadline_body) + 9) // 10)
+                stream = DelayedByteStream(
+                    tuple(
+                        deadline_body[index : index + chunk_size]
+                        for index in range(0, len(deadline_body), chunk_size)
+                    ),
+                    delay_seconds=0.06,
+                )
+
+                def handler(request: httpx.Request) -> httpx.Response:
+                    return httpx.Response(200, request=request, stream=stream)
+
+                http_client = httpx.AsyncClient(
+                    base_url="https://tikhub.test",
+                    transport=httpx.MockTransport(handler),
+                )
+                deadline_client = TikHubXhsClient(
+                    Settings(
+                        **{
+                            **settings.model_dump(),
+                            "content_activity_http_connect_timeout_seconds": 0.05,
+                            "content_activity_http_read_timeout_seconds": 0.15,
+                            "content_activity_http_pool_timeout_seconds": 0.05,
+                            "content_activity_http_total_timeout_seconds": 0.20,
+                        }
+                    ),
+                    transport=HttpxAsyncTransport("https://tikhub.test", client=http_client),
+                    clock=lambda: RUN_AS_OF,
+                )
+                service.client = deadline_client
+
+                timeout_request = (
+                    await service.create_xhs_refresh_requests(
+                        platform_account_ids=(account.id,),
+                        idempotency_key="provider-deadline-timeout",
+                        operator_id=None,
+                        department_id=None,
+                        ip="192.0.2.42",
+                        user_agent="content-activity-runtime-postgres-test",
+                    )
+                )[0]
+                started_at = asyncio.get_running_loop().time()
+                timed_out = await service.process_refresh_request(timeout_request.request_token)
+                elapsed = asyncio.get_running_loop().time() - started_at
+
+                assert timed_out.claimed
+                assert timed_out.state is ContentActivityRefreshRequestState.FAILED
+                assert timed_out.observation_id is not None
+                assert elapsed >= 0.15
+                assert elapsed < 0.50
+                assert stream.closed
+                assert 0 < stream.yielded_chunks < 10
+
+                after_timeout = await _projection(session, account.id)
+                assert after_timeout.latest_attempt_observation_id == timed_out.observation_id
+                assert (
+                    after_timeout.latest_attempt_observation_status
+                    is ContentActivityObservationStatus.PROVIDER_ERROR
+                )
+                assert (
+                    after_timeout.latest_attempt_provider_error_class
+                    is ContentActivityProviderErrorClass.TIMEOUT
+                )
+                assert after_timeout.latest_attempt_provider_error_code == "TRANSPORT_TIMEOUT"
+                assert after_timeout.trusted_observation_id == trusted_observation_id
+                assert after_timeout.last_publication_at == trusted_publication_at
+
+                persisted_request = await session.scalar(
+                    select(ContentActivityRefreshRequest)
+                    .where(
+                        ContentActivityRefreshRequest.request_token == timeout_request.request_token
+                    )
+                    .execution_options(populate_existing=True)
+                )
+                assert persisted_request is not None
+                assert persisted_request.state is ContentActivityRefreshRequestState.FAILED
+                assert persisted_request.lease_expires_at is None
+                assert persisted_request.finished_at is not None
+                assert persisted_request.last_error_code == "TRANSPORT_TIMEOUT"
+
+                # A separate transaction can immediately take the same account
+                # lock, proving the timed-out provider scope did not retain it.
+                async with factory() as contender:
+                    locked_account = await asyncio.wait_for(
+                        contender.scalar(
+                            select(InfluencerPlatformAccount)
+                            .where(InfluencerPlatformAccount.id == account.id)
+                            .with_for_update()
+                        ),
+                        timeout=1,
+                    )
+                    assert locked_account is not None
+                    await contender.rollback()
+
+                # The terminal request is no longer active. A new refresh of the
+                # same account acquires the global provider slot and succeeds,
+                # which proves slot release and reconcile-safe request state.
+                recovery_client = ScriptedXhsClient(
+                    {
+                        userid: deque(
+                            (
+                                _publication_attempt(
+                                    observed_at=RUN_AS_OF + timedelta(minutes=1),
+                                    published_at=RUN_AS_OF - timedelta(days=20),
+                                    note_id="after-deadline-timeout",
+                                ),
+                            )
+                        )
+                    }
+                )
+                service.client = cast(TikHubXhsClient, recovery_client)
+                recovery_request = (
+                    await service.create_xhs_refresh_requests(
+                        platform_account_ids=(account.id,),
+                        idempotency_key="provider-deadline-recovery",
+                        operator_id=None,
+                        department_id=None,
+                        ip="192.0.2.42",
+                        user_agent="content-activity-runtime-postgres-test",
+                    )
+                )[0]
+                recovered = await service.process_refresh_request(recovery_request.request_token)
+                assert recovered.claimed
+                assert recovered.state is ContentActivityRefreshRequestState.SUCCEEDED
+                assert recovered.observation_id is not None
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
             await engine.dispose()
 
     asyncio.run(scenario())
