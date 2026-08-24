@@ -1,3 +1,5 @@
+import { useLayoutEffect, useReducer, useRef, useState } from "react";
+
 import type { CandidateCampaignSelection, CandidateMember } from "./types";
 
 /**
@@ -117,6 +119,72 @@ export function candidateSelectionIdentitiesEqual(
     left.generation === right.generation &&
     candidateSelectionScopesEqual(left.scope, right.scope)
   );
+}
+
+function initialCandidateSelection({
+  scope,
+  selected,
+}: {
+  scope: CandidateSelectionScope;
+  selected: CandidateMember[];
+}): CandidateSelectionState {
+  return selected.reduce(
+    (selection, member) =>
+      reduceCandidateSelection(
+        selection,
+        candidateSelectionActions.toggleMember(member, true),
+      ),
+    createCandidateSelection(scope),
+  );
+}
+
+/**
+ * Owns the rendered selection boundary for a Candidate Pool run. Keeping the
+ * identity generation alongside the reducer makes delayed completion callbacks
+ * harmless across A -> B -> A route transitions.
+ */
+export function useCandidateSelectionLifecycle({
+  scope,
+  selected = [],
+}: {
+  scope: CandidateSelectionScope;
+  selected?: CandidateMember[];
+}) {
+  const selectionIdentityRef = useRef<CandidateSelectionIdentity>({
+    scope,
+    generation: 0,
+  });
+  const [selectionGeneration, setSelectionGeneration] = useState(0);
+  useLayoutEffect(() => {
+    if (
+      !candidateSelectionScopesEqual(selectionIdentityRef.current.scope, scope)
+    ) {
+      const nextGeneration = selectionIdentityRef.current.generation + 1;
+      selectionIdentityRef.current = {
+        scope,
+        generation: nextGeneration,
+      };
+      setSelectionGeneration(nextGeneration);
+    }
+  }, [scope.candidatePoolId, scope.runId]);
+  const [storedSelection, dispatchSelection] = useReducer(
+    reduceCandidateSelection,
+    { scope, selected },
+    initialCandidateSelection,
+  );
+  useLayoutEffect(() => {
+    dispatchSelection(candidateSelectionActions.resetScope(scope));
+  }, [scope.candidatePoolId, scope.runId]);
+  const selection = candidateSelectionScopesEqual(storedSelection.scope, scope)
+    ? storedSelection
+    : createCandidateSelection(scope);
+
+  return {
+    dispatchSelection,
+    selection,
+    selectionGeneration,
+    selectionIdentityRef,
+  };
 }
 
 function isExplicitlyEligible(member: CandidateMember): boolean {

@@ -19,14 +19,7 @@ import {
 } from "antd";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import Link from "next/link";
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef,
-  useState,
-} from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AppEmpty } from "@/components/ui/app-empty";
 import { StatusBadge } from "@/components/ui/status-badge";
@@ -46,15 +39,13 @@ import {
   candidateSelectionCount,
   candidateSelectionPageState,
   candidateSelectionPayload,
-  candidateSelectionScopesEqual,
   candidateSelectionUnknownCount,
   candidateSelectionWouldExceedSelectionLimit,
-  createCandidateSelection,
   isCandidateMemberSelectable,
   isCandidateMemberSelected,
-  reduceCandidateSelection,
   type CandidateSelectionScope,
   type CandidateSelectionState,
+  useCandidateSelectionLifecycle,
 } from "./candidate-selection";
 import {
   candidateDateTime,
@@ -84,23 +75,6 @@ import type {
 const { Text } = Typography;
 const attemptKey = () =>
   globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
-
-function initialCandidateSelection({
-  scope,
-  selected,
-}: {
-  scope: CandidateSelectionScope;
-  selected: CandidateMember[];
-}): CandidateSelectionState {
-  return selected.reduce(
-    (selection, member) =>
-      reduceCandidateSelection(
-        selection,
-        candidateSelectionActions.toggleMember(member, true),
-      ),
-    createCandidateSelection(scope),
-  );
-}
 
 type CandidateMemberNavigationScope = {
   candidatePoolId: string;
@@ -633,11 +607,6 @@ export function CandidateRunDetailView({
   };
   const navigationIntentRef = useRef(activeNavigationScope);
   const navigationRequestRef = useRef(0);
-  const selectionIdentityRef = useRef({
-    scope: activeSelectionScope,
-    generation: 0,
-  });
-  const [selectionGeneration, setSelectionGeneration] = useState(0);
   useLayoutEffect(() => {
     const nextScope: CandidateMemberNavigationScope = {
       candidatePoolId: poolId,
@@ -655,33 +624,15 @@ export function CandidateRunDetailView({
       navigationRequestRef.current += 1;
     }
   }, [filter, pageSize, poolId, runId]);
-  useLayoutEffect(() => {
-    const nextScope: CandidateSelectionScope = {
-      candidatePoolId: poolId,
-      runId,
-    };
-    if (
-      !candidateSelectionScopesEqual(
-        selectionIdentityRef.current.scope,
-        nextScope,
-      )
-    ) {
-      const nextGeneration = selectionIdentityRef.current.generation + 1;
-      selectionIdentityRef.current = {
-        scope: nextScope,
-        generation: nextGeneration,
-      };
-      setSelectionGeneration(nextGeneration);
-    }
-  }, [poolId, runId]);
-  const [storedSelection, dispatchSelection] = useReducer(
-    reduceCandidateSelection,
-    {
-      scope: { candidatePoolId: poolId, runId },
-      selected: previewSelectedMembers ?? [],
-    },
-    initialCandidateSelection,
-  );
+  const {
+    dispatchSelection,
+    selection,
+    selectionGeneration,
+    selectionIdentityRef,
+  } = useCandidateSelectionLifecycle({
+    scope: activeSelectionScope,
+    selected: previewSelectedMembers,
+  });
   const membersQuery = useCandidateMembers(
     poolId,
     runId,
@@ -735,19 +686,9 @@ export function CandidateRunDetailView({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [messageApi, previewMode, previewSelectionAttempted]);
-  useLayoutEffect(() => {
-    dispatchSelection(
-      candidateSelectionActions.resetScope({ candidatePoolId: poolId, runId }),
-    );
-  }, [poolId, runId]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
   const policy = policies.data?.find((item) => item.id === run?.policy_id);
-  const selection =
-    storedSelection.scope.candidatePoolId === poolId &&
-    storedSelection.scope.runId === runId
-      ? storedSelection
-      : createCandidateSelection({ candidatePoolId: poolId, runId });
   const memberPages = useMemo(
     () => membersQuery.data?.pages ?? [],
     [membersQuery.data],
@@ -1240,9 +1181,9 @@ export function CandidateRunDetailView({
           </>
         ) : null}
       </Drawer>
-      {selectionPayload ? (
+      {selectionPayload && scopedModalOpen ? (
         <CampaignSelector
-          open={scopedModalOpen}
+          open
           selection={selectionPayload}
           selectedLabel={selectedLabel}
           unknownCount={unknownCount}
