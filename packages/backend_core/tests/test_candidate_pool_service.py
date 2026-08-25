@@ -42,6 +42,7 @@ from backend_core.growth.enums import (
     CandidateResult,
     Phase3AOperationScope,
 )
+from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import (
     CandidatePool,
     CandidatePoolMember,
@@ -427,12 +428,12 @@ def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_histor
                 assert context.operator is not None
                 first = await _account(session, owner=context.operator)
                 second = await _account(session, owner=context.operator)
-                await _content_activity_observation(
+                first_observation = await _content_activity_observation(
                     session,
                     first,
                     last_publication_at=NOW - timedelta(days=90),
                 )
-                await _content_activity_observation(
+                second_observation = await _content_activity_observation(
                     session,
                     second,
                     last_publication_at=NOW - timedelta(days=10),
@@ -452,8 +453,10 @@ def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_histor
 
                 assert [fact.content_activity is not None for fact in facts] == [True, True]
                 assert facts[0].content_activity is not None
+                assert facts[0].content_activity.trusted_observation_id == first_observation.id
                 assert facts[0].content_activity.last_publication_at == NOW - timedelta(days=90)
                 assert facts[1].content_activity is not None
+                assert facts[1].content_activity.trusted_observation_id == second_observation.id
                 assert facts[1].content_activity.last_publication_at == NOW - timedelta(days=10)
                 activity_history_reads = [
                     statement
@@ -1271,16 +1274,21 @@ def test_explicit_long_inactivity_runtime_uses_planner_and_counts_full_policy_ca
                 calls: list[UUID] = []
                 observed_at = datetime.now(UTC)
 
-                async def provider_enricher(platform_account_id: UUID) -> ContentActivityFact:
+                async def provider_enricher(
+                    platform_account_id: UUID,
+                ) -> LongInactivityProviderRefresh:
                     calls.append(platform_account_id)
-                    return ContentActivityFact(
-                        trusted_observed_at=observed_at,
-                        trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
-                        trusted_coverage_status=(
-                            ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+                    return LongInactivityProviderRefresh(
+                        content_activity=ContentActivityFact(
+                            trusted_observed_at=observed_at,
+                            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                            trusted_coverage_status=(
+                                ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+                            ),
+                            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                            last_publication_at=observed_at - timedelta(days=120),
                         ),
-                        trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
-                        last_publication_at=observed_at - timedelta(days=120),
+                        accepted_trusted_observation=True,
                     )
 
                 service = _service(
@@ -1332,14 +1340,19 @@ def test_long_inactivity_runtime_stops_after_twelve_additional_fully_eligible_ca
         observed_at = datetime.now(UTC)
         calls: list[UUID] = []
 
-        async def provider_enricher(platform_account_id: UUID) -> ContentActivityFact:
+        async def provider_enricher(
+            platform_account_id: UUID,
+        ) -> LongInactivityProviderRefresh:
             calls.append(platform_account_id)
-            return ContentActivityFact(
-                trusted_observed_at=observed_at,
-                trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
-                trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
-                trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
-                last_publication_at=observed_at - timedelta(days=120),
+            return LongInactivityProviderRefresh(
+                content_activity=ContentActivityFact(
+                    trusted_observed_at=observed_at,
+                    trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                    trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                    trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                    last_publication_at=observed_at - timedelta(days=120),
+                ),
+                accepted_trusted_observation=True,
             )
 
         service = CandidatePoolService(
@@ -1392,6 +1405,195 @@ def test_long_inactivity_runtime_stops_after_twelve_additional_fully_eligible_ca
             sum(evaluation.result.value == "MATCH" for _facts, evaluation in final_evaluations)
             == 30
         )
+
+    asyncio.run(scenario())
+
+
+def test_stale_trusted_fact_preserved_after_failed_refresh_stays_unknown_and_ineligible() -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        old_observation_id = uuid4()
+        stale_fact = ContentActivityFact(
+            trusted_observation_id=old_observation_id,
+            trusted_observed_at=execution_as_of - timedelta(days=8),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+        calls: list[UUID] = []
+
+        async def provider_failure(platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            calls.append(platform_account_id)
+            # Content Activity correctly retains the prior trusted projection,
+            # but this failed attempt did not accept that old observation.
+            return LongInactivityProviderRefresh(
+                content_activity=stale_fact,
+                accepted_trusted_observation=False,
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_failure,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=stale_fact,
+        )
+        initial = service._evaluate_targeting(policy, facts, as_of=execution_as_of)
+        assert initial.result.value == "UNKNOWN"
+
+        final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[(facts, initial)],
+        )
+
+        assert calls == [facts.platform_account_id]
+        assert final[0][1].result.value == "UNKNOWN"
+        assert execution.fully_eligible_count == 0
+        assert execution.metrics.provider_calls_attempted == 1
+        assert execution.metrics.stopped_by_planned_target is False
+        assert execution.metrics.stopped_by_provider_budget is True
+        assert stale_fact.trusted_observation_id == old_observation_id
+        assert stale_fact.trusted_observed_at == execution_as_of - timedelta(days=8)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("publication_age_days", "expected_result", "expected_fully_eligible"),
+    [
+        pytest.param(120, "MATCH", 1, id="new-inactive-observation-matches"),
+        pytest.param(1, "NOT_MATCH", 0, id="new-recent-observation-does-not-match"),
+    ],
+)
+def test_successful_new_trusted_refresh_is_evaluated_at_candidate_run_as_of(
+    publication_age_days: int,
+    expected_result: str,
+    expected_fully_eligible: int,
+) -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        stale_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(days=8),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+        fresh_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(minutes=1),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=publication_age_days),
+        )
+
+        async def provider_success(_platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            return LongInactivityProviderRefresh(
+                content_activity=fresh_fact,
+                accepted_trusted_observation=True,
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_success,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=stale_fact,
+        )
+
+        final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[
+                (facts, service._evaluate_targeting(policy, facts, as_of=execution_as_of))
+            ],
+        )
+
+        assert final[0][1].result.value == expected_result
+        assert execution.fully_eligible_count == expected_fully_eligible
+        assert execution.metrics.provider_calls_attempted == 1
+        assert execution.metrics.stopped_by_planned_target is (expected_fully_eligible == 1)
+        assert execution.metrics.stopped_by_provider_budget is True
+
+    asyncio.run(scenario())
+
+
+def test_fresh_trusted_cache_short_circuits_failed_refresh_callback() -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        calls: list[UUID] = []
+        fresh_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(minutes=1),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+
+        async def provider_failure(platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            calls.append(platform_account_id)
+            raise AssertionError("fresh trusted cache must not be refreshed")
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_failure,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=fresh_fact,
+        )
+        initial = service._evaluate_targeting(policy, facts, as_of=execution_as_of)
+
+        _final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[(facts, initial)],
+        )
+
+        assert initial.result.value == "MATCH"
+        assert calls == []
+        assert execution.fully_eligible_count == 1
+        assert execution.metrics.provider_calls_attempted == 0
 
     asyncio.run(scenario())
 

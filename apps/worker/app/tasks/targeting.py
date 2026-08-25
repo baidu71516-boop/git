@@ -13,10 +13,10 @@ from backend_core.config import Settings, get_settings
 from backend_core.content_activity.service import ContentActivityError, ContentActivityService
 from backend_core.db import Database
 from backend_core.growth.enums import CandidatePoolRunStatus
+from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import CandidatePoolRun
 from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.service import CandidatePoolService, TargetingError
-from backend_core.growth.targeting import ContentActivityFact
 from backend_core.influencers.freshness import (
     ContentActivityFreshnessPolicy,
     FreshnessPolicy,
@@ -77,6 +77,72 @@ def _long_inactivity_provider_budget(settings: Settings) -> int:
     return settings.content_activity_provider_max_calls_per_run
 
 
+async def _enrich_long_inactivity_account(
+    *,
+    database: Database,
+    settings: Settings,
+    run_id: UUID,
+    platform_account_id: UUID,
+) -> LongInactivityProviderRefresh:
+    """Refresh one account and attest only to this attempt's accepted fact.
+
+    Failed attempts may leave an older trusted projection intact.  Returning
+    that projection is useful for diagnostics, but it must not be treated as a
+    newly accepted observation by Candidate Pool execution.
+    """
+
+    async with database.session_factory() as enrichment_session:
+        service = ContentActivityService(enrichment_session, settings)
+        try:
+            refreshes = await service.create_xhs_refresh_requests(
+                platform_account_ids=(platform_account_id,),
+                idempotency_key=(f"candidate-long-inactivity:{run_id}:{platform_account_id}"),
+                operator_id=None,
+                department_id=None,
+                ip="worker",
+                user_agent="celery:long_inactivity_enrichment",
+            )
+            if len(refreshes) != 1:
+                await enrichment_session.rollback()
+                return LongInactivityProviderRefresh(
+                    content_activity=None,
+                    accepted_trusted_observation=False,
+                )
+            process_result = await service.process_refresh_request(refreshes[0].request_token)
+            facts = await CandidatePoolRepository(enrichment_session)._content_activity_facts_as_of(
+                account_ids=(platform_account_id,),
+                as_of=datetime.now(UTC),
+            )
+            await enrichment_session.rollback()
+            content_activity = facts.get(platform_account_id)
+            return LongInactivityProviderRefresh(
+                content_activity=content_activity,
+                accepted_trusted_observation=(
+                    process_result.observation_id is not None
+                    and content_activity is not None
+                    and content_activity.trusted_observation_id == process_result.observation_id
+                ),
+            )
+        except (ContentActivityError, ValueError):
+            await enrichment_session.rollback()
+            return LongInactivityProviderRefresh(
+                content_activity=None,
+                accepted_trusted_observation=False,
+            )
+        except Exception:
+            # The Content Activity service holds the secret-free failure
+            # observation/lease authority. The targeting outcome is only
+            # UNKNOWN; never surface provider exception text here.
+            await enrichment_session.rollback()
+            LOGGER.warning("long_inactivity_provider_enrichment_failed")
+            return LongInactivityProviderRefresh(
+                content_activity=None,
+                accepted_trusted_observation=False,
+            )
+        finally:
+            await service.aclose()
+
+
 async def _materialize(run_id: UUID) -> bool:
     """Delegate one ID-only delivery to the durable Candidate Pool service."""
 
@@ -85,50 +151,13 @@ async def _materialize(run_id: UUID) -> bool:
 
     async def enrich_long_inactivity_account(
         platform_account_id: UUID,
-    ) -> ContentActivityFact | None:
-        """Use one native leased Content Activity request for one XHS candidate.
-
-        The surrounding Candidate Run transaction is intentionally separate
-        from the provider request transaction.  A worker loss rolls the run
-        back to PENDING while this durable request/projection remains reusable
-        as trusted cache on redelivery.
-        """
-
-        async with database.session_factory() as enrichment_session:
-            service = ContentActivityService(enrichment_session, settings)
-            try:
-                refreshes = await service.create_xhs_refresh_requests(
-                    platform_account_ids=(platform_account_id,),
-                    idempotency_key=(f"candidate-long-inactivity:{run_id}:{platform_account_id}"),
-                    operator_id=None,
-                    department_id=None,
-                    ip="worker",
-                    user_agent="celery:long_inactivity_enrichment",
-                )
-                if len(refreshes) != 1:
-                    await enrichment_session.rollback()
-                    return None
-                await service.process_refresh_request(refreshes[0].request_token)
-                facts = await CandidatePoolRepository(
-                    enrichment_session
-                )._content_activity_facts_as_of(
-                    account_ids=(platform_account_id,),
-                    as_of=datetime.now(UTC),
-                )
-                await enrichment_session.rollback()
-                return facts.get(platform_account_id)
-            except (ContentActivityError, ValueError):
-                await enrichment_session.rollback()
-                return None
-            except Exception:
-                # The Content Activity service holds the secret-free failure
-                # observation/lease authority. The targeting outcome is only
-                # UNKNOWN; never surface provider exception text here.
-                await enrichment_session.rollback()
-                LOGGER.warning("long_inactivity_provider_enrichment_failed")
-                return None
-            finally:
-                await service.aclose()
+    ) -> LongInactivityProviderRefresh:
+        return await _enrich_long_inactivity_account(
+            database=database,
+            settings=settings,
+            run_id=run_id,
+            platform_account_id=platform_account_id,
+        )
 
     try:
         async with database.session_factory() as session:

@@ -196,6 +196,7 @@ class ContentActivityFact(FrozenTargetingContract):
     """
 
     schema_version: Literal[1] = 1
+    trusted_observation_id: UUID | None = None
     trusted_observed_at: datetime | None = None
     trusted_observation_status: ContentActivityObservationStatus | None = None
     trusted_coverage_status: ContentActivityCoverageStatus | None = None

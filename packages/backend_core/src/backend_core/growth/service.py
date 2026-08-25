@@ -31,6 +31,7 @@ from backend_core.growth.long_inactivity import (
     LongInactivityExecutionCandidate,
     LongInactivityExecutionRequest,
     LongInactivityExecutionResult,
+    LongInactivityProviderRefresh,
     ProviderEnrichmentOutcome,
     execute_bounded_long_inactivity_enrichment,
 )
@@ -63,7 +64,6 @@ from backend_core.growth.schemas import (
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
-    ContentActivityFact,
     SellerTargetingPolicy,
     TargetingEvaluation,
     TargetingEvaluationResult,
@@ -83,7 +83,7 @@ from backend_core.influencers.schemas import (
     PlatformAccountIdentitySummary,
 )
 
-LongInactivityProviderEnricher = Callable[[UUID], Awaitable[ContentActivityFact | None]]
+LongInactivityProviderEnricher = Callable[[UUID], Awaitable[LongInactivityProviderRefresh]]
 
 
 class TargetingError(Exception):
@@ -96,6 +96,17 @@ class TargetingError(Exception):
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _execution_as_of(value: datetime) -> datetime:
+    """Normalize a stored Candidate Run instant without changing its clock."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        # SQLite test storage omits the timezone marker even for the run's UTC
+        # DateTime(timezone=True) column.  The durable instant is still the
+        # run's authoritative execution clock, not a new "now" value.
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 IDEMPOTENCY_RESULT_SCHEMA_VERSION = 1
@@ -1227,25 +1238,31 @@ class CandidatePoolService:
                     full_policy_result=TargetingEvaluationResult.UNKNOWN,
                 )
             try:
-                refreshed_activity = await provider_enricher(candidate.platform_account_id)
+                refresh = await provider_enricher(candidate.platform_account_id)
             except Exception:
                 # Provider transport/governance failures are never candidate
                 # matches. Content Activity persists its own secret-free
                 # diagnostics and lease state; targeting stays fail-closed.
-                refreshed_activity = None
-            if refreshed_activity is None:
+                refresh = LongInactivityProviderRefresh(
+                    content_activity=None,
+                    accepted_trusted_observation=False,
+                )
+            if not refresh.accepted_trusted_observation or refresh.content_activity is None:
                 return ProviderEnrichmentOutcome(
                     long_inactivity_result=TargetingEvaluationResult.UNKNOWN,
                     full_policy_result=TargetingEvaluationResult.UNKNOWN,
                 )
+            refreshed_activity = refresh.content_activity
             refreshed_facts = facts_by_account[candidate.platform_account_id].model_copy(
                 update={"content_activity": refreshed_activity}
             )
-            evaluation_at = refreshed_activity.trusted_observed_at or _utc_now()
             refreshed_evaluation = self._evaluate_targeting(
                 policy,
                 refreshed_facts,
-                as_of=evaluation_at,
+                # Candidate Run ``as_of`` is the one durable authoritative
+                # execution clock. Never make preserved (or new) evidence
+                # fresh by evaluating it at its own observation timestamp.
+                as_of=_execution_as_of(run.as_of),
             )
             updated[candidate.platform_account_id] = refreshed_evaluation
             long_result, _source = self._long_inactivity_result_and_source(refreshed_evaluation)

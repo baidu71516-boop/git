@@ -15,6 +15,7 @@ from uuid import UUID
 from pydantic import Field, StrictBool, StrictInt, model_validator
 
 from backend_core.growth.targeting import (
+    ContentActivityFact,
     FrozenTargetingContract,
     TargetingEvaluationResult,
 )
@@ -58,6 +59,19 @@ class ProviderEnrichmentOutcome(FrozenTargetingContract):
 
     long_inactivity_result: TargetingEvaluationResult
     full_policy_result: TargetingEvaluationResult
+
+
+@dataclass(frozen=True, slots=True)
+class LongInactivityProviderRefresh:
+    """One provider attempt's safe activity fact plus acceptance provenance.
+
+    A failed refresh may return a preserved older trusted projection. Only an
+    exact identity match to this attempt's newly accepted trusted observation
+    authorizes the Candidate planner to use the returned fact for eligibility.
+    """
+
+    content_activity: ContentActivityFact | None
+    accepted_trusted_observation: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +184,7 @@ __all__ = [
     "LongInactivityExecutionMetrics",
     "LongInactivityExecutionRequest",
     "LongInactivityExecutionResult",
+    "LongInactivityProviderRefresh",
     "ProviderEnrichmentOutcome",
     "execute_bounded_long_inactivity_enrichment",
 ]

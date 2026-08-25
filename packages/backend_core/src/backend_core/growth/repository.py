@@ -944,6 +944,7 @@ class CandidatePoolRepository:
             latest = latest_by_account.get(account_id)
             trusted = trusted_by_account.get(account_id)
             facts[account_id] = ContentActivityFact(
+                trusted_observation_id=trusted.id if trusted is not None else None,
                 trusted_observed_at=_utc(trusted.observed_at) if trusted is not None else None,
                 trusted_observation_status=(
                     trusted.observation_status if trusted is not None else None

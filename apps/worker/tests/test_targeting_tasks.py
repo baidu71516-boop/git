@@ -5,15 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from app.celery_app import celery_app
 from app.tasks import targeting as targeting_tasks
 from backend_core.config import Settings
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
 from backend_core.growth.service import TargetingError
+from backend_core.growth.targeting import ContentActivityFact
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 REQUIRED_WORKER_QUEUES = {
@@ -191,6 +199,70 @@ def test_materialize_preserves_normalized_targeting_errors() -> None:
         asyncio.run(targeting_tasks._materialize(run_id))
 
     database.close.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize(
+    ("attempt_observation_id", "trusted_observation_id", "accepted"),
+    [
+        pytest.param(uuid4(), uuid4(), False, id="failed-attempt-preserves-old-trusted-fact"),
+        pytest.param(uuid4(), None, True, id="attempt-accepted-current-trusted-fact"),
+    ],
+)
+def test_long_inactivity_worker_attests_only_to_this_attempts_accepted_observation(
+    attempt_observation_id: UUID,
+    trusted_observation_id: UUID | None,
+    accepted: bool,
+) -> None:
+    run_id = uuid4()
+    account_id = uuid4()
+    observed_at = datetime.now(UTC) - timedelta(days=8)
+    trusted_observation_id = trusted_observation_id or attempt_observation_id
+    stale_fact = ContentActivityFact(
+        trusted_observation_id=trusted_observation_id,
+        trusted_observed_at=observed_at,
+        trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+        trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+        trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+        last_publication_at=observed_at - timedelta(days=120),
+    )
+    session = MagicMock()
+    session.rollback = AsyncMock(return_value=None)
+    database = MagicMock()
+    database.session_factory.return_value = _async_context(session)
+    content_activity_service = MagicMock()
+    content_activity_service.create_xhs_refresh_requests = AsyncMock(
+        return_value=(SimpleNamespace(request_token=uuid4()),)
+    )
+    content_activity_service.process_refresh_request = AsyncMock(
+        return_value=SimpleNamespace(observation_id=attempt_observation_id)
+    )
+    content_activity_service.aclose = AsyncMock(return_value=None)
+    repository = MagicMock()
+    repository._content_activity_facts_as_of = AsyncMock(return_value={account_id: stale_fact})
+
+    with (
+        patch.object(
+            targeting_tasks,
+            "ContentActivityService",
+            return_value=content_activity_service,
+        ),
+        patch.object(targeting_tasks, "CandidatePoolRepository", return_value=repository),
+    ):
+        result = asyncio.run(
+            targeting_tasks._enrich_long_inactivity_account(
+                database=database,
+                settings=_settings(),
+                run_id=run_id,
+                platform_account_id=account_id,
+            )
+        )
+
+    assert result.content_activity is stale_fact
+    assert result.accepted_trusted_observation is accepted
+    assert stale_fact.trusted_observation_id == trusted_observation_id
+    assert stale_fact.trusted_observed_at == observed_at
+    session.rollback.assert_awaited_once_with()
+    content_activity_service.aclose.assert_awaited_once_with()
 
 
 def test_pending_run_reconciler_republishes_only_pending_ids_in_a_bounded_sweep() -> None:
