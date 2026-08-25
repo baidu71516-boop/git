@@ -29,7 +29,7 @@ test:
 	uv run pytest packages/backend_core/tests tests/integration tests/smoke
 	PYTHONPATH=apps/api uv run pytest apps/api/tests
 	PYTHONPATH=apps/worker uv run pytest apps/worker/tests
-	pnpm test
+	pnpm test:web:release
 
 test-freshness-postgres:
 	uv run pytest -s tests/integration/test_influencer_freshness_postgres.py

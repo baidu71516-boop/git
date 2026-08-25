@@ -6,8 +6,10 @@
   "scripts": {
     "lint": "pnpm --filter @influencer-outreach/web lint",
     "typecheck": "pnpm --filter @influencer-outreach/web typecheck",
-    "test": "pnpm --filter @influencer-outreach/web test",
+    "test": "pnpm test:web:release",
+    "test:web:release": "node apps/web/scripts/run-release-tests.mjs",
+    "test:web:manifest:update": "node apps/web/scripts/run-release-tests.mjs --manifest-update",
+    "test:web:stress": "node apps/web/scripts/run-release-tests.mjs --stress",
     "build": "pnpm --filter @influencer-outreach/web build"
   }
 }
-
