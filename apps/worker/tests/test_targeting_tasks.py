@@ -51,6 +51,16 @@ def test_targeting_tasks_routes_and_reconciler_are_registered() -> None:
         "queue": "targeting"
     }
 
+    long_inactivity_materializer = celery_app.tasks[
+        "targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment"
+    ]
+    assert long_inactivity_materializer.ignore_result is True
+    assert long_inactivity_materializer.acks_late is True
+    assert long_inactivity_materializer.reject_on_worker_lost is True
+    assert celery_app.conf.task_routes[
+        "targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment"
+    ] == {"queue": "analytics"}
+
     reconciler = celery_app.tasks["targeting.reconcile_pending_candidate_pool_runs"]
     assert reconciler.ignore_result is True
     assert celery_app.conf.task_routes["targeting.reconcile_pending_candidate_pool_runs"] == {
@@ -102,6 +112,17 @@ def test_materializer_entrypoint_validates_and_delegates_id_only_payload() -> No
     delegate.assert_awaited_once_with(run_id)
 
 
+def test_long_inactivity_materializer_uses_the_same_id_only_runtime_path() -> None:
+    run_id = uuid4()
+
+    with patch.object(targeting_tasks, "_materialize", AsyncMock()) as delegate:
+        targeting_tasks.materialize_candidate_pool_run_with_long_inactivity_enrichment.run(
+            str(run_id)
+        )
+
+    delegate.assert_awaited_once_with(run_id)
+
+
 def test_materializer_rejects_invalid_broker_identifier_before_database_work() -> None:
     with pytest.raises(ValueError):
         targeting_tasks.materialize_candidate_pool_run.run("not-a-uuid")
@@ -144,6 +165,8 @@ def test_materialize_builds_service_with_configured_freshness() -> None:
     assert freshness_policy.fresh_duration.days == 3
     assert freshness_policy.aging_duration.days == 10
     assert freshness_policy.stale_duration.days == 20
+    assert service_type.call_args.kwargs["long_inactivity_provider_budget"] == 0
+    assert callable(service_type.call_args.kwargs["long_inactivity_provider_enricher"])
     service.materialize_run.assert_awaited_once_with(run_id)
     database.close.assert_awaited_once_with()
 

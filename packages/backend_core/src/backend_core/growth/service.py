@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -25,6 +26,14 @@ from backend_core.growth.enums import (
     CandidateResult,
     Phase3AOperationScope,
 )
+from backend_core.growth.long_inactivity import (
+    LongInactivityEvidenceSource,
+    LongInactivityExecutionCandidate,
+    LongInactivityExecutionRequest,
+    LongInactivityExecutionResult,
+    ProviderEnrichmentOutcome,
+    execute_bounded_long_inactivity_enrichment,
+)
 from backend_core.growth.models import (
     CandidatePool,
     CandidatePoolRun,
@@ -44,6 +53,7 @@ from backend_core.growth.schemas import (
     CandidatePoolRunMemberPage,
     CandidatePoolRunPage,
     CandidatePoolRunPublic,
+    LongInactivityEnrichmentRequest,
     TargetingPolicyCreateInput,
     TargetingPolicyCreateResultPublic,
     TargetingPolicyPublic,
@@ -52,12 +62,17 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
+    CandidateFactBundle,
+    ContentActivityFact,
     SellerTargetingPolicy,
+    TargetingEvaluation,
+    TargetingEvaluationResult,
     TargetingReasonCode,
     evaluate_targeting,
     parse_targeting_policy,
 )
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
+from backend_core.influencers.enums import Platform
 from backend_core.influencers.freshness import (
     ContentActivityFreshnessPolicy,
     FreshnessPolicy,
@@ -67,6 +82,8 @@ from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
     PlatformAccountIdentitySummary,
 )
+
+LongInactivityProviderEnricher = Callable[[UUID], Awaitable[ContentActivityFact | None]]
 
 
 class TargetingError(Exception):
@@ -95,6 +112,8 @@ class CandidatePoolService:
         freshness_policy: FreshnessPolicy,
         content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
         grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy | None = None,
+        long_inactivity_provider_enricher: LongInactivityProviderEnricher | None = None,
+        long_inactivity_provider_budget: int = 0,
     ) -> None:
         self.session = session
         self.repository = CandidatePoolRepository(session)
@@ -110,6 +129,10 @@ class CandidatePoolService:
         self.grey_dolphin_activity_freshness_policy = (
             grey_dolphin_activity_freshness_policy or GreyDolphinActivityFreshnessPolicy()
         )
+        if long_inactivity_provider_budget < 0:
+            raise ValueError("long_inactivity_provider_budget must not be negative")
+        self.long_inactivity_provider_enricher = long_inactivity_provider_enricher
+        self.long_inactivity_provider_budget = long_inactivity_provider_budget
 
     @staticmethod
     def _department_id(context: AuthContext) -> UUID:
@@ -874,6 +897,7 @@ class CandidatePoolService:
         context: AuthContext,
         *,
         pool_id: UUID,
+        long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None,
         department_id: UUID | None = None,
         idempotency_key: str,
         ip: str = "unknown",
@@ -892,12 +916,25 @@ class CandidatePoolService:
                 )
             policy = self._typed_policy(pool, policy_record)
             self._require_reviewed_buyer_taxonomy(policy, status_code=409)
+            if long_inactivity_enrichment is not None and (
+                not isinstance(policy, SellerTargetingPolicy) or policy.long_inactivity is None
+            ):
+                raise TargetingError(
+                    422,
+                    "LONG_INACTIVITY_ENRICHMENT_UNAVAILABLE",
+                    "Long Inactivity enrichment requires a Seller Long Inactivity policy",
+                )
             request_hash = hash_document(
                 {
                     "operation": "candidate_pool_run",
                     "pool_id": pool.id,
                     "policy_id": policy_record.id,
                     "policy_hash": policy.canonical_hash,
+                    "long_inactivity_enrichment": (
+                        long_inactivity_enrichment.model_dump(mode="json")
+                        if long_inactivity_enrichment is not None
+                        else None
+                    ),
                 }
             )
             existing = await self.repository.get_run_by_idempotency_key(
@@ -930,6 +967,10 @@ class CandidatePoolService:
                     "as_of": as_of,
                 }
             )
+            if long_inactivity_enrichment is not None:
+                watermark["long_inactivity_enrichment"] = {
+                    "request": long_inactivity_enrichment.model_dump(mode="json")
+                }
             run = CandidatePoolRun(
                 pool_id=pool.id,
                 policy_id=policy_record.id,
@@ -1050,6 +1091,201 @@ class CandidatePoolService:
             redacted_evidence=evidence,
         )
 
+    @staticmethod
+    def _long_inactivity_enrichment_request(
+        run: CandidatePoolRun,
+    ) -> LongInactivityEnrichmentRequest | None:
+        raw_watermark = run.input_watermark
+        if not isinstance(raw_watermark, dict):
+            return None
+        raw_execution = raw_watermark.get("long_inactivity_enrichment")
+        if raw_execution is None:
+            return None
+        if not isinstance(raw_execution, dict):
+            raise TargetingError(
+                409,
+                "LONG_INACTIVITY_ENRICHMENT_INVALID",
+                "Long Inactivity enrichment request is invalid",
+            )
+        try:
+            return LongInactivityEnrichmentRequest.model_validate(raw_execution["request"])
+        except (KeyError, TypeError, ValidationError) as error:
+            raise TargetingError(
+                409,
+                "LONG_INACTIVITY_ENRICHMENT_INVALID",
+                "Long Inactivity enrichment request is invalid",
+            ) from error
+
+    @staticmethod
+    def _long_inactivity_result_and_source(
+        evaluation: TargetingEvaluation,
+    ) -> tuple[TargetingEvaluationResult, LongInactivityEvidenceSource]:
+        criteria = evaluation.redacted_evidence.get("criteria")
+        if not isinstance(criteria, list):
+            raise ValueError("long inactivity criterion is missing")
+        for criterion in criteria:
+            if not isinstance(criterion, dict) or criterion.get("criterion") != "long_inactivity":
+                continue
+            try:
+                result = TargetingEvaluationResult(criterion["result"])
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("long inactivity result is invalid") from error
+            observed = criterion.get("observed")
+            source = observed.get("source") if isinstance(observed, dict) else None
+            if result is TargetingEvaluationResult.UNKNOWN:
+                return result, LongInactivityEvidenceSource.UNKNOWN
+            if source == LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY.value:
+                return result, LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY
+            if source == LongInactivityEvidenceSource.GREY_DOLPHIN.value:
+                return result, LongInactivityEvidenceSource.GREY_DOLPHIN
+            raise ValueError("resolved long inactivity evidence source is invalid")
+        raise ValueError("long inactivity criterion is missing")
+
+    def _evaluate_targeting(
+        self,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        facts: CandidateFactBundle,
+        *,
+        as_of: datetime,
+    ) -> TargetingEvaluation:
+        return evaluate_targeting(
+            policy,
+            facts,
+            as_of=as_of,
+            content_activity_freshness_policy=self.content_activity_freshness_policy,
+            grey_dolphin_activity_freshness_policy=(self.grey_dolphin_activity_freshness_policy),
+        )
+
+    async def _execute_long_inactivity_enrichment(
+        self,
+        *,
+        run: CandidatePoolRun,
+        policy: SellerTargetingPolicy,
+        request: LongInactivityEnrichmentRequest,
+        evaluations: list[tuple[CandidateFactBundle, TargetingEvaluation]],
+    ) -> tuple[
+        list[tuple[CandidateFactBundle, TargetingEvaluation]],
+        LongInactivityExecutionResult,
+    ]:
+        """Run the opt-in D1A.1 path and retain full-policy evidence per candidate.
+
+        The materializer is the upper Candidate planner, so it establishes the
+        pre-existing fully eligible count from the complete policy.  The
+        lower-level planner receives only deterministic activity state and can
+        never promote a raw Long Inactivity match to an assignable candidate.
+        """
+
+        base_policy = policy.model_copy(update={"long_inactivity": None})
+        updated: dict[UUID, TargetingEvaluation] = {}
+        candidates: list[LongInactivityExecutionCandidate] = []
+        already_fully_eligible = sum(
+            evaluation.result is TargetingEvaluationResult.MATCH
+            for _facts, evaluation in evaluations
+        )
+        for order, (facts, evaluation) in enumerate(evaluations):
+            local_result, source = self._long_inactivity_result_and_source(evaluation)
+            base_result = self._evaluate_targeting(base_policy, facts, as_of=run.as_of).result
+            candidates.append(
+                LongInactivityExecutionCandidate(
+                    platform_account_id=facts.platform_account_id,
+                    order=order,
+                    local_result=local_result,
+                    evidence_source=source,
+                    # Current provider capability is intentionally XHS-only.
+                    # Unavailable platforms stay UNKNOWN without spending an
+                    # execution allowance or manufacturing a provider route.
+                    eligible_if_activity_resolved=(
+                        local_result is TargetingEvaluationResult.UNKNOWN
+                        and base_result is TargetingEvaluationResult.MATCH
+                        and facts.platform is Platform.XIAOHONGSHU
+                    ),
+                )
+            )
+
+        effective_budget = min(
+            request.max_provider_enrichment,
+            (
+                self.long_inactivity_provider_budget
+                if self.long_inactivity_provider_enricher is not None
+                else 0
+            ),
+        )
+        execution_request = LongInactivityExecutionRequest(
+            planned_assignable_target=request.planned_assignable_target,
+            already_fully_eligible=already_fully_eligible,
+            max_provider_enrichment=effective_budget,
+        )
+        facts_by_account = {facts.platform_account_id: facts for facts, _evaluation in evaluations}
+
+        async def enrich_one(
+            candidate: LongInactivityExecutionCandidate,
+        ) -> ProviderEnrichmentOutcome:
+            provider_enricher = self.long_inactivity_provider_enricher
+            if provider_enricher is None:
+                return ProviderEnrichmentOutcome(
+                    long_inactivity_result=TargetingEvaluationResult.UNKNOWN,
+                    full_policy_result=TargetingEvaluationResult.UNKNOWN,
+                )
+            try:
+                refreshed_activity = await provider_enricher(candidate.platform_account_id)
+            except Exception:
+                # Provider transport/governance failures are never candidate
+                # matches. Content Activity persists its own secret-free
+                # diagnostics and lease state; targeting stays fail-closed.
+                refreshed_activity = None
+            if refreshed_activity is None:
+                return ProviderEnrichmentOutcome(
+                    long_inactivity_result=TargetingEvaluationResult.UNKNOWN,
+                    full_policy_result=TargetingEvaluationResult.UNKNOWN,
+                )
+            refreshed_facts = facts_by_account[candidate.platform_account_id].model_copy(
+                update={"content_activity": refreshed_activity}
+            )
+            evaluation_at = refreshed_activity.trusted_observed_at or _utc_now()
+            refreshed_evaluation = self._evaluate_targeting(
+                policy,
+                refreshed_facts,
+                as_of=evaluation_at,
+            )
+            updated[candidate.platform_account_id] = refreshed_evaluation
+            long_result, _source = self._long_inactivity_result_and_source(refreshed_evaluation)
+            return ProviderEnrichmentOutcome(
+                long_inactivity_result=long_result,
+                full_policy_result=refreshed_evaluation.result,
+            )
+
+        result = await execute_bounded_long_inactivity_enrichment(
+            execution_request,
+            candidates,
+            enrich_one=enrich_one,
+        )
+        return (
+            [
+                (facts, updated.get(facts.platform_account_id, evaluation))
+                for facts, evaluation in evaluations
+            ],
+            result,
+        )
+
+    @staticmethod
+    def _long_inactivity_execution_result_document(
+        result: LongInactivityExecutionResult,
+    ) -> dict[str, Any]:
+        metrics = result.metrics
+        return {
+            "fully_eligible_count": result.fully_eligible_count,
+            "candidates_evaluated": metrics.candidates_evaluated,
+            "resolved_from_content_activity_cache": metrics.resolved_from_content_activity_cache,
+            "resolved_from_grey_dolphin": metrics.resolved_from_grey_dolphin,
+            "remained_unknown": metrics.remained_unknown,
+            "provider_calls_attempted": metrics.provider_calls_attempted,
+            "provider_calls_avoided_by_grey_dolphin": (
+                metrics.provider_calls_avoided_by_grey_dolphin
+            ),
+            "target_reached": metrics.stopped_by_planned_target,
+            "budget_reached": metrics.stopped_by_provider_budget,
+        }
+
     async def materialize_run(self, run_id: UUID) -> CandidatePoolRun | None:
         """Claim and materialize one durable run in a single replay-safe transaction."""
 
@@ -1099,40 +1335,85 @@ class CandidatePoolService:
             input_watermark=run.input_watermark,
         )
         try:
+            enrichment_request = self._long_inactivity_enrichment_request(run)
+            if enrichment_request is not None and not isinstance(policy, SellerTargetingPolicy):
+                raise TargetingError(
+                    409,
+                    "LONG_INACTIVITY_ENRICHMENT_INVALID",
+                    "Long Inactivity enrichment requires a Seller Long Inactivity policy",
+                )
+            if (
+                enrichment_request is not None
+                and isinstance(policy, SellerTargetingPolicy)
+                and policy.long_inactivity is None
+            ):
+                raise TargetingError(
+                    409,
+                    "LONG_INACTIVITY_ENRICHMENT_INVALID",
+                    "Long Inactivity enrichment requires a Seller Long Inactivity policy",
+                )
             match_count = 0
             unknown_count = 0
             not_match_count = 0
-            async for facts in self.repository.iter_candidate_fact_batches(
-                pool=pool,
-                policy=policy,
-                as_of=run.as_of,
-                freshness_policy=self.freshness_policy,
-                collection_context=collection_context,
-            ):
+            if enrichment_request is None:
+                async for facts in self.repository.iter_candidate_fact_batches(
+                    pool=pool,
+                    policy=policy,
+                    as_of=run.as_of,
+                    freshness_policy=self.freshness_policy,
+                    collection_context=collection_context,
+                ):
+                    increments = self.repository.add_evaluation_batch(
+                        run=run,
+                        evaluations=(
+                            (fact, self._evaluate_targeting(policy, fact, as_of=run.as_of))
+                            for fact in facts
+                        ),
+                    )
+                    match_count += increments[0]
+                    unknown_count += increments[1]
+                    not_match_count += increments[2]
+                    await self.session.flush()
+            else:
+                # Provider work occurs only for this explicit run option. We
+                # first resolve the complete Candidate policy cheaply for the
+                # authoritative order, then hand only unresolved XHS activity
+                # candidates to the bounded planner.
+                initial_evaluations: list[tuple[CandidateFactBundle, TargetingEvaluation]] = []
+                async for facts in self.repository.iter_candidate_fact_batches(
+                    pool=pool,
+                    policy=policy,
+                    as_of=run.as_of,
+                    freshness_policy=self.freshness_policy,
+                    collection_context=collection_context,
+                ):
+                    initial_evaluations.extend(
+                        (fact, self._evaluate_targeting(policy, fact, as_of=run.as_of))
+                        for fact in facts
+                    )
+                assert isinstance(policy, SellerTargetingPolicy)
+                evaluations, enrichment_result = await self._execute_long_inactivity_enrichment(
+                    run=run,
+                    policy=policy,
+                    request=enrichment_request,
+                    evaluations=initial_evaluations,
+                )
                 increments = self.repository.add_evaluation_batch(
                     run=run,
-                    evaluations=(
-                        (
-                            fact,
-                            evaluate_targeting(
-                                policy,
-                                fact,
-                                as_of=run.as_of,
-                                content_activity_freshness_policy=(
-                                    self.content_activity_freshness_policy
-                                ),
-                                grey_dolphin_activity_freshness_policy=(
-                                    self.grey_dolphin_activity_freshness_policy
-                                ),
-                            ),
-                        )
-                        for fact in facts
-                    ),
+                    evaluations=evaluations,
                 )
                 match_count += increments[0]
                 unknown_count += increments[1]
                 not_match_count += increments[2]
                 await self.session.flush()
+                enrichment_watermark = dict(run.input_watermark or {})
+                raw_execution = enrichment_watermark.get("long_inactivity_enrichment")
+                if isinstance(raw_execution, dict):
+                    raw_execution["result"] = self._long_inactivity_execution_result_document(
+                        enrichment_result
+                    )
+                    enrichment_watermark["long_inactivity_enrichment"] = raw_execution
+                    run.input_watermark = canonical_value(enrichment_watermark)
             run.match_count = match_count
             run.unknown_count = unknown_count
             run.not_match_count = not_match_count
@@ -1154,6 +1435,13 @@ class CandidatePoolService:
             )
             await self.session.commit()
             return run
+        except TargetingError as error:
+            return await self._mark_run_failed(
+                run=run,
+                pool=pool,
+                error_code=error.code,
+                error_message=error.message,
+            )
         except BaseException:
             await self.session.rollback()
             failed_run = await self.repository.get_run_any(run_id, for_update=True)

@@ -396,12 +396,11 @@ async def reserve_candidate_pool_run(
     dispatcher: Annotated[TargetingTaskDispatcher, Depends(get_targeting_task_dispatcher)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> JSONResponse:
-    # The closed request body is intentionally empty; server state supplies the policy and as_of.
-    _ = payload
     run = await _service_call(
         service.reserve_run(
             context,
             pool_id=pool_id,
+            long_inactivity_enrichment=payload.long_inactivity_enrichment,
             department_id=scope.department_id,
             idempotency_key=_single_idempotency_key(request, idempotency_key),
             ip=get_client_ip(request),
@@ -412,7 +411,10 @@ async def reserve_candidate_pool_run(
         try:
             # reserve_run commits before returning, so publication cannot outrun
             # the durable PENDING record that the worker will materialize.
-            await dispatcher.materialize(run.id)
+            if payload.long_inactivity_enrichment is None:
+                await dispatcher.materialize(run.id)
+            else:
+                await dispatcher.materialize_with_long_inactivity_enrichment(run.id)
         except Exception:
             # Retain PENDING state for the worker reconciler to republish.
             _log_dispatch_failure(run_id=run.id)

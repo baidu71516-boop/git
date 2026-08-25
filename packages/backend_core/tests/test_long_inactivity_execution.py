@@ -238,3 +238,98 @@ def test_execution_order_is_deterministic_and_rejects_non_authoritative_input() 
                 enrich_one=enrich_one,
             )
         )
+
+
+def test_final_candidate_reaching_target_sets_terminal_target_flag() -> None:
+    result, _calls = _run(
+        LongInactivityExecutionRequest(
+            planned_assignable_target=2,
+            already_fully_eligible=1,
+            max_provider_enrichment=3,
+        ),
+        (_candidate(0),),
+        (
+            ProviderEnrichmentOutcome(
+                long_inactivity_result=TargetingEvaluationResult.MATCH,
+                full_policy_result=TargetingEvaluationResult.MATCH,
+            ),
+        ),
+    )
+
+    assert result.metrics.stopped_by_planned_target is True
+    assert result.metrics.stopped_by_provider_budget is False
+
+
+def test_final_candidate_consuming_budget_sets_terminal_budget_flag() -> None:
+    result, _calls = _run(
+        LongInactivityExecutionRequest(
+            planned_assignable_target=3,
+            already_fully_eligible=0,
+            max_provider_enrichment=1,
+        ),
+        (_candidate(0),),
+        (
+            ProviderEnrichmentOutcome(
+                long_inactivity_result=TargetingEvaluationResult.NOT_MATCH,
+                full_policy_result=TargetingEvaluationResult.NOT_MATCH,
+            ),
+        ),
+    )
+
+    assert result.metrics.stopped_by_planned_target is False
+    assert result.metrics.stopped_by_provider_budget is True
+
+
+def test_final_candidate_can_reach_target_and_budget_together() -> None:
+    result, _calls = _run(
+        LongInactivityExecutionRequest(
+            planned_assignable_target=1,
+            already_fully_eligible=0,
+            max_provider_enrichment=1,
+        ),
+        (_candidate(0),),
+        (
+            ProviderEnrichmentOutcome(
+                long_inactivity_result=TargetingEvaluationResult.MATCH,
+                full_policy_result=TargetingEvaluationResult.MATCH,
+            ),
+        ),
+    )
+
+    assert result.metrics.stopped_by_planned_target is True
+    assert result.metrics.stopped_by_provider_budget is True
+
+
+def test_terminal_flags_remain_false_when_target_and_budget_are_not_reached() -> None:
+    result, _calls = _run(
+        LongInactivityExecutionRequest(
+            planned_assignable_target=2,
+            already_fully_eligible=0,
+            max_provider_enrichment=2,
+        ),
+        (_candidate(0),),
+        (
+            ProviderEnrichmentOutcome(
+                long_inactivity_result=TargetingEvaluationResult.UNKNOWN,
+                full_policy_result=TargetingEvaluationResult.UNKNOWN,
+            ),
+        ),
+    )
+
+    assert result.metrics.stopped_by_planned_target is False
+    assert result.metrics.stopped_by_provider_budget is False
+
+
+def test_zero_provider_budget_is_a_terminal_budget_state_without_calls() -> None:
+    result, calls = _run(
+        LongInactivityExecutionRequest(
+            planned_assignable_target=1,
+            already_fully_eligible=0,
+            max_provider_enrichment=0,
+        ),
+        (_candidate(0),),
+    )
+
+    assert calls == []
+    assert result.metrics.stopped_by_planned_target is False
+    assert result.metrics.stopped_by_provider_budget is True

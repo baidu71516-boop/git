@@ -32,6 +32,9 @@ celery_app.conf.update(
         "imports.confirm_import_job": {"queue": "import"},
         "imports.reconcile_import_tasks": {"queue": "default"},
         "targeting.materialize_candidate_pool_run": {"queue": "targeting"},
+        "targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment": {
+            "queue": "analytics"
+        },
         "targeting.reconcile_pending_candidate_pool_runs": {"queue": "default"},
         "content_activity.refresh_request": {"queue": "analytics"},
         "content_activity.reconcile_refresh_requests": {"queue": "default"},

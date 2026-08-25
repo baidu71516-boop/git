@@ -33,12 +33,6 @@ class LongInactivityExecutionRequest(FrozenTargetingContract):
     already_fully_eligible: StrictInt = Field(ge=0, le=10_000)
     max_provider_enrichment: StrictInt = Field(ge=0, le=100)
 
-    @model_validator(mode="after")
-    def validate_capacity(self) -> LongInactivityExecutionRequest:
-        if self.already_fully_eligible > self.planned_assignable_target:
-            raise ValueError("already_fully_eligible must not exceed planned_assignable_target")
-        return self
-
 
 class LongInactivityExecutionCandidate(FrozenTargetingContract):
     """One cheaply evaluated candidate in authoritative stable order."""
@@ -147,6 +141,12 @@ async def execute_bounded_long_inactivity_enrichment(
             unknown_after -= 1
         if outcome.full_policy_result is TargetingEvaluationResult.MATCH:
             fully_eligible += 1
+
+    # These are terminal-state facts, rather than loop-control side effects.
+    # In particular, the final provider attempt can independently exhaust the
+    # allowance, reach the full-policy target, or do both at once.
+    stopped_by_target = fully_eligible >= request.planned_assignable_target
+    stopped_by_budget = len(attempted) >= request.max_provider_enrichment
 
     return LongInactivityExecutionResult(
         attempted_platform_account_ids=tuple(attempted),

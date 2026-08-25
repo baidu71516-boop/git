@@ -6,7 +6,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -47,14 +49,21 @@ from backend_core.growth.models import (
     Phase3AIdempotencyRecord,
 )
 from backend_core.growth.repository import CandidatePoolRepository
-from backend_core.growth.schemas import CandidatePoolCreateInput, TargetingPolicyCreateInput
+from backend_core.growth.schemas import (
+    CandidatePoolCreateInput,
+    LongInactivityEnrichmentRequest,
+    TargetingPolicyCreateInput,
+)
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
+    ContentActivityFact,
     IntegerRange,
+    LongInactivityConstraint,
     SellerTargetingPolicy,
+    TargetingEvaluation,
     TaxonomyDefinition,
     TaxonomyRelation,
 )
@@ -254,8 +263,8 @@ async def _content_activity_observation(
     return observation
 
 
-def _service(session: AsyncSession) -> CandidatePoolService:
-    return CandidatePoolService(session, freshness_policy=FreshnessPolicy())
+def _service(session: AsyncSession, **kwargs: object) -> CandidatePoolService:
+    return CandidatePoolService(session, freshness_policy=FreshnessPolicy(), **kwargs)
 
 
 async def _collection_job(
@@ -1242,6 +1251,147 @@ def test_run_idempotency_materialization_and_member_evidence() -> None:
                 assert first_after_rerun.input_watermark["policy_hash"] == first_policy_hash
         finally:
             await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_long_inactivity_runtime_uses_planner_and_counts_full_policy_candidates() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.MANAGER)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                await session.commit()
+
+                calls: list[UUID] = []
+                observed_at = datetime.now(UTC)
+
+                async def provider_enricher(platform_account_id: UUID) -> ContentActivityFact:
+                    calls.append(platform_account_id)
+                    return ContentActivityFact(
+                        trusted_observed_at=observed_at,
+                        trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                        trusted_coverage_status=(
+                            ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+                        ),
+                        trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                        last_publication_at=observed_at - timedelta(days=120),
+                    )
+
+                service = _service(
+                    session,
+                    long_inactivity_provider_enricher=provider_enricher,
+                    long_inactivity_provider_budget=12,
+                )
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Explicit long inactivity candidates",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(
+                            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+                        ),
+                    ),
+                    idempotency_key="explicit-long-inactivity-pool",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    long_inactivity_enrichment=LongInactivityEnrichmentRequest(
+                        planned_assignable_target=1,
+                        max_provider_enrichment=12,
+                    ),
+                    idempotency_key="explicit-long-inactivity-run",
+                )
+
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert completed.status is CandidatePoolRunStatus.COMPLETED
+                assert completed.match_count == 1
+                assert completed.unknown_count == 0
+                assert calls == [account.id]
+                assert completed.input_watermark is not None
+                execution = completed.input_watermark["long_inactivity_enrichment"]
+                assert execution["result"]["provider_calls_attempted"] == 1
+                assert execution["result"]["target_reached"] is True
+                assert execution["result"]["budget_reached"] is False
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_long_inactivity_runtime_stops_after_twelve_additional_fully_eligible_candidates() -> None:
+    async def scenario() -> None:
+        observed_at = datetime.now(UTC)
+        calls: list[UUID] = []
+
+        async def provider_enricher(platform_account_id: UUID) -> ContentActivityFact:
+            calls.append(platform_account_id)
+            return ContentActivityFact(
+                trusted_observed_at=observed_at,
+                trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                last_publication_at=observed_at - timedelta(days=120),
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_enricher,
+            long_inactivity_provider_budget=50,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        evaluations: list[tuple[CandidateFactBundle, TargetingEvaluation]] = []
+        for index in range(30):
+            trusted = (
+                ContentActivityFact(
+                    trusted_observed_at=observed_at,
+                    trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                    trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                    trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                    last_publication_at=observed_at - timedelta(days=120),
+                )
+                if index < 18
+                else None
+            )
+            facts = CandidateFactBundle(
+                influencer_id=UUID(int=index + 1),
+                platform_account_id=UUID(int=index + 101),
+                platform=Platform.XIAOHONGSHU,
+                content_activity=trusted,
+            )
+            evaluations.append(
+                (facts, service._evaluate_targeting(policy, facts, as_of=observed_at))
+            )
+
+        final_evaluations, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=observed_at)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=30,
+                max_provider_enrichment=50,
+            ),
+            evaluations=evaluations,
+        )
+
+        assert len(calls) == 12
+        assert execution.fully_eligible_count == 30
+        assert execution.metrics.provider_calls_attempted == 12
+        assert execution.metrics.stopped_by_planned_target is True
+        assert (
+            sum(evaluation.result.value == "MATCH" for _facts, evaluation in final_evaluations)
+            == 30
+        )
 
     asyncio.run(scenario())
 

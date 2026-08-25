@@ -136,7 +136,7 @@ function criterionConfiguredValue(
   return safeList(item.allowed ?? item.minimum ?? item.maximum);
 }
 
-function criterionObservedValue(
+export function criterionObservedValue(
   value: unknown,
   criterion: string | null,
 ): string {
@@ -154,10 +154,10 @@ function criterionObservedValue(
     const source = safeString(item.source);
     if (source === "GREY_DOLPHIN") {
       if (safeString(item.notes_60d) === "0")
-        return "近60天无更新 · 来源：灰豚";
+        return "灰豚粗略判断：近60天未检测到笔记";
       const notes7d = safeString(item.notes_7d);
       if (notes7d !== null && notes7d !== "0")
-        return "近7天有更新 · 来源：灰豚";
+        return "灰豚粗略判断：近7天检测到笔记";
       return "断更状态：未知 · 来源：灰豚";
     }
     if (source === "TRUSTED_CONTENT_ACTIVITY") {

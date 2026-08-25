@@ -82,12 +82,20 @@ evaluation.  For example, a target of 30 with 18 fully eligible candidates
 needs 12 additional *fully eligible* candidates; D1A.1 must not stop merely
 because it has found 12 activity matches that fail another Candidate
 criterion.  It stops immediately when the upper planner reports the target
-met or its own provider budget is met.  The primitive exposes an
-API-compatible boundary; it does not couple to unfinished C3A
-UI/Candidate-Run orchestration.
+met or its own provider budget is met. Terminal target and budget flags are
+derived independently from the final full-policy and provider-attempt counts,
+so the last candidate may set either or both.
 
-Manual refresh uses the same explicit bounded path and existing provider
-governance plus lease/locking protections.  There is no page-open trigger,
+The operational surface is an opt-in Candidate Run request containing only
+`planned_assignable_target` and `max_provider_enrichment`. Ordinary Candidate
+Runs do not enrich unknowns. An explicit run is delivered through the existing
+API → analytics worker → CandidatePoolService path; the service invokes the
+planner, while each eligible XHS resolution uses the existing governed,
+leased Content Activity request and global provider-call slot. The API carries
+no provider result and the Web UI creates no provider trigger.
+
+Manual refresh remains separately explicit and uses the same provider
+governance plus lease/locking protections. There is no page-open trigger,
 historical backfill, nightly scan, full-pool refresh, or automatic enrichment
 of every unknown candidate.
 
