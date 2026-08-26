@@ -6,9 +6,88 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { Key, ReactNode } from "react";
 import { afterEach, vi } from "vitest";
 
 import { AuthShell } from "../src/components/auth-shell";
+
+type TestTableColumn = {
+  key?: Key;
+  title?: ReactNode;
+  dataIndex?: string | string[];
+  render?: (value: unknown, record: unknown, index: number) => ReactNode;
+};
+
+function tableValue(record: unknown, dataIndex: TestTableColumn["dataIndex"]) {
+  const keys = Array.isArray(dataIndex)
+    ? dataIndex
+    : typeof dataIndex === "string"
+      ? [dataIndex]
+      : [];
+  return keys.reduce<unknown>(
+    (value, key) =>
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)[key]
+        : undefined,
+    record,
+  );
+}
+
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    Table: ({
+      className,
+      columns = [],
+      dataSource = [],
+      rowKey,
+      onRow,
+    }: {
+      className?: string;
+      columns?: TestTableColumn[];
+      dataSource?: unknown[];
+      rowKey?: string | ((record: unknown) => Key);
+      onRow?: (record: unknown, index: number) => { className?: string };
+    }) => (
+      <table className={className}>
+        <thead>
+          <tr>
+            {columns.map((column, index) => (
+              <th key={column.key ?? index}>{column.title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataSource.map((record, rowIndex) => {
+            const row = onRow?.(record, rowIndex);
+            const key =
+              typeof rowKey === "function"
+                ? rowKey(record)
+                : typeof rowKey === "string" &&
+                    record &&
+                    typeof record === "object"
+                  ? (record as Record<string, Key>)[rowKey]
+                  : rowIndex;
+            return (
+              <tr className={row?.className} key={key}>
+                {columns.map((column, columnIndex) => {
+                  const value = tableValue(record, column.dataIndex);
+                  return (
+                    <td key={column.key ?? columnIndex}>
+                      {column.render?.(value, record, rowIndex) ??
+                        (value as ReactNode)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    ),
+  };
+});
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/influencers",
@@ -16,8 +95,22 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(),
 }));
 
-afterEach(() => {
-  vi.restoreAllMocks();
+const queryClients: QueryClient[] = [];
+const renderedShells: ReturnType<typeof render>[] = [];
+
+afterEach(async () => {
+  try {
+    for (const view of renderedShells.splice(0).reverse()) view.unmount();
+    const clients = queryClients.splice(0);
+    await Promise.all(clients.map((client) => client.cancelQueries()));
+    for (const client of clients) {
+      expect(client.isFetching()).toBe(0);
+      expect(client.isMutating()).toBe(0);
+      client.clear();
+    }
+  } finally {
+    vi.restoreAllMocks();
+  }
 });
 
 function response(data: unknown) {
@@ -40,11 +133,14 @@ function renderAuthenticatedShell(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  queryClients.push(queryClient);
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <AuthShell workspace={workspace} influencerId={influencerId} />
     </QueryClientProvider>,
   );
+  renderedShells.push(view);
+  return view;
 }
 
 describe("AuthShell", () => {

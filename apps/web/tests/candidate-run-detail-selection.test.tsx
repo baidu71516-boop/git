@@ -7,6 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { Key, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CandidateRunDetailView } from "../src/features/candidate-pools/candidate-run-detail-view";
@@ -23,6 +24,41 @@ import type {
   CandidatePoolRun,
 } from "../src/features/candidate-pools/types";
 import type { Campaign } from "../src/features/campaigns/types";
+
+type TestTableColumn = {
+  key?: Key;
+  render?: (value: unknown, record: unknown) => ReactNode;
+};
+
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    Table: ({
+      className,
+      columns = [],
+      dataSource = [],
+    }: {
+      className?: string;
+      columns?: TestTableColumn[];
+      dataSource?: unknown[];
+    }) => (
+      <table className={className}>
+        <tbody>
+          {dataSource.map((record, rowIndex) => (
+            <tr key={(record as { id?: Key }).id ?? rowIndex}>
+              {columns.map((column, columnIndex) => (
+                <td key={column.key ?? columnIndex}>
+                  {column.render?.(undefined, record)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    ),
+  };
+});
 
 const poolId = "pool-selection";
 const runId = "run-selection";
@@ -57,10 +93,6 @@ function member(id: string, run = runId): CandidateMember {
 
 function memberCheckboxName(id: string) {
   return `选择 达人 ${id}：抖音 · 账号 ${id} @${id}（候选记录 ${id}）`;
-}
-
-function rowCheckbox(id: string) {
-  return screen.getByRole("checkbox", { name: memberCheckboxName(id) });
 }
 
 function completedRun(id = runId, matchCount = 4): CandidatePoolRun {
@@ -159,25 +191,70 @@ function apiResponse(data: unknown, status = 200, error: unknown = null) {
   );
 }
 
+const pendingDeferreds = new Set<{
+  promise: Promise<unknown>;
+  reject: (reason: Error) => void;
+}>();
+
 function deferred<T>() {
-  let resolve: (value: T) => void = () => undefined;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+  let settled = false;
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (reason: Error) => void;
+  const entry = {
+    promise: new Promise<T>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    }),
+    reject: (reason: Error) => {
+      if (settled) return;
+      settled = true;
+      pendingDeferreds.delete(entry);
+      rejectPromise(reason);
+    },
+  };
+  pendingDeferreds.add(entry);
+
+  return {
+    promise: entry.promise,
+    resolve: (value: T) => {
+      if (settled) return;
+      settled = true;
+      pendingDeferreds.delete(entry);
+      resolvePromise(value);
+    },
+  };
 }
 
 const queryClients: QueryClient[] = [];
 const renderedViews: ReturnType<typeof render>[] = [];
 
-afterEach(() => {
-  for (const view of renderedViews.splice(0).reverse()) view.unmount();
-  for (const queryClient of queryClients.splice(0)) {
-    expect(queryClient.isFetching()).toBe(0);
-    expect(queryClient.isMutating()).toBe(0);
-    queryClient.clear();
+afterEach(async () => {
+  const views = renderedViews.splice(0).reverse();
+  const clients = queryClients.splice(0);
+  const deferreds = [...pendingDeferreds];
+  pendingDeferreds.clear();
+
+  try {
+    for (const view of views) view.unmount();
+    if (deferreds.length > 0) {
+      for (const deferred of deferreds) {
+        deferred.reject(
+          new Error("Test-owned deferred request was not settled"),
+        );
+      }
+      await act(async () => {
+        await Promise.allSettled(deferreds.map((deferred) => deferred.promise));
+      });
+    }
+    for (const queryClient of clients) {
+      expect(queryClient.isFetching()).toBe(0);
+      expect(queryClient.isMutating()).toBe(0);
+      queryClient.clear();
+    }
+  } finally {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   }
-  vi.restoreAllMocks();
 });
 
 function candidateRunView(client: QueryClient, id = runId) {
@@ -205,6 +282,41 @@ function rerenderView(
   id: string,
 ) {
   view.rerender(candidateRunView(queryClient, id));
+}
+
+async function candidateResultsTable(container: HTMLElement) {
+  await waitFor(() =>
+    expect(container.querySelector(".candidate-results-table")).not.toBeNull(),
+  );
+  const table = container.querySelector<HTMLElement>(
+    ".candidate-results-table",
+  );
+  if (!table) throw new Error("Candidate results table was not rendered");
+  return table;
+}
+
+function candidateBulkActions(container: HTMLElement) {
+  const actions = container.querySelector<HTMLElement>(
+    ".candidate-bulk-actions",
+  );
+  if (!actions) throw new Error("Candidate bulk actions were not rendered");
+  return actions;
+}
+
+function candidatePagination(table: HTMLElement) {
+  const pagination = table
+    .closest(".candidate-results-card")
+    ?.querySelector<HTMLElement>(".campaign-pagination-footer");
+  if (!pagination) throw new Error("Candidate pagination was not rendered");
+  return pagination;
+}
+
+function candidatePageSizeControl(container: HTMLElement) {
+  const control = container.querySelector<HTMLElement>(
+    ".candidate-page-size-control",
+  );
+  if (!control) throw new Error("Candidate page size control was not rendered");
+  return control;
 }
 
 function CandidateSelectionLifecycleHarness({
@@ -294,7 +406,18 @@ async function choosePageSize(pageSize: HTMLElement, value: string) {
       pageSize.focus();
       fireEvent.keyDown(pageSize, { key: "Enter" });
     });
-    const option = await screen.findByText(value, {
+    const listboxId = pageSize.getAttribute("aria-controls");
+    expect(listboxId).toBeTruthy();
+    const listbox = await waitFor(() => {
+      const controlledListbox = document.getElementById(listboxId!);
+      expect(controlledListbox).toHaveAttribute("role", "listbox");
+      return controlledListbox!;
+    });
+    const dropdown = listbox.closest(
+      ".ant-select-dropdown",
+    ) as HTMLElement | null;
+    expect(dropdown).not.toBeNull();
+    const option = within(dropdown!).getByText(value, {
       selector: ".ant-select-item-option-content",
     });
     await act(async () => {
@@ -336,23 +459,40 @@ describe("Candidate Run bulk selection", () => {
       pages: [page(firstPage, "cursor-two"), page(secondPage)],
       pageSize: 100,
     });
-    renderView(queryClient);
+    const view = renderView(queryClient);
+    const workspace = within(view.container);
+    const table = await candidateResultsTable(view.container);
 
-    await screen.findByRole("checkbox", { name: memberCheckboxName("one") });
-    fireEvent.click(rowCheckbox("one"));
+    const firstCheckbox = within(table).getByRole("checkbox", {
+      name: memberCheckboxName("one"),
+    });
+    fireEvent.click(firstCheckbox);
 
-    fireEvent.click(screen.getByRole("button", { name: "下一页" }));
-    await screen.findByRole("checkbox", {
+    fireEvent.click(
+      within(candidatePagination(table)).getByRole("button", {
+        name: "下一页",
+      }),
+    );
+    const secondCheckbox = await within(table).findByRole("checkbox", {
       name: memberCheckboxName("two"),
     });
-    fireEvent.click(rowCheckbox("two"));
-    expect(screen.getByText("已选 2 人")).toBeInTheDocument();
+    fireEvent.click(secondCheckbox);
+    expect(workspace.getByText("已选 2 人")).toBeInTheDocument();
     await choosePageSize(
-      screen.getByRole("combobox", { name: "每页数量" }),
+      within(candidatePageSizeControl(view.container)).getByRole("combobox", {
+        name: "每页数量",
+      }),
       "100",
     );
-    await waitFor(() => expect(rowCheckbox("one")).toBeChecked());
-    expect(screen.getByText("已选 2 人")).toBeInTheDocument();
+    const resizedTable = await candidateResultsTable(view.container);
+    await waitFor(() =>
+      expect(
+        within(resizedTable).getByRole("checkbox", {
+          name: memberCheckboxName("one"),
+        }),
+      ).toBeChecked(),
+    );
+    expect(workspace.getByText("已选 2 人")).toBeInTheDocument();
   });
 
   it("keeps the rendered selection lifecycle scoped across A-B-A", () => {
@@ -486,15 +626,24 @@ describe("Candidate Run bulk selection", () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(() => ambiguityResponse.promise);
-    renderView(queryClient);
+    const view = renderView(queryClient);
+    const table = await candidateResultsTable(view.container);
+    const memberCheckbox = within(table).getByRole("checkbox", {
+      name: memberCheckboxName("one"),
+    });
+    const actions = candidateBulkActions(view.container);
 
-    await screen.findByRole("button", {
+    const selectAll = within(actions).getByRole("button", {
       name: "全选 2 人",
     });
-    fireEvent.click(screen.getByRole("button", { name: "全选 2 人" }));
-    fireEvent.click(screen.getByRole("button", { name: "加入拓客活动" }));
-    fireEvent.click(await screen.findByRole("radio", { name: /目标拓客活动/ }));
-    const dialog = screen.getByRole("dialog");
+    fireEvent.click(selectAll);
+    fireEvent.click(
+      within(actions).getByRole("button", { name: "加入拓客活动" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      await within(dialog).findByRole("radio", { name: /目标拓客活动/ }),
+    );
     await act(async () => {
       fireEvent.click(
         within(dialog).getByRole("button", { name: "加入拓客活动" }),
@@ -531,11 +680,11 @@ describe("Candidate Run bulk selection", () => {
       );
     });
 
-    await screen.findByText(/达人“冲突达人”同时命中了多个平台账号/);
+    await within(dialog).findByText(/达人“冲突达人”同时命中了多个平台账号/);
     await waitFor(() => expect(queryClient.isMutating()).toBe(0));
     await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(
-      screen.getByText(
+      within(dialog).getByText(
         "抖音 · 同名账号 @douyin-handle（候选记录 member-douyin）",
         {
           exact: false,
@@ -543,17 +692,19 @@ describe("Candidate Run bulk selection", () => {
       ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(
+      within(dialog).getByText(
         "小红书 · 同名账号 @xhs-handle（候选记录 member-xiaohongshu）",
         {
           exact: false,
         },
       ),
     ).toBeInTheDocument();
-    expect(rowCheckbox("one")).toBeChecked();
+    expect(memberCheckbox).toBeChecked();
+    expect(within(actions).getByText("✓ 已全选 2 人")).toBeInTheDocument();
+    expect(within(dialog).getByText("✓ 已全选 2 人")).toBeInTheDocument();
     expect(screen.getAllByText("✓ 已全选 2 人")).toHaveLength(2);
     expect(
-      screen.queryByRole("button", { name: "全选 2 人" }),
+      within(actions).queryByRole("button", { name: "全选 2 人" }),
     ).not.toBeInTheDocument();
   });
 
@@ -588,17 +739,25 @@ describe("Candidate Run bulk selection", () => {
         .spyOn(globalThis, "fetch")
         .mockImplementation(() => oldMutation.promise);
       const view = renderView(queryClient);
-
-      await screen.findByRole("checkbox", {
+      const workspace = within(view.container);
+      const oldTable = await candidateResultsTable(view.container);
+      const oldCheckbox = within(oldTable).getByRole("checkbox", {
         name: memberCheckboxName("old"),
       });
-      fireEvent.click(rowCheckbox("old"));
-      fireEvent.click(screen.getByRole("button", { name: "加入拓客活动" }));
+      const oldActions = candidateBulkActions(view.container);
+
+      fireEvent.click(oldCheckbox);
       fireEvent.click(
-        await screen.findByRole("radio", { name: /目标拓客活动/ }),
+        within(oldActions).getByRole("button", { name: "加入拓客活动" }),
+      );
+      const oldDialog = await screen.findByRole("dialog");
+      fireEvent.click(
+        await within(oldDialog).findByRole("radio", {
+          name: /目标拓客活动/,
+        }),
       );
       fireEvent.click(
-        within(screen.getByRole("dialog")).getByRole("button", {
+        within(oldDialog).getByRole("button", {
           name: "加入拓客活动",
         }),
       );
@@ -613,21 +772,24 @@ describe("Candidate Run bulk selection", () => {
       });
       rerenderView(view, queryClient, nextRunId);
 
-      await screen.findByRole("checkbox", {
+      const nextTable = await candidateResultsTable(view.container);
+      const nextCheckbox = within(nextTable).getByRole("checkbox", {
         name: memberCheckboxName("next"),
       });
-      fireEvent.click(rowCheckbox("next"));
-      fireEvent.click(screen.getByRole("button", { name: "加入拓客活动" }));
-      await screen.findByRole("dialog");
+      const nextActions = candidateBulkActions(view.container);
+      fireEvent.click(nextCheckbox);
+      fireEvent.click(
+        within(nextActions).getByRole("button", { name: "加入拓客活动" }),
+      );
 
       await act(async () => {
         oldMutation.resolve(lateCompletion.response());
       });
       await waitFor(() => expect(queryClient.isMutating()).toBe(0));
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-      expect(rowCheckbox("next")).toBeChecked();
+      expect(nextCheckbox).toBeChecked();
       expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getAllByText("已选 1 人")).not.toHaveLength(0);
+      expect(workspace.getAllByText("已选 1 人")).not.toHaveLength(0);
     });
   }
 });

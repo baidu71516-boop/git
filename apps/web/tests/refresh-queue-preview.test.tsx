@@ -28,20 +28,37 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/dev-ui-preview/refresh-queues",
 }));
 
-afterEach(() => {
-  cleanup();
-  vi.restoreAllMocks();
-  vi.unstubAllEnvs();
-  navigation.notFound.mockClear();
+const queryClients: QueryClient[] = [];
+const renderedViews: ReturnType<typeof render>[] = [];
+
+afterEach(async () => {
+  try {
+    for (const view of renderedViews.splice(0).reverse()) view.unmount();
+    const clients = queryClients.splice(0);
+    await Promise.all(clients.map((client) => client.cancelQueries()));
+    for (const client of clients) {
+      expect(client.isFetching()).toBe(0);
+      expect(client.isMutating()).toBe(0);
+      client.clear();
+    }
+  } finally {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    navigation.notFound.mockClear();
+  }
 });
 
 function renderPreview(ui: ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  queryClients.push(queryClient);
+  const view = render(
     <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
+  renderedViews.push(view);
+  return view;
 }
 
 describe("development Refresh Queue visual preview", () => {
@@ -144,12 +161,18 @@ describe("development Refresh Queue visual preview", () => {
 
   it("shows the shared return workflow entry for an unfinished exported Queue", () => {
     const fetchMock = vi.spyOn(globalThis, "fetch");
-    renderPreview(
+    const { container } = renderPreview(
       <RefreshQueueDetailPreviewWorkspace initialStatus="exported" />,
     );
 
+    const actions = container.querySelector<HTMLElement>(
+      ".app-page-header-extra",
+    );
+    expect(actions).not.toBeNull();
     expect(
-      screen.getByRole("link", { name: "继续处理回流数据" }),
+      within(actions as HTMLElement).getByRole("link", {
+        name: "继续处理回流数据",
+      }),
     ).toHaveAttribute("href", "/?workspace=bulk&refresh_queue_id=exported");
     expect(fetchMock).not.toHaveBeenCalled();
   });

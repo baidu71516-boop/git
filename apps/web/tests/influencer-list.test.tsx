@@ -6,9 +6,55 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { Key, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InfluencerWorkspace } from "../src/features/influencers/influencer-workspace";
+
+type TestTableColumn = {
+  key?: Key;
+  render?: (value: unknown, record: unknown) => ReactNode;
+};
+
+const influencerTableMode = vi.hoisted(() => ({ compact: false }));
+
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    Table: ({
+      className,
+      columns = [],
+      dataSource = [],
+      onRow,
+    }: {
+      className?: string;
+      columns?: TestTableColumn[];
+      dataSource?: unknown[];
+      onRow?: (record: unknown, index: number) => { className?: string };
+    }) => (
+      <table className={className}>
+        <tbody>
+          {dataSource.map((record, rowIndex) => {
+            const row = onRow?.(record, rowIndex);
+            return (
+              <tr
+                className={row?.className}
+                key={(record as { id?: Key }).id ?? rowIndex}
+              >
+                {columns.map((column, columnIndex) => (
+                  <td key={column.key ?? columnIndex}>
+                    {column.render?.(undefined, record)}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    ),
+  };
+});
 
 const navigation = vi.hoisted(() => ({
   search: "",
@@ -20,6 +66,37 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace: navigation.replace }),
   useSearchParams: () => new URLSearchParams(navigation.search),
 }));
+
+vi.mock(
+  "../src/features/influencers/components/influencer-table",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../src/features/influencers/components/influencer-table")
+      >();
+    return {
+      ...actual,
+      InfluencerTable: (props: {
+        items: Array<{ id: string; display_name: string }>;
+      }) =>
+        influencerTableMode.compact ? (
+          <table>
+            <tbody>
+              {props.items.map((item) => (
+                <tr className="influencer-row" key={item.id}>
+                  <td>
+                    <a href={`/influencers/${item.id}`}>{item.display_name}</a>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          actual.InfluencerTable(props as never)
+        ),
+    };
+  },
+);
 
 const listData = {
   items: [
@@ -155,24 +232,90 @@ function mockApi(list: unknown = listData, options: unknown = filterOptions) {
   });
 }
 
+const queryClients: QueryClient[] = [];
+const renderedWorkspaces: ReturnType<typeof render>[] = [];
+
 function renderWorkspace() {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  queryClients.push(client);
+  const view = render(
     <QueryClientProvider client={client}>
       <InfluencerWorkspace />
     </QueryClientProvider>,
   );
+  renderedWorkspaces.push(view);
+  return view;
+}
+
+function filterCard(container: HTMLElement) {
+  const card = container.querySelector<HTMLElement>(".influencer-filter-card");
+  if (!card) throw new Error("Influencer filter card was not rendered");
+  return card;
+}
+
+function filterCombobox(container: HTMLElement, name: string) {
+  const combobox = Array.from(
+    filterCard(container).querySelectorAll<HTMLElement>('[role="combobox"]'),
+  ).find((element) => element.getAttribute("aria-label") === name);
+  if (!combobox) throw new Error(`Filter combobox was not rendered: ${name}`);
+  return combobox;
+}
+
+async function enabledFilterCombobox(container: HTMLElement, name: string) {
+  return await waitFor(() => {
+    const combobox = filterCombobox(container, name);
+    expect(combobox).toBeEnabled();
+    return combobox;
+  });
+}
+
+async function openFilterSelect(combobox: HTMLElement, optionName: string) {
+  fireEvent.mouseDown(combobox);
+  return await waitFor(() => {
+    const dropdown = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-select-dropdown"),
+    ).find((candidate) =>
+      Array.from(
+        candidate.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+      ).some((option) => option.textContent === optionName),
+    );
+    if (!dropdown) {
+      throw new Error(`Select dropdown was not rendered: ${optionName}`);
+    }
+    return dropdown;
+  });
+}
+
+function visibleSelectOption(dropdown: HTMLElement, name: string) {
+  const option = Array.from(
+    dropdown.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+  ).find((item) => item.textContent === name);
+  if (!option) throw new Error(`Visible option was not rendered: ${name}`);
+  return option;
 }
 
 beforeEach(() => {
+  influencerTableMode.compact = false;
   navigation.search = "";
   navigation.replace.mockReset();
 });
 
-afterEach(() => {
-  vi.restoreAllMocks();
+afterEach(async () => {
+  try {
+    for (const view of renderedWorkspaces.splice(0).reverse()) view.unmount();
+    const clients = queryClients.splice(0);
+    await Promise.all(clients.map((client) => client.cancelQueries()));
+    for (const client of clients) {
+      expect(client.isFetching()).toBe(0);
+      expect(client.isMutating()).toBe(0);
+      client.clear();
+    }
+  } finally {
+    influencerTableMode.compact = false;
+    vi.restoreAllMocks();
+  }
 });
 
 describe("InfluencerWorkspace", () => {
@@ -322,38 +465,30 @@ describe("InfluencerWorkspace", () => {
   });
 
   it("syncs contact and 60-day activity filters to the URL and resets pagination", async () => {
+    influencerTableMode.compact = true;
     navigation.search =
       "contact_filter=has_contact&notes_60d_filter=zero&page=3&page_size=50";
     mockApi();
-    renderWorkspace();
-    await screen.findByRole("link", { name: "零粉多账号达人" });
+    const view = renderWorkspace();
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "联系方式筛选" }));
-    await screen.findByRole("option", { name: "有邮箱" });
-    const emailOption = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
-    ).find((item) => item.textContent === "有邮箱");
-    expect(emailOption).toBeDefined();
-    fireEvent.click(emailOption as HTMLElement);
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenLastCalledWith(
-        "/influencers?contact_filter=has_email&notes_60d_filter=zero&page_size=50",
-      ),
+    const contactSelect = await enabledFilterCombobox(
+      view.container,
+      "联系方式筛选",
+    );
+    const contactDropdown = await openFilterSelect(contactSelect, "有邮箱");
+    fireEvent.click(visibleSelectOption(contactDropdown, "有邮箱"));
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?contact_filter=has_email&notes_60d_filter=zero&page_size=50",
     );
 
-    fireEvent.mouseDown(
-      screen.getByRole("combobox", { name: "近60天笔记筛选" }),
+    const notes60dSelect = await enabledFilterCombobox(
+      view.container,
+      "近60天笔记筛选",
     );
-    await screen.findByRole("option", { name: "1-2篇" });
-    const oneToTwoOption = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
-    ).find((item) => item.textContent === "1-2篇");
-    expect(oneToTwoOption).toBeDefined();
-    fireEvent.click(oneToTwoOption as HTMLElement);
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenLastCalledWith(
-        "/influencers?contact_filter=has_contact&notes_60d_filter=one_to_two&page_size=50",
-      ),
+    const notes60dDropdown = await openFilterSelect(notes60dSelect, "1-2篇");
+    fireEvent.click(visibleSelectOption(notes60dDropdown, "1-2篇"));
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?contact_filter=has_contact&notes_60d_filter=one_to_two&page_size=50",
     );
   });
 
@@ -432,52 +567,51 @@ describe("InfluencerWorkspace", () => {
   });
 
   it("uses API tag, owner, and CRM options and disables overlong tags", async () => {
+    influencerTableMode.compact = true;
     navigation.search = "page=3&page_size=50";
     mockApi();
-    renderWorkspace();
-    await screen.findByRole("link", { name: "零粉多账号达人" });
+    const view = renderWorkspace();
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "标签筛选" }));
-    await screen.findByRole("option", { name: "动画" });
-    const longTagOption = screen.getByRole("option", {
-      name: "超长标签".repeat(41),
-    });
+    const tagSelect = await enabledFilterCombobox(view.container, "标签筛选");
+    const tagDropdown = await openFilterSelect(tagSelect, "动画");
+    const longTagOption = visibleSelectOption(
+      tagDropdown,
+      "超长标签".repeat(41),
+    );
     expect(longTagOption).toHaveAttribute("aria-disabled", "true");
-    const visibleTagOption = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
-    ).find((item) => item.textContent === "动画");
-    expect(visibleTagOption).toBeDefined();
-    fireEvent.click(visibleTagOption as HTMLElement);
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenLastCalledWith(
-        "/influencers?page_size=50&tag=%E5%8A%A8%E7%94%BB",
-      ),
+    expect(
+      within(tagDropdown).getByRole("option", {
+        name: "超长标签".repeat(41),
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(visibleSelectOption(tagDropdown, "动画"));
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?page_size=50&tag=%E5%8A%A8%E7%94%BB",
     );
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "负责人筛选" }));
-    await screen.findByRole("option", { name: "已停用负责人（已停用）" });
-    const visibleOwnerOption = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
-    ).find((item) => item.textContent === "已停用负责人（已停用）");
-    expect(visibleOwnerOption).toBeDefined();
-    fireEvent.click(visibleOwnerOption as HTMLElement);
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenLastCalledWith(
-        "/influencers?page_size=50&owner_operator_id=00000000-0000-0000-0000-000000000001",
-      ),
+    const ownerSelect = await enabledFilterCombobox(
+      view.container,
+      "负责人筛选",
+    );
+    const ownerDropdown = await openFilterSelect(
+      ownerSelect,
+      "已停用负责人（已停用）",
+    );
+    fireEvent.click(
+      visibleSelectOption(ownerDropdown, "已停用负责人（已停用）"),
+    );
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?page_size=50&owner_operator_id=00000000-0000-0000-0000-000000000001",
     );
 
-    fireEvent.mouseDown(screen.getByRole("combobox", { name: "CRM 阶段筛选" }));
-    await screen.findByRole("option", { name: "高意向" });
-    const visibleCrmOption = Array.from(
-      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
-    ).find((item) => item.textContent === "高意向");
-    expect(visibleCrmOption).toBeDefined();
-    fireEvent.click(visibleCrmOption as HTMLElement);
-    await waitFor(() =>
-      expect(navigation.replace).toHaveBeenLastCalledWith(
-        "/influencers?page_size=50&crm_stage=%E9%AB%98%E6%84%8F%E5%90%91",
-      ),
+    const crmSelect = await enabledFilterCombobox(
+      view.container,
+      "CRM 阶段筛选",
+    );
+    const crmDropdown = await openFilterSelect(crmSelect, "高意向");
+    fireEvent.click(visibleSelectOption(crmDropdown, "高意向"));
+    expect(navigation.replace).toHaveBeenLastCalledWith(
+      "/influencers?page_size=50&crm_stage=%E9%AB%98%E6%84%8F%E5%90%91",
     );
   });
 

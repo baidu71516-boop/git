@@ -6,10 +6,93 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import type { Key, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import DataCollectionVisualPreviewPage from "../src/app/dev-ui-preview/data-collection/page";
 import { BulkImportPreviewWorkspace } from "../src/features/imports/bulk-import-preview-workspace";
+
+type TestTableColumn = {
+  key?: Key;
+  title?: ReactNode;
+  dataIndex?: string | string[];
+  render?: (value: unknown, record: unknown, index: number) => ReactNode;
+};
+
+function tableValue(record: unknown, dataIndex: TestTableColumn["dataIndex"]) {
+  const keys = Array.isArray(dataIndex)
+    ? dataIndex
+    : typeof dataIndex === "string"
+      ? [dataIndex]
+      : [];
+  return keys.reduce<unknown>(
+    (value, key) =>
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)[key]
+        : undefined,
+    record,
+  );
+}
+
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    Table: ({
+      className,
+      columns = [],
+      dataSource = [],
+      rowKey,
+      onRow,
+    }: {
+      className?: string;
+      columns?: TestTableColumn[];
+      dataSource?: unknown[];
+      rowKey?: string | ((record: unknown) => Key);
+      onRow?: (record: unknown, index: number) => { className?: string };
+    }) => (
+      <table className={className}>
+        <thead>
+          <tr>
+            {columns.map((column, index) => (
+              <th key={column.key ?? index}>{column.title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataSource.map((record, rowIndex) => {
+            const row = onRow?.(record, rowIndex);
+            const key =
+              typeof rowKey === "function"
+                ? rowKey(record)
+                : typeof rowKey === "string" &&
+                    record &&
+                    typeof record === "object"
+                  ? (record as Record<string, Key>)[rowKey]
+                  : rowIndex;
+            return (
+              <tr className={row?.className} key={key}>
+                {columns.map((column, columnIndex) => {
+                  const value = tableValue(record, column.dataIndex);
+                  return (
+                    <td key={column.key ?? columnIndex}>
+                      {column.render?.(value, record, rowIndex) ??
+                        (value as ReactNode)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    ),
+  };
+});
+
+vi.mock("@/components/app-shell", () => ({
+  AppShell: ({ children }: { children: ReactNode }) => <main>{children}</main>,
+}));
 
 const navigation = vi.hoisted(() => ({
   notFound: vi.fn(() => {

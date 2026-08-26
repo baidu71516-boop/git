@@ -113,8 +113,10 @@ describe("refresh queue API", () => {
 
     const result = await exportRefreshQueue("queue-1");
 
-    expect(result.blob).toBeInstanceOf(Blob);
+    expect(typeof result.blob.text).toBe("function");
+    expect(result.blob.type).toBe("text/csv");
     expect(result.blob.size).toBeGreaterThan(0);
+    expect(await result.blob.text()).toBe("account_name\nfixture");
     expect(result.contentDisposition).toBe(
       'attachment; filename="frozen-queue.csv"',
     );

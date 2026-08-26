@@ -8,7 +8,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import type { ReactNode } from "react";
+import type { Key, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BulkImportWorkspaceView } from "@/features/imports/bulk-import-workspace-view";
@@ -22,6 +22,186 @@ import type {
   ImportJobPublic,
   ImportJobStatus,
 } from "@/features/imports/types";
+
+type TestTableColumn = {
+  key?: Key;
+  title?: ReactNode;
+  dataIndex?: string | string[];
+  render?: (value: unknown, record: unknown, index: number) => ReactNode;
+};
+
+function tableValue(record: unknown, dataIndex: TestTableColumn["dataIndex"]) {
+  const keys = Array.isArray(dataIndex)
+    ? dataIndex
+    : typeof dataIndex === "string"
+      ? [dataIndex]
+      : [];
+  return keys.reduce<unknown>(
+    (value, key) =>
+      value && typeof value === "object"
+        ? (value as Record<string, unknown>)[key]
+        : undefined,
+    record,
+  );
+}
+
+vi.mock("antd", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("antd")>();
+  return {
+    ...actual,
+    Table: ({
+      className,
+      columns = [],
+      dataSource = [],
+      rowKey,
+      onRow,
+    }: {
+      className?: string;
+      columns?: TestTableColumn[];
+      dataSource?: unknown[];
+      rowKey?: string | ((record: unknown) => Key);
+      onRow?: (record: unknown, index: number) => { className?: string };
+    }) => (
+      <table className={className}>
+        <thead>
+          <tr>
+            {columns.map((column, index) => (
+              <th key={column.key ?? index}>{column.title}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {dataSource.map((record, rowIndex) => {
+            const row = onRow?.(record, rowIndex);
+            const key =
+              typeof rowKey === "function"
+                ? rowKey(record)
+                : typeof rowKey === "string" &&
+                    record &&
+                    typeof record === "object"
+                  ? (record as Record<string, Key>)[rowKey]
+                  : rowIndex;
+            return (
+              <tr className={row?.className} key={key}>
+                {columns.map((column, columnIndex) => {
+                  const value = tableValue(record, column.dataIndex);
+                  return (
+                    <td key={column.key ?? columnIndex}>
+                      {column.render?.(value, record, rowIndex) ??
+                        (value as ReactNode)}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    ),
+  };
+});
+
+const queryClients: QueryClient[] = [];
+const nativeMessageChannel = globalThis.MessageChannel;
+const messageChannels = new Set<MessageChannel>();
+const bulkFileTableMode = vi.hoisted(() => ({ compact: false }));
+
+vi.mock(
+  "@/features/imports/components/bulk-file-table",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/features/imports/components/bulk-file-table")
+      >();
+    return {
+      ...actual,
+      BulkFileTable: (props: {
+        files: Array<{
+          id: string;
+          original_filename: string;
+          status: string;
+          source_acquired_at_confirmation_required: boolean;
+        }>;
+        readOnly: boolean;
+        frozen: boolean;
+        busyFileId: string | null;
+        onEditAcquisitionTime: (file: never) => void;
+        onEditMapping: (file: never) => void;
+        onRetry: (file: never) => void;
+        onExclude: (file: never) => void;
+      }) =>
+        bulkFileTableMode.compact ? (
+          <table className="bulk-file-table">
+            <tbody>
+              {props.files.map((file) => {
+                const disabled =
+                  props.readOnly || props.frozen || props.busyFileId !== null;
+                return (
+                  <tr key={file.id}>
+                    <td>
+                      {file.original_filename}
+                      {file.source_acquired_at_confirmation_required ? (
+                        <span>待确认</span>
+                      ) : null}
+                    </td>
+                    <td>
+                      {file.status === "mapping_required" ? (
+                        <button
+                          disabled={disabled}
+                          onClick={() => props.onEditMapping(file as never)}
+                          type="button"
+                        >
+                          处理字段映射
+                        </button>
+                      ) : null}
+                      {file.status === "failed" ? (
+                        <button
+                          disabled={disabled}
+                          onClick={() => props.onRetry(file as never)}
+                          type="button"
+                        >
+                          重试
+                        </button>
+                      ) : null}
+                      {["ready", "mapping_required", "failed"].includes(
+                        file.status,
+                      ) ? (
+                        <button
+                          disabled={disabled}
+                          onClick={() =>
+                            props.onEditAcquisitionTime(file as never)
+                          }
+                          type="button"
+                        >
+                          修改时间
+                        </button>
+                      ) : null}
+                      {[
+                        "uploaded",
+                        "ready",
+                        "mapping_required",
+                        "failed",
+                      ].includes(file.status) ? (
+                        <button
+                          disabled={disabled}
+                          onClick={() => props.onExclude(file as never)}
+                          type="button"
+                        >
+                          排除
+                        </button>
+                      ) : null}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        ) : (
+          actual.BulkFileTable(props as never)
+        ),
+    };
+  },
+);
 
 const collection: CollectionJobPublic = {
   id: "collection-1",
@@ -170,9 +350,10 @@ function renderWithClient(node: ReactNode) {
     defaultOptions: {
       queries: { retry: false, gcTime: Infinity },
       // Hooks must override this: mutation requests in UI-4B1 never auto-retry.
-      mutations: { retry: 3, retryDelay: 0 },
+      mutations: { retry: 3, retryDelay: 0, gcTime: Infinity },
     },
   });
+  queryClients.push(queryClient);
   const result = render(
     <QueryClientProvider client={queryClient}>{node}</QueryClientProvider>,
   );
@@ -260,6 +441,56 @@ function rowFor(filename: string): HTMLElement {
   return row as HTMLElement;
 }
 
+async function bulkFileTable(container: HTMLElement) {
+  await waitFor(() =>
+    expect(container.querySelector(".bulk-file-table")).not.toBeNull(),
+  );
+  const table = container.querySelector<HTMLElement>(".bulk-file-table");
+  if (!table) throw new Error("Bulk file table was not rendered");
+  return table;
+}
+
+function fileRow(table: HTMLElement, filename: string) {
+  const row = within(table).getByText(filename).closest("tr");
+  if (!row) throw new Error(`Bulk file row was not rendered: ${filename}`);
+  return row as HTMLElement;
+}
+
+async function bulkMenuAction(fileId: string, name: string) {
+  return await waitFor(() => {
+    const action = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        `button[data-file-id="${fileId}"]`,
+      ),
+    ).find((button) => button.textContent?.trim() === name);
+    if (!action) throw new Error(`Bulk menu action was not rendered: ${name}`);
+    return action;
+  });
+}
+
+async function exclusionConfirm() {
+  return await waitFor(() => {
+    const popover = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-popover"),
+    ).find((candidate) =>
+      candidate.textContent?.includes("确认排除这个文件？"),
+    );
+    if (!popover)
+      throw new Error("Bulk exclusion confirmation was not rendered");
+    return popover;
+  });
+}
+
+async function mappingOption(title: string) {
+  return await waitFor(() => {
+    const option = document.querySelector<HTMLElement>(
+      `.ant-select-item-option[title="${title}"]`,
+    );
+    if (!option) throw new Error(`Mapping option was not rendered: ${title}`);
+    return option;
+  });
+}
+
 function viewProps(
   job: ImportJobPublic,
   files: ImportJobFilePublic[],
@@ -290,13 +521,42 @@ function viewProps(
 }
 
 beforeEach(() => {
+  bulkFileTableMode.compact = false;
   document.cookie = "outreach_csrf=test-csrf; path=/";
+  globalThis.MessageChannel = class extends nativeMessageChannel {
+    constructor() {
+      super();
+      messageChannels.add(this);
+    }
+  };
 });
 
-afterEach(() => {
-  cleanup();
-  vi.useRealTimers();
-  vi.restoreAllMocks();
+afterEach(async () => {
+  const clients = queryClients.splice(0);
+
+  try {
+    cleanup();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await Promise.all(clients.map((client) => client.cancelQueries()));
+    for (const client of clients) {
+      expect(client.isFetching()).toBe(0);
+      expect(client.isMutating()).toBe(0);
+    }
+  } finally {
+    for (const client of clients) client.clear();
+    for (const channel of messageChannels) {
+      channel.port1.close();
+      channel.port2.close();
+    }
+    messageChannels.clear();
+    bulkFileTableMode.compact = false;
+    globalThis.MessageChannel = nativeMessageChannel;
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.cookie = "outreach_csrf=; Max-Age=0; path=/";
+  }
 });
 
 describe("BulkImportWorkspace creation hardening", () => {
@@ -742,96 +1002,67 @@ describe("BulkImportWorkspace file truth and actions", () => {
       onExcludeFile,
     });
 
-    render(<BulkImportWorkspaceView {...props} />);
+    const view = render(<BulkImportWorkspaceView {...props} />);
+    const table = await bulkFileTable(view.container);
+    const uploadedRow = fileRow(table, "uploaded.csv");
+    const parsingRow = fileRow(table, "parsing.csv");
+    const mappingRow = fileRow(table, "mapping_required.csv");
+    const readyRow = fileRow(table, "ready.csv");
+    const failedRow = fileRow(table, "failed.csv");
+    const excludedRow = fileRow(table, "excluded.csv");
 
+    expect(within(uploadedRow).getAllByText("—").length).toBeGreaterThan(0);
+    expect(within(readyRow).getByText("0")).toBeInTheDocument();
+    expect(within(uploadedRow).getByText("已上传")).toBeInTheDocument();
+    expect(within(parsingRow).getByText("处理中")).toBeInTheDocument();
+    expect(within(mappingRow).getByText("需要字段映射")).toBeInTheDocument();
+    expect(within(readyRow).getByText("已就绪")).toBeInTheDocument();
+    expect(within(failedRow).getByText("处理失败")).toBeInTheDocument();
+    expect(within(excludedRow).getByText("已排除")).toBeInTheDocument();
     expect(
-      within(rowFor("uploaded.csv")).getAllByText("—").length,
-    ).toBeGreaterThan(0);
-    expect(within(rowFor("ready.csv")).getByText("0")).toBeInTheDocument();
-    expect(
-      within(rowFor("uploaded.csv")).getByText("已上传"),
+      within(failedRow).getByText("文件处理失败，请重试或排除该文件。"),
     ).toBeInTheDocument();
     expect(
-      within(rowFor("parsing.csv")).getByText("处理中"),
-    ).toBeInTheDocument();
-    expect(
-      within(rowFor("mapping_required.csv")).getByText("需要字段映射"),
-    ).toBeInTheDocument();
-    expect(within(rowFor("ready.csv")).getByText("已就绪")).toBeInTheDocument();
-    expect(
-      within(rowFor("failed.csv")).getByText("处理失败"),
-    ).toBeInTheDocument();
-    expect(
-      within(rowFor("excluded.csv")).getByText("已排除"),
-    ).toBeInTheDocument();
-    expect(
-      within(rowFor("failed.csv")).getByText(
-        "文件处理失败，请重试或排除该文件。",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/Traceback|SQL|broker|secret/),
+      within(view.container).queryByText(/Traceback|SQL|broker|secret/),
     ).not.toBeInTheDocument();
 
     fireEvent.click(
-      within(rowFor("mapping_required.csv")).getByRole("button", {
+      within(mappingRow).getByRole("button", {
         name: "处理字段映射",
       }),
     );
     expect(onEditMapping).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-mapping_required" }),
     );
-    fireEvent.click(
-      within(rowFor("failed.csv")).getByRole("button", { name: "重试" }),
-    );
+    fireEvent.click(within(failedRow).getByRole("button", { name: "重试" }));
     expect(onRetryFile).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-failed" }),
     );
-    fireEvent.click(
-      within(rowFor("ready.csv")).getByRole("button", { name: /更多/ }),
-    );
-    const readyModifyTime = screen
-      .getAllByRole("button", { name: "修改时间" })
-      .find((button) => button.getAttribute("data-file-id") === "file-ready");
-    expect(readyModifyTime).toBeTruthy();
-    if (!readyModifyTime) {
-      throw new Error("无法定位文件就绪态的修改时间按钮");
-    }
-    fireEvent.click(readyModifyTime);
+    fireEvent.click(within(readyRow).getByRole("button", { name: /更多/ }));
+    fireEvent.click(await bulkMenuAction("file-ready", "修改时间"));
     expect(onEditAcquisitionTime).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-ready" }),
     );
 
+    fireEvent.click(within(uploadedRow).getByRole("button", { name: /更多/ }));
+    fireEvent.click(await bulkMenuAction("file-uploaded", "排除"));
     fireEvent.click(
-      within(rowFor("uploaded.csv")).getByRole("button", { name: /更多/ }),
+      within(await exclusionConfirm()).getByRole("button", {
+        name: "确认排除",
+      }),
     );
-    const uploadExclude = screen
-      .getAllByRole("button", { name: "排除" })
-      .find(
-        (button) => button.getAttribute("data-file-id") === "file-uploaded",
-      );
-    expect(uploadExclude).toBeTruthy();
-    if (!uploadExclude) {
-      throw new Error("无法定位上传文件的排除按钮");
-    }
-    fireEvent.click(uploadExclude);
-    const confirmExclude = screen.getByRole("button", { name: "确认排除" });
-    fireEvent.click(confirmExclude);
     expect(onExcludeFile).toHaveBeenCalledWith(
       expect.objectContaining({ id: "file-uploaded" }),
     );
     expect(
       screen.queryByRole("button", { name: /重新纳入|取消排除|删除/ }),
     ).not.toBeInTheDocument();
-    expect(
-      within(rowFor("parsing.csv")).queryByRole("button"),
-    ).not.toBeInTheDocument();
-    expect(
-      within(rowFor("excluded.csv")).queryByRole("button"),
-    ).not.toBeInTheDocument();
+    expect(within(parsingRow).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(excludedRow).queryByRole("button")).not.toBeInTheDocument();
   }, 10_000);
 
   it("PATCHes the unchanged server acquisition time to confirm it, then freezes editing after Preview", async () => {
+    bulkFileTableMode.compact = true;
     const job = makeJob();
     const file = makeFile({
       source_acquired_at_confirmation_required: true,
@@ -852,14 +1083,22 @@ describe("BulkImportWorkspace file truth and actions", () => {
       return undefined;
     });
 
-    const { unmount } = renderBulk({ jobId: job.id });
-    expect(await screen.findByText("待确认")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /更多/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "修改时间" }));
-    expect(screen.getByLabelText("数据取得时间")).toHaveValue(
+    const workspace = renderBulk({ jobId: job.id });
+    const table = await bulkFileTable(workspace.container);
+    const currentFileRow = fileRow(table, file.original_filename);
+    expect(within(currentFileRow).getByText("待确认")).toBeInTheDocument();
+    fireEvent.click(
+      within(currentFileRow).getByRole("button", { name: "修改时间" }),
+    );
+    const timeDialog = await screen.findByRole("dialog", {
+      name: "修改数据取得时间",
+    });
+    expect(within(timeDialog).getByLabelText("数据取得时间")).toHaveValue(
       "2026-08-10T10:00",
     );
-    fireEvent.click(screen.getByRole("button", { name: "保存时间" }));
+    fireEvent.click(
+      within(timeDialog).getByRole("button", { name: "保存时间" }),
+    );
 
     await waitFor(() =>
       expect(
@@ -879,8 +1118,9 @@ describe("BulkImportWorkspace file truth and actions", () => {
       source_acquired_at: "2026-08-10T10:00:00+08:00",
     });
 
-    unmount();
-    render(
+    workspace.unmount();
+    bulkFileTableMode.compact = false;
+    const previewView = render(
       <BulkImportWorkspaceView
         {...viewProps(
           makeJob({ status: "preview_ready", preview_revision: 1 }),
@@ -888,12 +1128,16 @@ describe("BulkImportWorkspace file truth and actions", () => {
         )}
       />,
     );
+    const previewTable = await bulkFileTable(previewView.container);
     expect(
-      within(rowFor("ready.csv")).getByRole("button", { name: /更多/ }),
+      within(fileRow(previewTable, "ready.csv")).getByRole("button", {
+        name: /更多/,
+      }),
     ).toBeDisabled();
   });
 
   it("keeps Bulk mapping state isolated and sends Mapping, File Retry, and Exclude to their exact endpoints", async () => {
+    bulkFileTableMode.compact = true;
     const job = makeJob();
     const mappingFile = makeFile({
       id: "mapping-file",
@@ -957,24 +1201,29 @@ describe("BulkImportWorkspace file truth and actions", () => {
       },
     );
 
-    renderBulk({ jobId: job.id });
-    expect(await screen.findByText("mapping.csv")).toBeInTheDocument();
+    const workspace = renderBulk({ jobId: job.id });
+    const table = await bulkFileTable(workspace.container);
     fireEvent.click(
-      within(rowFor("mapping.csv")).getByRole("button", {
+      within(fileRow(table, "mapping.csv")).getByRole("button", {
         name: "处理字段映射",
       }),
     );
+    const mappingDialog = await screen.findByRole("dialog", {
+      name: "处理字段映射",
+    });
     expect(
-      screen.getByText(
+      within(mappingDialog).getByText(
         "需要达人官方地址 / 平台账号ID / 来源ID之一；小红书号和邮箱不能作为稳定身份字段。",
       ),
     ).toBeInTheDocument();
-    const select = screen.getByRole("combobox", {
+    const select = within(mappingDialog).getByRole("combobox", {
       name: "将 达人名称 映射到",
     });
     fireEvent.mouseDown(select);
-    fireEvent.click(await screen.findByTitle("nickname"));
-    fireEvent.click(screen.getByRole("button", { name: "保存字段映射" }));
+    fireEvent.click(await mappingOption("nickname"));
+    fireEvent.click(
+      within(mappingDialog).getByRole("button", { name: "保存字段映射" }),
+    );
     await waitFor(() =>
       expect(
         requestCount(
@@ -995,7 +1244,9 @@ describe("BulkImportWorkspace file truth and actions", () => {
     );
 
     fireEvent.click(
-      within(rowFor("failed.csv")).getByRole("button", { name: "重试" }),
+      within(fileRow(table, "failed.csv")).getByRole("button", {
+        name: "重试",
+      }),
     );
     await waitFor(() =>
       expect(
@@ -1007,10 +1258,10 @@ describe("BulkImportWorkspace file truth and actions", () => {
       ).toBe(1),
     );
     fireEvent.click(
-      within(rowFor("exclude.csv")).getByRole("button", { name: /更多/ }),
+      within(fileRow(table, "exclude.csv")).getByRole("button", {
+        name: "排除",
+      }),
     );
-    fireEvent.click(await screen.findByRole("button", { name: "排除" }));
-    fireEvent.click(await screen.findByRole("button", { name: "确认排除" }));
     await waitFor(() =>
       expect(
         requestCount(
@@ -1035,28 +1286,30 @@ describe("BulkImportWorkspace file truth and actions", () => {
 
 describe("BulkImportWorkspace Preview and compatible Job states", () => {
   it("treats Preview gates as UX, sends the first request with rebuild false, and safely renders a backend conflict", async () => {
+    bulkFileTableMode.compact = true;
     const job = makeJob();
     const blockedFile = makeFile({
       source_acquired_at_confirmation_required: true,
     });
     const gateProps = viewProps(job, [blockedFile]);
-    const { rerender, unmount } = render(
-      <BulkImportWorkspaceView {...gateProps} />,
-    );
+    const gateView = render(<BulkImportWorkspaceView {...gateProps} />);
+    const gateWorkspace = within(gateView.container);
     expect(
-      screen.getByText("还有 1 个文件待确认数据取得时间。"),
+      gateWorkspace.getByText("还有 1 个文件待确认数据取得时间。"),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成数据预览" })).toBeDisabled();
+    expect(
+      gateWorkspace.getByRole("button", { name: "生成数据预览" }),
+    ).toBeDisabled();
 
     const readyProps = viewProps(job, [makeFile()]);
-    rerender(<BulkImportWorkspaceView {...readyProps} />);
-    const enabledPreview = screen.getByRole("button", {
+    gateView.rerender(<BulkImportWorkspaceView {...readyProps} />);
+    const enabledPreview = gateWorkspace.getByRole("button", {
       name: "生成数据预览",
     });
     expect(enabledPreview).toBeEnabled();
     fireEvent.click(enabledPreview);
     expect(readyProps.onRequestPreview).toHaveBeenCalledOnce();
-    unmount();
+    gateView.unmount();
 
     const fetchSpy = recoveredRouter(job, [makeFile()], (url, init) => {
       if (
@@ -1067,12 +1320,13 @@ describe("BulkImportWorkspace Preview and compatible Job states", () => {
       }
       return undefined;
     });
-    renderBulk({ jobId: job.id });
+    const workspace = renderBulk({ jobId: job.id });
+    const bulkWorkspace = within(workspace.container);
     fireEvent.click(
-      await screen.findByRole("button", { name: "生成数据预览" }),
+      await bulkWorkspace.findByRole("button", { name: "生成数据预览" }),
     );
     expect(
-      await screen.findByText("任务状态已变化，请刷新后重试。"),
+      await bulkWorkspace.findByText("任务状态已变化，请刷新后重试。"),
     ).toBeInTheDocument();
     const previewCall = fetchSpy.mock.calls.find(
       ([input, init]) =>
@@ -1082,7 +1336,9 @@ describe("BulkImportWorkspace Preview and compatible Job states", () => {
     expect(JSON.parse(String(previewCall?.[1]?.body))).toEqual({
       rebuild: false,
     });
-    expect(screen.queryByText("raw backend conflict")).not.toBeInTheDocument();
+    expect(
+      bulkWorkspace.queryByText("raw backend conflict"),
+    ).not.toBeInTheDocument();
   });
 
   it("uses rebuild true for stale Preview and generic Job Retry for failed state", async () => {
