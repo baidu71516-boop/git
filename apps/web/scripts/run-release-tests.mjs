@@ -27,6 +27,7 @@ const EVIDENCE_ROOT = process.env.WEB_RELEASE_EVIDENCE_DIR
 const LOCK_SLUG = "influencer-outreach-web-release-gate";
 const WATCHDOG_MS = 15 * 60 * 1000;
 const TERMINATION_GRACE_MS = 5 * 1000;
+const PROCESS_GROUP_POLL_MS = 50;
 const STREAM_CAPTURE_MAX_BYTES = 2 * 1024 * 1024;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.(?:ts|tsx)$/;
 const INTERACTION_TEST_PATHS = [
@@ -292,6 +293,7 @@ export class GateLock {
 }
 
 let activeChild;
+let activeProcessGroupId;
 let activeChildTermination;
 let activeLifecycle;
 
@@ -338,6 +340,7 @@ export function runChild(command, arguments_, options = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     activeChild = child;
+    activeProcessGroupId = process.platform === "win32" ? undefined : child.pid;
     child.stdout?.on("data", (chunk) => {
       process.stdout.write(chunk);
       options.streamCapture?.write("stdout", chunk);
@@ -349,6 +352,7 @@ export function runChild(command, arguments_, options = {}) {
     child.once("error", (error) => {
       if (activeChild === child) {
         activeChild = undefined;
+        activeProcessGroupId = undefined;
       }
       options.streamCapture?.finish();
       resolve({ code: -1, signal: undefined, error: error.message });
@@ -356,9 +360,21 @@ export function runChild(command, arguments_, options = {}) {
     child.once("close", (code, signal) => {
       if (activeChild === child) {
         activeChild = undefined;
+        if (
+          process.platform === "win32" ||
+          processGroupStatus(child.pid).state === "gone"
+        ) {
+          activeProcessGroupId = undefined;
+        }
       }
       options.streamCapture?.finish();
-      resolve({ code: code ?? -1, signal, error: undefined });
+      resolve({
+        code: code ?? -1,
+        signal,
+        error: undefined,
+        childPid: child.pid,
+        processGroupId: process.platform === "win32" ? undefined : child.pid,
+      });
     });
   });
 }
@@ -373,49 +389,197 @@ function waitForChild(child, milliseconds) {
   });
 }
 
-export async function terminateChildProcessGroup(child) {
+function childHasExited(child) {
+  return !child || child.exitCode !== null || child.signalCode !== null;
+}
+
+function processGroupStatus(processGroupId) {
+  try {
+    process.kill(-processGroupId, 0);
+    return { state: "exists" };
+  } catch (error) {
+    if (error && error.code === "ESRCH") {
+      return { state: "gone" };
+    }
+    return {
+      state: "unknown",
+      reason: error instanceof Error ? error.message : String(error),
+      code: error?.code,
+    };
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForProcessGroup(target, processGroupId, options = {}) {
+  const timeoutMs = options.timeoutMs ?? TERMINATION_GRACE_MS;
+  const pollMs = options.pollMs ?? PROCESS_GROUP_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const status = processGroupStatus(processGroupId);
+    if (status.state === "gone") {
+      return {
+        leaderExited: childHasExited(target),
+        processGroupGone: true,
+        cleanupVerification: "verified-gone",
+      };
+    }
+    if (status.state === "unknown") {
+      return {
+        leaderExited: childHasExited(target),
+        processGroupGone: false,
+        cleanupVerification: "unknown",
+        groupCheckError: status,
+      };
+    }
+    if (Date.now() >= deadline) {
+      break;
+    }
+    await delay(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  return {
+    leaderExited: childHasExited(target),
+    processGroupGone: false,
+    cleanupVerification: "still-exists",
+  };
+}
+
+function signalProcessGroup(target, processGroupId, signal) {
+  try {
+    process.kill(-processGroupId, signal);
+    return undefined;
+  } catch (error) {
+    if (target) {
+      try {
+        target.kill(signal);
+      } catch {
+        // Group verification remains authoritative after a failed signal send.
+      }
+    }
+    return {
+      message: error instanceof Error ? error.message : String(error),
+      code: error?.code,
+    };
+  }
+}
+
+export async function terminateChildProcessGroup(child, options = {}) {
   const target = child ?? activeChild;
-  if (!target || target.exitCode !== null || target.killed) {
+  if (!target && (process.platform === "win32" || !options.processGroupId)) {
     return { terminated: false };
   }
 
-  try {
-    if (process.platform === "win32") {
+  if (process.platform === "win32") {
+    if (childHasExited(target)) {
+      return { terminated: false };
+    }
+    try {
       spawnSync("taskkill", ["/pid", String(target.pid), "/t"], {
         windowsHide: true,
       });
-    } else {
-      process.kill(-target.pid, "SIGTERM");
+    } catch {
+      target.kill("SIGTERM");
     }
-  } catch {
-    target.kill("SIGTERM");
-  }
-  const exitedGracefully = await waitForChild(target, TERMINATION_GRACE_MS);
-  if (!exitedGracefully) {
-    try {
-      if (process.platform === "win32") {
+    const exitedGracefully = await waitForChild(
+      target,
+      options.graceMs ?? TERMINATION_GRACE_MS,
+    );
+    if (!exitedGracefully) {
+      try {
         spawnSync("taskkill", ["/pid", String(target.pid), "/t", "/f"], {
           windowsHide: true,
         });
-      } else {
-        process.kill(-target.pid, "SIGKILL");
+      } catch {
+        target.kill("SIGKILL");
       }
-    } catch {
-      target.kill("SIGKILL");
     }
+    return {
+      terminated: true,
+      childPid: target.pid,
+      leaderExited: childHasExited(target),
+      processGroupId: undefined,
+      processGroupGone: undefined,
+      exitedGracefully,
+      forceKillRequired: !exitedGracefully,
+      cleanupVerification: "windows-taskkill",
+    };
   }
-  return { terminated: true, exitedGracefully };
+
+  const processGroupId = options.processGroupId ?? target?.pid;
+  if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) {
+    return { terminated: false };
+  }
+  const initial = processGroupStatus(processGroupId);
+  if (initial.state === "gone") {
+    return {
+      terminated: false,
+      childPid: target?.pid,
+      processGroupId,
+      leaderExited: childHasExited(target),
+      processGroupGone: true,
+      exitedGracefully: false,
+      forceKillRequired: false,
+      cleanupVerification: "verified-gone",
+    };
+  }
+  const gracefulSignalError = signalProcessGroup(
+    target,
+    processGroupId,
+    "SIGTERM",
+  );
+  const graceful = await waitForProcessGroup(target, processGroupId, {
+    timeoutMs: options.graceMs ?? TERMINATION_GRACE_MS,
+    pollMs: options.pollMs,
+  });
+  let final = graceful;
+  let forceSignalError;
+  const forceKillRequired = !graceful.processGroupGone;
+  if (forceKillRequired) {
+    forceSignalError = signalProcessGroup(target, processGroupId, "SIGKILL");
+    final = await waitForProcessGroup(target, processGroupId, {
+      timeoutMs: options.forceVerificationMs ?? TERMINATION_GRACE_MS,
+      pollMs: options.pollMs,
+    });
+  }
+  return {
+    terminated: true,
+    childPid: target?.pid,
+    processGroupId,
+    leaderExited: final.leaderExited,
+    processGroupGone: final.processGroupGone,
+    exitedGracefully: graceful.processGroupGone,
+    forceKillRequired,
+    cleanupVerification: final.cleanupVerification,
+    gracefulSignalError,
+    forceSignalError,
+    groupCheckError: final.groupCheckError,
+  };
 }
 
 async function terminateActiveChild() {
   if (!activeChildTermination) {
-    activeChildTermination = terminateChildProcessGroup(activeChild).finally(
-      () => {
-        activeChildTermination = undefined;
-      },
-    );
+    const child = activeChild;
+    const processGroupId = activeProcessGroupId;
+    activeChildTermination = terminateChildProcessGroup(child, {
+      processGroupId,
+    }).finally(() => {
+      if (activeProcessGroupId === processGroupId) {
+        activeProcessGroupId = undefined;
+      }
+      activeChildTermination = undefined;
+    });
   }
   return activeChildTermination;
+}
+
+function cleanupAllowsLockRelease(termination) {
+  return (
+    !termination?.terminated ||
+    termination.processGroupId === undefined ||
+    termination.processGroupGone === true
+  );
 }
 
 export class GateLifecycle {
@@ -494,6 +658,11 @@ export class GateLifecycle {
     this.cleanupPromise = (async () => {
       const termination = await this.terminate();
       this.evidence.termination.childTermination = termination;
+      if (!cleanupAllowsLockRelease(termination)) {
+        this.evidence.termination.lockReleased = false;
+        this.evidence.termination.lockReleaseDeferred = true;
+        return termination;
+      }
       this.evidence.termination.lockReleased = await this.releaseLock();
       return termination;
     })();
@@ -1292,6 +1461,93 @@ function normalizedStressTestPath(testPath) {
   );
 }
 
+function manifestIdentityParts(name) {
+  const parts = name.split(" > ");
+  if (parts.length < 2 || parts.some((part) => !part)) {
+    throw gateError(
+      "RELEASE_BLOCKED",
+      `Manifest test identity cannot provide a canonical hierarchy: ${name}`,
+    );
+  }
+  return {
+    suiteHierarchy: parts.slice(0, -1),
+    leafTitle: parts.at(-1),
+  };
+}
+
+export function manifestStressIdentityCatalog(manifest) {
+  const entries = manifest.files.flatMap((file) =>
+    file.tests.map((name) => {
+      const { suiteHierarchy, leafTitle } = manifestIdentityParts(name);
+      return {
+        path: file.path,
+        suiteHierarchy,
+        leafTitle,
+        manifestName: name,
+        canonicalKey: manifestKey(file.path, name),
+        jsonProjection: [...suiteHierarchy, leafTitle].join(" "),
+        streamProjection: name,
+        leafProjection: leafTitle,
+      };
+    }),
+  );
+  return { entries };
+}
+
+function identityEvidence(identity) {
+  if (!identity) {
+    return undefined;
+  }
+  return {
+    path: identity.path,
+    suiteHierarchy: identity.suiteHierarchy,
+    leafTitle: identity.leafTitle,
+    manifestName: identity.manifestName,
+    canonicalKey: identity.canonicalKey,
+  };
+}
+
+function resolveManifestIdentity(catalog, path, sourceName, source) {
+  if (!catalog?.entries) {
+    return {
+      state: "unresolved",
+      source,
+      path,
+      sourceName,
+      reason: "manifest identity catalog is missing",
+    };
+  }
+  const fileEntries = catalog.entries.filter((entry) => entry.path === path);
+  let candidates;
+  if (source === "json") {
+    candidates = fileEntries.filter(
+      (entry) => entry.jsonProjection === sourceName,
+    );
+  } else if (sourceName.includes(" > ")) {
+    candidates = fileEntries.filter(
+      (entry) => entry.streamProjection === sourceName,
+    );
+  } else {
+    candidates = fileEntries.filter(
+      (entry) => entry.leafProjection === sourceName,
+    );
+  }
+  if (candidates.length !== 1) {
+    return {
+      state: "unresolved",
+      source,
+      path,
+      sourceName,
+      reason:
+        candidates.length === 0
+          ? "no exact manifest projection matched"
+          : "multiple exact manifest projections matched",
+      candidateCount: candidates.length,
+    };
+  }
+  return { state: "resolved", source, identity: candidates[0] };
+}
+
 export class StreamedVitestOutputCapture {
   constructor(options = {}) {
     this.maxBytes = options.maxBytes ?? STREAM_CAPTURE_MAX_BYTES;
@@ -1374,7 +1630,7 @@ function streamedFailureBlocks(lines) {
   let current;
   for (const line of lines) {
     const heading = stripAnsi(line.text).match(
-      /^\s*FAIL\s+(.+\.(?:test|spec)\.(?:ts|tsx))\s+>\s+(.+?)\s*$/,
+      /^\s*FAIL\s+(.+\.(?:test|spec)\.(?:ts|tsx))\s+>\s+(.+)$/,
     );
     if (heading) {
       current = {
@@ -1393,50 +1649,82 @@ function streamedFailureBlocks(lines) {
   }));
 }
 
-export function correlateStressFailures(failures, streamedOutput) {
+export function correlateStressFailures(
+  failures,
+  streamedOutput,
+  options = {},
+) {
   const blocks = streamedFailureBlocks(streamedOutput?.lines ?? []);
   const timeoutBlocks = blocks.filter((block) => block.timeoutKind);
-  const keys = failures.map((failure) =>
-    manifestKey(failure.path, failure.name),
+  const catalog =
+    options.identityCatalog ??
+    (options.manifest
+      ? manifestStressIdentityCatalog(options.manifest)
+      : undefined);
+  const jsonResolutions = failures.map((failure) =>
+    resolveManifestIdentity(catalog, failure.path, failure.name, "json"),
   );
-  const uniqueKeys = new Set(keys);
+  const streamResolutions = blocks.map((block) =>
+    resolveManifestIdentity(catalog, block.path, block.name, "stream"),
+  );
+  const unresolvedIdentities = [
+    ...jsonResolutions.filter((resolution) => resolution.state !== "resolved"),
+    ...streamResolutions.filter(
+      (resolution) => resolution.state !== "resolved",
+    ),
+  ];
+  const jsonKeys = jsonResolutions
+    .filter((resolution) => resolution.state === "resolved")
+    .map((resolution) => resolution.identity.canonicalKey);
+  const uniqueJsonKeys = new Set(jsonKeys);
   const timeoutByKey = new Map();
-  for (const block of timeoutBlocks) {
-    const key = manifestKey(block.path, block.name);
+  for (let index = 0; index < blocks.length; index += 1) {
+    const block = blocks[index];
+    const resolution = streamResolutions[index];
+    if (!block.timeoutKind || resolution.state !== "resolved") {
+      continue;
+    }
+    const key = resolution.identity.canonicalKey;
     const matching = timeoutByKey.get(key) ?? [];
-    matching.push(block);
+    matching.push({ block, identity: resolution.identity });
     timeoutByKey.set(key, matching);
   }
   const mismatch =
     streamedOutput?.truncated === true ||
-    keys.length === 0 ||
-    uniqueKeys.size !== keys.length ||
+    !catalog ||
+    unresolvedIdentities.length > 0 ||
+    uniqueJsonKeys.size !== jsonKeys.length ||
+    blocks.length !== failures.length ||
     timeoutBlocks.length !== failures.length ||
     [...timeoutByKey.entries()].some(
-      ([key, matching]) => !uniqueKeys.has(key) || matching.length !== 1,
+      ([key, matching]) => !uniqueJsonKeys.has(key) || matching.length !== 1,
     ) ||
-    failures.some(
-      (failure) =>
-        (timeoutByKey.get(manifestKey(failure.path, failure.name)) ?? [])
-          .length !== 1,
-    );
+    jsonKeys.some((key) => (timeoutByKey.get(key) ?? []).length !== 1);
   return {
-    failures: failures.map((failure) => {
-      const matching = timeoutByKey.get(
-        manifestKey(failure.path, failure.name),
-      );
+    failures: failures.map((failure, index) => {
+      const resolution = jsonResolutions[index];
+      const matching =
+        resolution.state === "resolved"
+          ? timeoutByKey.get(resolution.identity.canonicalKey)
+          : undefined;
       return matching?.length === 1
-        ? { ...failure, timeoutKind: matching[0].timeoutKind }
+        ? {
+            ...failure,
+            identity: identityEvidence(resolution.identity),
+            timeoutKind: matching[0].block.timeoutKind,
+          }
         : failure;
     }),
     identityMismatch: mismatch,
-    timeoutBlocks: timeoutBlocks.map((block) => ({
-      path: block.path,
-      name: block.name,
-      timeoutKind: block.timeoutKind,
-      lineStart: block.lines[0]?.line,
-      lineEnd: block.lines.at(-1)?.line,
-    })),
+    unresolvedIdentities,
+    timeoutBlocks: [...timeoutByKey.values()].flatMap((matching) =>
+      matching.map(({ block, identity }) => ({
+        identity: identityEvidence(identity),
+        timeoutKind: block.timeoutKind,
+        lineStart: block.lines[0]?.line,
+        lineEnd: block.lines.at(-1)?.line,
+      })),
+    ),
   };
 }
 
@@ -1479,24 +1767,246 @@ async function latestCanonicalPass() {
   return candidates.sort((left, right) => (left.path < right.path ? 1 : -1))[0];
 }
 
-export function classifyStressResult(input) {
-  if (input.exitCode === 0 && !input.signal) {
-    return { decision: "STRESS_PASS", exitCode: 0 };
+export function stressArtifactPaths(evidence) {
+  if (!evidence?.invocationId || !evidence?.directory) {
+    throw gateError(
+      "RELEASE_BLOCKED",
+      "Stress artifacts require a unique invocation identity and evidence directory",
+    );
+  }
+  const prefix = path.join(evidence.directory, evidence.invocationId);
+  return {
+    masterEvidencePath: `${prefix}.json`,
+    rawVitestJsonPath: `${prefix}-stress-vitest.json`,
+    rawStreamPath: `${prefix}-stress-stream.json`,
+  };
+}
+
+async function artifactMetadata(artifactPath) {
+  try {
+    const source = await readFile(artifactPath, "utf8");
+    return {
+      path: artifactPath,
+      present: true,
+      bytes: Buffer.byteLength(source),
+      sha256: sha256(source),
+      source,
+    };
+  } catch (error) {
+    return {
+      path: artifactPath,
+      present: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function numericReportValue(report, name) {
+  return Number.isSafeInteger(report?.[name]) && report[name] >= 0
+    ? report[name]
+    : undefined;
+}
+
+function completeArtifactMetadata(artifact) {
+  return (
+    artifact?.present === true &&
+    typeof artifact.path === "string" &&
+    Number.isSafeInteger(artifact.bytes) &&
+    artifact.bytes >= 0 &&
+    typeof artifact.sha256 === "string" &&
+    /^[a-f0-9]{64}$/.test(artifact.sha256)
+  );
+}
+
+function validStreamCapture(capture) {
+  return (
+    capture &&
+    Number.isSafeInteger(capture.maxBytes) &&
+    capture.maxBytes > 0 &&
+    Number.isSafeInteger(capture.capturedBytes) &&
+    capture.capturedBytes >= 0 &&
+    typeof capture.truncated === "boolean" &&
+    Array.isArray(capture.lines) &&
+    capture.lines.every(
+      (line, index) =>
+        line?.line === index + 1 &&
+        (line.source === "stdout" || line.source === "stderr") &&
+        typeof line.text === "string",
+    )
+  );
+}
+
+export function validateStressEvidence(input) {
+  const issues = [];
+  const failures = input.failures ?? [];
+  const report = input.report;
+  const resultCode = input.result?.code;
+  if (!Number.isSafeInteger(resultCode)) {
+    issues.push("raw stress child outcome is missing or malformed");
+  } else if (resultCode < 0) {
+    issues.push("stress child terminated abnormally");
   }
   if (
+    input.abnormal ||
+    input.signal ||
+    input.result?.signal ||
+    input.result?.error
+  ) {
+    issues.push("stress child terminated abnormally");
+  }
+  if (!report || !Array.isArray(report.testResults)) {
+    issues.push("raw Vitest JSON result is missing or malformed");
+  }
+  if (!completeArtifactMetadata(input.rawVitestJson)) {
+    issues.push("raw Vitest JSON artifact is missing or incomplete");
+  }
+  if (!completeArtifactMetadata(input.rawStream)) {
+    issues.push("raw stdout/stderr artifact is missing or incomplete");
+  }
+  if (!input.streamedOutput) {
+    issues.push("captured stdout/stderr evidence is missing");
+  } else if (!validStreamCapture(input.streamedOutput)) {
+    issues.push("captured stdout/stderr evidence is malformed");
+  }
+  if (input.streamedOutput?.truncated) {
+    issues.push("captured stdout/stderr evidence is truncated");
+  }
+  if (
+    typeof input.rawStream?.source === "string" &&
+    input.streamedOutput &&
+    input.rawStream.source !== stableJson(input.streamedOutput)
+  ) {
+    issues.push(
+      "raw stdout/stderr artifact does not match captured line evidence",
+    );
+  }
+  if (!input.correlation) {
+    issues.push("timeout identity correlation is missing");
+  } else if (
+    input.correlation.identityMismatch ||
+    input.correlation.unresolvedIdentities?.length
+  ) {
+    issues.push("timeout identity correlation is unresolved or ambiguous");
+  }
+  if (report) {
+    const requiredCounts = [
+      "numTotalTests",
+      "numPassedTests",
+      "numFailedTests",
+      "numPendingTests",
+      "numTodoTests",
+      "numTotalTestSuites",
+    ];
+    const counts = Object.fromEntries(
+      requiredCounts.map((name) => [name, numericReportValue(report, name)]),
+    );
+    if (Object.values(counts).some((count) => count === undefined)) {
+      issues.push("raw Vitest JSON counts are missing or malformed");
+    }
+    const failedTests = numericReportValue(report, "numFailedTests");
+    if (failedTests !== undefined && failedTests !== failures.length) {
+      issues.push(
+        "reported failed-test count does not match failed identities",
+      );
+    }
+    const totalTests = numericReportValue(report, "numTotalTests");
+    const statusCounts = [
+      "numPassedTests",
+      "numFailedTests",
+      "numPendingTests",
+      "numTodoTests",
+    ].map((name) => numericReportValue(report, name));
+    if (
+      totalTests !== undefined &&
+      statusCounts.every((count) => count !== undefined) &&
+      totalTests !== statusCounts.reduce((sum, count) => sum + count, 0)
+    ) {
+      issues.push("reported total-test count is internally inconsistent");
+    }
+    const totalSuites = numericReportValue(report, "numTotalTestSuites");
+    if (
+      totalSuites !== undefined &&
+      Array.isArray(report.testResults) &&
+      totalSuites !== report.testResults.length
+    ) {
+      issues.push("reported total-file count is internally inconsistent");
+    }
+    if (Array.isArray(report.testResults)) {
+      if (
+        report.testResults.some(
+          (testResult) => !Array.isArray(testResult?.assertionResults),
+        )
+      ) {
+        issues.push(
+          "raw Vitest JSON assertion results are missing or malformed",
+        );
+      } else {
+        const assertions = report.testResults.flatMap(
+          (testResult) => testResult.assertionResults,
+        );
+        if (totalTests !== undefined && totalTests !== assertions.length) {
+          issues.push(
+            "reported total-test count does not match assertion results",
+          );
+        }
+        if (
+          failedTests !== undefined &&
+          failedTests !==
+            assertions.filter((assertion) => assertion?.status === "failed")
+              .length
+        ) {
+          issues.push(
+            "reported failed-test count does not match failed assertion results",
+          );
+        }
+      }
+    }
+    if (typeof report.success !== "boolean") {
+      issues.push("raw Vitest JSON success status is missing or malformed");
+    } else if (
+      failedTests !== undefined &&
+      report.success !== (failedTests === 0)
+    ) {
+      issues.push("raw Vitest JSON success status disagrees with failed tests");
+    } else if (resultCode === 0 && report.success !== true) {
+      issues.push("successful child exit disagrees with raw Vitest JSON");
+    } else if (resultCode !== undefined && resultCode !== 0 && report.success) {
+      issues.push("nonzero child exit disagrees with raw Vitest JSON");
+    }
+  }
+  return { valid: issues.length === 0, issues };
+}
+
+export function classifyStressResult(input) {
+  const failures = input.failures ?? [];
+  const integrity = input.evidenceIntegrity;
+  if (
+    integrity?.valid !== true ||
+    !Array.isArray(integrity.issues) ||
     input.signal ||
     input.abnormal ||
     input.identityMismatch ||
-    input.failures.length === 0
+    input.captureTruncated ||
+    input.unresolvedCorrelation ||
+    input.countMismatch
   ) {
     return {
       decision: "RELEASE_BLOCKED",
       exitCode: 1,
-      reason:
-        "stress abnormal exit, identity mismatch, or unclassified failure",
+      reason: "stress evidence is incomplete, contradictory, or unclassified",
     };
   }
-  if (!input.failures.every(isTimeoutFailure)) {
+  if (input.exitCode === 0 && !input.signal) {
+    if (failures.length === 0) {
+      return { decision: "STRESS_PASS", exitCode: 0 };
+    }
+    return {
+      decision: "RELEASE_BLOCKED",
+      exitCode: 1,
+      reason: "stress success exit has recorded test failures",
+    };
+  }
+  if (failures.length === 0 || !failures.every(isTimeoutFailure)) {
     return {
       decision: "RELEASE_BLOCKED",
       exitCode: 1,
@@ -1514,7 +2024,15 @@ export function classifyStressResult(input) {
 }
 
 async function runStress(evidence, watchdog) {
-  const stressPath = path.join(evidence.directory, "stress-vitest.json");
+  const { manifest, source: manifestSource } = await readManifest();
+  const identityCatalog = manifestStressIdentityCatalog(manifest);
+  const artifacts = stressArtifactPaths(evidence);
+  evidence.artifacts = {
+    ...evidence.artifacts,
+    rawVitestJsonPath: artifacts.rawVitestJsonPath,
+    rawStreamPath: artifacts.rawStreamPath,
+  };
+  await mkdir(evidence.directory, { recursive: true });
   const invocation = pnpmInvocation([
     "exec",
     "vitest",
@@ -1522,54 +2040,106 @@ async function runStress(evidence, watchdog) {
     "--reporter=default",
     "--reporter=json",
     "--outputFile",
-    stressPath,
+    artifacts.rawVitestJsonPath,
   ]);
   const streamCapture = new StreamedVitestOutputCapture();
   const result = await runChild(invocation.command, invocation.args, {
     streamCapture,
   });
-  watchdog?.assertNotExpired();
+  const lifecycleSignal = activeLifecycle?.terminating
+    ? activeLifecycle.signal
+    : undefined;
+  const effectiveSignal = result.signal ?? lifecycleSignal;
+  const streamedOutput = streamCapture.evidence();
+  await writeFile(artifacts.rawStreamPath, stableJson(streamedOutput), "utf8");
+  const rawVitestJson = await artifactMetadata(artifacts.rawVitestJsonPath);
+  const rawStream = await artifactMetadata(artifacts.rawStreamPath);
   let report;
   try {
-    report = JSON.parse(await readFile(stressPath, "utf8"));
+    report = JSON.parse(rawVitestJson.source);
   } catch {
     report = undefined;
   }
   const parsedFailures = report ? parseStressFailures(report) : [];
-  const streamedOutput = streamCapture.evidence();
-  const correlation = correlateStressFailures(parsedFailures, streamedOutput);
+  const correlation = correlateStressFailures(parsedFailures, streamedOutput, {
+    identityCatalog,
+  });
   const failures = correlation.failures;
+  const evidenceIntegrity = validateStressEvidence({
+    result,
+    signal: effectiveSignal,
+    report,
+    rawVitestJson,
+    rawStream,
+    streamedOutput,
+    correlation,
+    failures,
+  });
   evidence.stress = {
     result,
-    reportPath: stressPath,
+    rawOutcome: result,
+    identityCatalog: {
+      manifestDigest: sha256(manifestSource),
+      identities: identityCatalog.entries.length,
+    },
+    rawVitestJson: { ...rawVitestJson, source: undefined },
+    rawStream: { ...rawStream, source: undefined },
     failures,
     streamedOutput,
     timeoutCorrelation: {
       identityMismatch: correlation.identityMismatch,
+      unresolvedIdentities: correlation.unresolvedIdentities,
       timeoutBlocks: correlation.timeoutBlocks,
     },
+    evidenceIntegrity,
+    controlledAdjudication: { attempted: false },
   };
 
-  if (result.code === 0 && !result.signal) {
-    return classifyStressResult({
+  if (effectiveSignal) {
+    const classification = classifyStressResult({
       exitCode: result.code,
-      signal: result.signal,
+      signal: effectiveSignal,
+      abnormal: !report,
       identityMismatch: correlation.identityMismatch,
       failures,
+      evidenceIntegrity,
     });
+    evidence.stress.classification = classification;
+    return classification;
+  }
+
+  watchdog?.assertNotExpired();
+
+  if (result.code === 0) {
+    const classification = classifyStressResult({
+      exitCode: result.code,
+      signal: effectiveSignal,
+      identityMismatch: correlation.identityMismatch,
+      failures,
+      evidenceIntegrity,
+    });
+    evidence.stress.classification = classification;
+    return classification;
   }
   const prior = await latestCanonicalPass();
+  evidence.stress.controlledAdjudication.priorCanonicalEvidence = prior?.path;
   const affectedPaths = lexicalSort([
     ...new Set(failures.map((failure) => failure.path)),
   ]);
   let controlledPass = false;
   if (
     prior &&
+    evidenceIntegrity.valid &&
     !correlation.identityMismatch &&
     affectedPaths.length > 0 &&
     failures.every(isTimeoutFailure)
   ) {
     try {
+      evidence.stress.controlledAdjudication = {
+        ...evidence.stress.controlledAdjudication,
+        attempted: true,
+        affectedIdentities: failures.map((failure) => failure.identity),
+      };
       const controlled = await runCanonical(
         evidence,
         watchdog,
@@ -1578,16 +2148,20 @@ async function runStress(evidence, watchdog) {
       );
       controlledPass =
         controlled.decision === "CONTROLLED_PASS_DIAGNOSTIC_ONLY";
+      evidence.stress.controlledAdjudication.result = controlled;
     } catch (error) {
       evidence.stress.controlledFailure = serializeError(error);
+      evidence.stress.controlledAdjudication.failure =
+        evidence.stress.controlledFailure;
     }
   }
   const classification = classifyStressResult({
     exitCode: result.code,
-    signal: result.signal,
+    signal: effectiveSignal,
     abnormal: !report,
     identityMismatch: correlation.identityMismatch,
     failures,
+    evidenceIntegrity,
     canonicalPass: Boolean(prior),
     interactionPass: Boolean(
       prior &&
@@ -1654,16 +2228,22 @@ function parseArguments(arguments_) {
 async function main() {
   const parsed = parseArguments(process.argv.slice(2));
   const token = randomUUID();
-  const evidencePath = path.join(
-    EVIDENCE_ROOT,
-    `${new Date().toISOString().replaceAll(":", "-")}-${parsed.mode}-${process.pid}-${token}.json`,
-  );
+  const invocationId = `${new Date().toISOString().replaceAll(":", "-")}-${parsed.mode}-${process.pid}-${token}`;
+  const invocationArtifacts = stressArtifactPaths({
+    directory: EVIDENCE_ROOT,
+    invocationId,
+  });
+  const evidencePath = invocationArtifacts.masterEvidencePath;
   const evidence = {
     schemaVersion: 1,
     commandVersion: 1,
     mode: parsed.mode,
+    invocationId,
     startedAt: new Date().toISOString(),
     directory: path.dirname(evidencePath),
+    artifacts: {
+      masterEvidencePath: evidencePath,
+    },
     git: gitMetadata(),
     runtime: {
       node: process.version,
@@ -1673,6 +2253,23 @@ async function main() {
     timeoutOverridesSuppliedByRunner: false,
     legs: [],
   };
+  if (parsed.mode === "stress") {
+    const artifacts = stressArtifactPaths(evidence);
+    evidence.artifacts = {
+      ...evidence.artifacts,
+      rawVitestJsonPath: artifacts.rawVitestJsonPath,
+      rawStreamPath: artifacts.rawStreamPath,
+    };
+    evidence.stress = {
+      rawVitestJson: { path: artifacts.rawVitestJsonPath, present: false },
+      rawStream: { path: artifacts.rawStreamPath, present: false },
+      evidenceIntegrity: {
+        valid: false,
+        issues: ["stress invocation did not complete raw evidence capture"],
+      },
+      controlledAdjudication: { attempted: false },
+    };
+  }
   let lock;
   let watchdog;
   const lifecycle = new GateLifecycle(evidence);

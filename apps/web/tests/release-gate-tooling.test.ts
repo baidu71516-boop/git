@@ -80,7 +80,63 @@ function passingExecutionEvidence() {
   };
 }
 
-function vitest410TimeoutJson(pathname: string, name: string) {
+const ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE = {
+  label: "ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE",
+  path: "apps/web/tests/bulk-preview-workflow.test.tsx",
+  jsonFullName:
+    "Bulk unified preview review presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+  streamedHierarchy:
+    "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+} as const;
+
+type StressFailure = {
+  path: string;
+  name: string;
+  messages?: string[];
+};
+
+type StreamFailure = {
+  path: string;
+  name: string;
+  kind?: string;
+};
+
+function stressManifest() {
+  return {
+    schemaVersion: 1,
+    files: [
+      {
+        path: "apps/web/tests/bulk-preview-workflow.test.tsx",
+        tests: [
+          "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+          "Bulk unified preview review > duplicate leaf",
+          "Other bulk suite > duplicate leaf",
+        ],
+      },
+      {
+        path: "apps/web/tests/influencer-preview.test.tsx",
+        tests: [
+          "development influencer visual preview > opens and closes preview drawer from local preview table interactions",
+          "development influencer visual preview > duplicate leaf",
+        ],
+      },
+      {
+        path: "apps/web/tests/other.test.ts",
+        tests: ["Other file suite > duplicate leaf"],
+      },
+      {
+        path: "apps/web/tests/timeout-kinds.test.ts",
+        tests: [
+          "Timeout kinds > test timeout",
+          "Timeout kinds > hook timeout",
+          "Timeout kinds > teardown timeout",
+        ],
+      },
+    ],
+  };
+}
+
+function vitest410TimeoutJson(pathname: string, fullName: string) {
   return {
     testResults: [
       {
@@ -88,7 +144,7 @@ function vitest410TimeoutJson(pathname: string, name: string) {
         assertionResults: [
           {
             status: "failed",
-            fullName: name,
+            fullName,
             failureMessages: ["STACK_TRACE_ERROR"],
           },
         ],
@@ -97,9 +153,7 @@ function vitest410TimeoutJson(pathname: string, name: string) {
   };
 }
 
-function timeoutStream(
-  failures: Array<{ path: string; name: string; kind?: string }>,
-) {
+function timeoutStream(failures: StreamFailure[]) {
   const capture = new runner.StreamedVitestOutputCapture();
   for (const failure of failures) {
     const timeoutKind = failure.kind ?? "test";
@@ -126,22 +180,116 @@ function timeoutStream(
   return capture.evidence();
 }
 
+function completeArtifact(pathname: string) {
+  return {
+    path: pathname,
+    present: true,
+    bytes: 1,
+    sha256: "0".repeat(64),
+  };
+}
+
 function classifyTimeoutFixture(
-  failures: Array<{ path: string; name: string; messages?: string[] }>,
+  failures: StressFailure[],
   streamedOutput = timeoutStream(failures),
+  manifest = stressManifest(),
 ) {
-  const correlation = runner.correlateStressFailures(failures, streamedOutput);
+  const correlation = runner.correlateStressFailures(failures, streamedOutput, {
+    manifest,
+  });
+  const assertionsByPath = new Map<string, Array<Record<string, unknown>>>();
+  for (const failure of failures) {
+    const assertions = assertionsByPath.get(failure.path) ?? [];
+    assertions.push({
+      status: "failed",
+      fullName: failure.name,
+      failureMessages: [],
+    });
+    assertionsByPath.set(failure.path, assertions);
+  }
+  const report = {
+    testResults: [...assertionsByPath.entries()].map(
+      ([pathname, assertionResults]) => ({
+        name: pathname.replace(/^apps\/web\//, ""),
+        assertionResults,
+      }),
+    ),
+    numTotalTests: failures.length,
+    numPassedTests: 0,
+    numFailedTests: failures.length,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    numTotalTestSuites: assertionsByPath.size,
+    success: failures.length === 0,
+  };
+  const evidenceIntegrity = runner.validateStressEvidence({
+    result: { code: 1 },
+    report,
+    rawVitestJson: completeArtifact("raw.json"),
+    rawStream: completeArtifact("stream.json"),
+    streamedOutput,
+    correlation,
+    failures: correlation.failures,
+  });
   return {
     correlation,
+    evidenceIntegrity,
     classification: runner.classifyStressResult({
       exitCode: 1,
       failures: correlation.failures,
       identityMismatch: correlation.identityMismatch,
+      evidenceIntegrity,
       canonicalPass: true,
       interactionPass: true,
       controlledPass: true,
     }),
   };
+}
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function pidIsAlive(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForPidGone(pid: number) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (!pidIsAlive(pid)) {
+      return;
+    }
+    await wait(10);
+  }
+  throw new Error(`PID ${pid} remained alive after process-group cleanup`);
+}
+
+async function waitForPath(filePath: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      await access(filePath);
+      return;
+    } catch {
+      await wait(10);
+    }
+  }
+  throw new Error(`Timed out waiting for ${filePath}`);
+}
+
+async function waitForJson(filePath: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      return JSON.parse(await readFile(filePath, "utf8"));
+    } catch {
+      await wait(10);
+    }
+  }
+  throw new Error(`Timed out waiting for JSON evidence at ${filePath}`);
 }
 
 describe("release gate deterministic tooling", () => {
@@ -252,27 +400,36 @@ describe("release gate deterministic tooling", () => {
     );
   });
 
-  it("correlates the observed Vitest 4.1.10 STACK_TRACE_ERROR shape with exact timeout identities", () => {
-    const pathname = "apps/web/tests/bulk-preview-workflow.test.tsx";
-    const name =
-      "Bulk preview > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking";
+  it("correlates the ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE through exact manifest projections", () => {
+    const manifest = stressManifest();
+    const fixture = ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE;
+    const manifestName = manifest.files[0].tests[0];
+    expect(manifestName).toBe(fixture.streamedHierarchy);
     const jsonFailures = runner.parseStressFailures(
-      vitest410TimeoutJson(pathname, name),
+      vitest410TimeoutJson(fixture.path, fixture.jsonFullName),
     );
+    expect(fixture.label).toBe("ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE");
     expect(jsonFailures).toEqual([
       expect.objectContaining({
-        path: pathname,
-        name,
+        path: fixture.path,
+        name: fixture.jsonFullName,
         messages: ["STACK_TRACE_ERROR"],
       }),
     ]);
 
-    const { correlation, classification } =
-      classifyTimeoutFixture(jsonFailures);
+    const { correlation, classification } = classifyTimeoutFixture(
+      jsonFailures,
+      timeoutStream([{ path: fixture.path, name: manifestName }]),
+      manifest,
+    );
     expect(correlation).toMatchObject({
       identityMismatch: false,
-      failures: [expect.objectContaining({ timeoutKind: "test" })],
-      timeoutBlocks: [expect.objectContaining({ path: pathname, name })],
+      failures: [
+        expect.objectContaining({
+          timeoutKind: "test",
+          identity: expect.objectContaining({ manifestName }),
+        }),
+      ],
     });
     expect(classification).toMatchObject({
       decision: "STRESS_RESOURCE_CONTENTION_NON_BLOCKING",
@@ -280,31 +437,201 @@ describe("release gate deterministic tooling", () => {
     });
   });
 
-  it("fails closed for assertion, mixed, abnormal, and identity-mismatched stress failures", () => {
+  it("resolves exact stream hierarchy and unique leaf-only projections without splitting JSON words", () => {
+    const manifest = stressManifest();
+    const pathname = "apps/web/tests/influencer-preview.test.tsx";
+    const manifestName = manifest.files[1].tests[0];
+    const jsonFailures = runner.parseStressFailures(
+      vitest410TimeoutJson(
+        pathname,
+        "development influencer visual preview opens and closes preview drawer from local preview table interactions",
+      ),
+    );
+    expect(
+      classifyTimeoutFixture(
+        jsonFailures,
+        timeoutStream([{ path: pathname, name: manifestName }]),
+        manifest,
+      ).correlation.identityMismatch,
+    ).toBe(false);
+    expect(
+      classifyTimeoutFixture(
+        jsonFailures,
+        timeoutStream([
+          {
+            path: pathname,
+            name: "opens and closes preview drawer from local preview table interactions",
+          },
+        ]),
+        manifest,
+      ).correlation.identityMismatch,
+    ).toBe(false);
+  });
+
+  it("scopes same leaf titles by exact file identity and rejects a cross-file mismatch", () => {
+    const manifest = stressManifest();
+    const bulkPath = "apps/web/tests/bulk-preview-workflow.test.tsx";
+    const otherPath = "apps/web/tests/other.test.ts";
+    const bulkJson = [
+      {
+        path: bulkPath,
+        name: "Bulk unified preview review duplicate leaf",
+      },
+    ];
+    expect(
+      runner.correlateStressFailures(
+        bulkJson,
+        timeoutStream([{ path: bulkPath, name: "duplicate leaf" }]),
+        { manifest },
+      ).identityMismatch,
+    ).toBe(true);
+    expect(
+      runner.correlateStressFailures(
+        [
+          {
+            path: otherPath,
+            name: "Other file suite duplicate leaf",
+          },
+        ],
+        timeoutStream([{ path: otherPath, name: "duplicate leaf" }]),
+        { manifest },
+      ).identityMismatch,
+    ).toBe(false);
+  });
+
+  it("recognizes only structured test, hook, and teardown timeout blocks after exact identity resolution", () => {
+    const manifest = stressManifest();
+    const pathname = "apps/web/tests/timeout-kinds.test.ts";
+    const failures = [
+      { path: pathname, name: "Timeout kinds test timeout" },
+      { path: pathname, name: "Timeout kinds hook timeout" },
+      { path: pathname, name: "Timeout kinds teardown timeout" },
+    ];
+    const { correlation, classification } = classifyTimeoutFixture(
+      failures,
+      timeoutStream([
+        { path: pathname, name: "Timeout kinds > test timeout" },
+        {
+          path: pathname,
+          name: "Timeout kinds > hook timeout",
+          kind: "hook",
+        },
+        {
+          path: pathname,
+          name: "Timeout kinds > teardown timeout",
+          kind: "teardown",
+        },
+      ]),
+      manifest,
+    );
+    expect(
+      correlation.failures.map(
+        (failure: { timeoutKind?: string }) => failure.timeoutKind,
+      ),
+    ).toEqual(["test", "hook", "teardown"]);
+    expect(classification).toMatchObject({
+      decision: "STRESS_RESOURCE_CONTENTION_NON_BLOCKING",
+    });
+  });
+
+  it("fails closed for ambiguous leaf-only, wrong-file, wrong-hierarchy, duplicate, missing, and random timeout blocks", () => {
+    const manifest = stressManifest();
+    const pathname = "apps/web/tests/bulk-preview-workflow.test.tsx";
+    const jsonFailures = [
+      {
+        path: pathname,
+        name: "Bulk unified preview review presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+      },
+    ];
+    const exactBlock = {
+      path: pathname,
+      name: manifest.files[0].tests[0],
+    };
+    const ambiguousLeaf = {
+      path: pathname,
+      name: "duplicate leaf",
+    };
+    const randomCapture = new runner.StreamedVitestOutputCapture();
+    randomCapture.write("stderr", "unrelated timeout text\n");
+    randomCapture.finish();
+    const cases = [
+      timeoutStream([ambiguousLeaf]),
+      timeoutStream([
+        {
+          path: "apps/web/tests/influencer-preview.test.tsx",
+          name: manifest.files[1].tests[0],
+        },
+      ]),
+      timeoutStream([
+        {
+          path: "apps/web/tests/other.test.ts",
+          name: manifest.files[0].tests[0],
+        },
+      ]),
+      timeoutStream([
+        {
+          path: pathname,
+          name: "Bulk unified preview review > wrong hierarchy and exact leaf text not enough",
+        },
+      ]),
+      timeoutStream([exactBlock, exactBlock]),
+      new runner.StreamedVitestOutputCapture().evidence(),
+      randomCapture.evidence(),
+    ];
+    for (const streamedOutput of cases) {
+      expect(
+        runner.correlateStressFailures(jsonFailures, streamedOutput, {
+          manifest,
+        }).identityMismatch,
+      ).toBe(true);
+    }
+    expect(
+      runner.correlateStressFailures(
+        [
+          {
+            ...jsonFailures[0],
+            name: jsonFailures[0].name.replace(
+              "preview review presents",
+              "preview review  presents",
+            ),
+          },
+        ],
+        timeoutStream([exactBlock]),
+        { manifest },
+      ).identityMismatch,
+    ).toBe(true);
+  });
+
+  it("fails closed for assertion, mixed, abnormal, and controlled PASS after assertion", () => {
+    const manifest = stressManifest();
     const timeout = {
       path: "apps/web/tests/bulk-preview-workflow.test.tsx",
-      name: "Bulk preview > timeout-shaped test",
+      name: "Bulk unified preview review presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
       messages: ["STACK_TRACE_ERROR"],
     };
     const assertion = {
       path: "apps/web/tests/influencer-preview.test.tsx",
-      name: "Influencer preview > assertion failure",
+      name: "development influencer visual preview opens and closes preview drawer from local preview table interactions",
       messages: ["STACK_TRACE_ERROR"],
     };
     const assertionStream = new runner.StreamedVitestOutputCapture();
     assertionStream.write(
       "stderr",
-      ` FAIL  ${assertion.path} > ${assertion.name}\nAssertionError: expected true to be false\n`,
+      ` FAIL  ${assertion.path} > ${manifest.files[1].tests[0]}\nAssertionError: expected true to be false\n`,
     );
     assertionStream.finish();
-
     expect(
-      classifyTimeoutFixture([assertion], assertionStream.evidence())
+      classifyTimeoutFixture([assertion], assertionStream.evidence(), manifest)
         .classification,
     ).toMatchObject({ decision: "RELEASE_BLOCKED" });
     expect(
-      classifyTimeoutFixture([timeout, assertion], timeoutStream([timeout]))
-        .classification,
+      classifyTimeoutFixture(
+        [timeout, assertion],
+        timeoutStream([
+          { path: timeout.path, name: manifest.files[0].tests[0] },
+        ]),
+        manifest,
+      ).classification,
     ).toMatchObject({ decision: "RELEASE_BLOCKED" });
     expect(
       runner.classifyStressResult({
@@ -313,81 +640,207 @@ describe("release gate deterministic tooling", () => {
         failures: [],
       }),
     ).toMatchObject({ decision: "RELEASE_BLOCKED" });
-    expect(
-      classifyTimeoutFixture(
-        [timeout],
-        timeoutStream([{ ...timeout, name: "different test identity" }]),
-      ).classification,
-    ).toMatchObject({ decision: "RELEASE_BLOCKED" });
   });
 
-  it("preserves multiple exact timeout identities and never lets controlled PASS rewrite assertion failure", () => {
-    const failures = [
-      {
-        path: "apps/web/tests/bulk-preview-workflow.test.tsx",
-        name: "Bulk preview > timeout one",
-        messages: ["STACK_TRACE_ERROR"],
-      },
-      {
-        path: "apps/web/tests/influencer-preview.test.tsx",
-        name: "Influencer preview > timeout two",
-        messages: ["STACK_TRACE_ERROR"],
-      },
-    ];
-    const { correlation, classification } = classifyTimeoutFixture(failures);
-    expect(correlation.timeoutBlocks).toEqual([
-      expect.objectContaining({
-        path: failures[0].path,
-        name: failures[0].name,
-      }),
-      expect.objectContaining({
-        path: failures[1].path,
-        name: failures[1].name,
-      }),
-    ]);
-    expect(classification.decision).toBe(
-      "STRESS_RESOURCE_CONTENTION_NON_BLOCKING",
-    );
+  it("validates evidence integrity before every STRESS_PASS result", () => {
+    const cleanReport = {
+      testResults: [],
+      numTotalTests: 0,
+      numPassedTests: 0,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      numTotalTestSuites: 0,
+      success: true,
+    };
+    const cleanCapture = new runner.StreamedVitestOutputCapture().evidence();
+    const cleanCorrelation = runner.correlateStressFailures([], cleanCapture, {
+      manifest: stressManifest(),
+    });
+    const complete = runner.validateStressEvidence({
+      result: { code: 0 },
+      report: cleanReport,
+      rawVitestJson: completeArtifact("clean.json"),
+      rawStream: completeArtifact("clean.stream"),
+      streamedOutput: cleanCapture,
+      correlation: cleanCorrelation,
+      failures: [],
+    });
+    expect(complete.valid).toBe(true);
     expect(
       runner.classifyStressResult({
-        exitCode: 1,
-        failures: [{ ...failures[0], timeoutKind: undefined }],
-        canonicalPass: true,
-        interactionPass: true,
-        controlledPass: true,
+        exitCode: 0,
+        failures: [],
+        evidenceIntegrity: complete,
+      }),
+    ).toMatchObject({ decision: "STRESS_PASS" });
+
+    const malformed = [
+      { abnormal: true, failures: [], identityMismatch: true },
+      { failures: [], evidenceIntegrity: { valid: false } },
+      { failures: [], identityMismatch: true, evidenceIntegrity: complete },
+      { failures: [], signal: "SIGTERM", evidenceIntegrity: complete },
+      { failures: [], captureTruncated: true, evidenceIntegrity: complete },
+      { failures: [], countMismatch: true, evidenceIntegrity: complete },
+    ];
+    for (const input of malformed) {
+      expect(
+        runner.classifyStressResult({ exitCode: 0, ...input }),
+      ).toMatchObject({ decision: "RELEASE_BLOCKED" });
+    }
+  });
+
+  it("fails closed for missing JSON, truncated capture, explicit failure, and count mismatch on an exit-zero stress result", () => {
+    const cleanReport = {
+      testResults: [],
+      numTotalTests: 0,
+      numPassedTests: 0,
+      numFailedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
+      numTotalTestSuites: 0,
+      success: true,
+    };
+    const capture = new runner.StreamedVitestOutputCapture().evidence();
+    const truncatedCapture = new runner.StreamedVitestOutputCapture({
+      maxBytes: 1,
+    });
+    truncatedCapture.write("stderr", "required evidence\n");
+    truncatedCapture.finish();
+    expect(truncatedCapture.evidence().truncated).toBe(true);
+    expect(
+      runner.correlateStressFailures([], truncatedCapture.evidence(), {
+        manifest: stressManifest(),
+      }).identityMismatch,
+    ).toBe(true);
+    const correlation = runner.correlateStressFailures([], capture, {
+      manifest: stressManifest(),
+    });
+    const cases = [
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        rawVitestJson: { path: "missing.json", present: false },
+        rawStream: completeArtifact("stream.json"),
+        streamedOutput: capture,
+        correlation,
+        failures: [],
+      }),
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        report: cleanReport,
+        rawVitestJson: completeArtifact("raw.json"),
+        rawStream: completeArtifact("stream.json"),
+        streamedOutput: truncatedCapture.evidence(),
+        correlation,
+        failures: [],
+      }),
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        report: { ...cleanReport, numTotalTests: 1 },
+        rawVitestJson: completeArtifact("raw.json"),
+        rawStream: completeArtifact("stream.json"),
+        streamedOutput: capture,
+        correlation,
+        failures: [],
+      }),
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        report: { ...cleanReport, testResults: undefined },
+        rawVitestJson: completeArtifact("raw.json"),
+        rawStream: completeArtifact("stream.json"),
+        streamedOutput: capture,
+        correlation,
+        failures: [],
+      }),
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        report: { ...cleanReport, success: false },
+        rawVitestJson: completeArtifact("raw.json"),
+        rawStream: completeArtifact("stream.json"),
+        streamedOutput: capture,
+        correlation,
+        failures: [],
+      }),
+    ];
+    for (const evidenceIntegrity of cases) {
+      expect(evidenceIntegrity.valid).toBe(false);
+      expect(
+        runner.classifyStressResult({
+          exitCode: 0,
+          failures: [],
+          evidenceIntegrity,
+        }),
+      ).toMatchObject({ decision: "RELEASE_BLOCKED" });
+    }
+    expect(
+      runner.classifyStressResult({
+        exitCode: 0,
+        failures: [{ path: "apps/web/tests/a.test.ts", timeoutKind: "test" }],
+        evidenceIntegrity: { valid: true },
       }),
     ).toMatchObject({ decision: "RELEASE_BLOCKED" });
   });
 
-  it("distinguishes structured Vitest test, hook, and teardown timeout signatures", () => {
-    const failures = [
-      {
-        path: "apps/web/tests/a.test.ts",
-        name: "A > test timeout",
-      },
-      {
-        path: "apps/web/tests/b.test.ts",
-        name: "B > hook timeout",
-      },
-      {
-        path: "apps/web/tests/c.test.ts",
-        name: "C > teardown timeout",
-      },
-    ];
-    const correlation = runner.correlateStressFailures(
-      failures,
-      timeoutStream([
-        failures[0],
-        { ...failures[1], kind: "hook" },
-        { ...failures[2], kind: "teardown" },
-      ]),
+  it("derives immutable per-invocation master, raw JSON, and stdout/stderr artifact paths", async () => {
+    const temporaryRoot = path.join(
+      os.tmpdir(),
+      "release-gate-immutable-artifacts-",
+      `${process.pid}-${Date.now()}`,
     );
-    expect(correlation.identityMismatch).toBe(false);
-    expect(
-      correlation.failures.map(
-        (failure: { timeoutKind?: string }) => failure.timeoutKind,
-      ),
-    ).toEqual(["test", "hook", "teardown"]);
+    temporaryPaths.push(temporaryRoot);
+    await mkdir(temporaryRoot, { recursive: true });
+    const first = runner.stressArtifactPaths({
+      directory: temporaryRoot,
+      invocationId: "stress-a",
+    });
+    const second = runner.stressArtifactPaths({
+      directory: temporaryRoot,
+      invocationId: "stress-b",
+    });
+    expect(first).not.toEqual(second);
+    await writeFile(first.rawVitestJsonPath, "raw-json-a\n");
+    await writeFile(first.rawStreamPath, "raw-stream-a\n");
+    await writeFile(
+      first.masterEvidencePath,
+      JSON.stringify({
+        artifacts: {
+          masterEvidencePath: first.masterEvidencePath,
+          rawVitestJsonPath: first.rawVitestJsonPath,
+          rawStreamPath: first.rawStreamPath,
+        },
+      }),
+    );
+    const firstJson = await readFile(first.rawVitestJsonPath, "utf8");
+    const firstStream = await readFile(first.rawStreamPath, "utf8");
+    const firstMaster = await readFile(first.masterEvidencePath, "utf8");
+    await writeFile(second.rawVitestJsonPath, "raw-json-b\n");
+    await writeFile(second.rawStreamPath, "raw-stream-b\n");
+    await writeFile(
+      second.masterEvidencePath,
+      JSON.stringify({
+        artifacts: {
+          masterEvidencePath: second.masterEvidencePath,
+          rawVitestJsonPath: second.rawVitestJsonPath,
+          rawStreamPath: second.rawStreamPath,
+        },
+      }),
+    );
+
+    expect(await readFile(first.rawVitestJsonPath, "utf8")).toBe(firstJson);
+    expect(await readFile(first.rawStreamPath, "utf8")).toBe(firstStream);
+    expect(await readFile(first.masterEvidencePath, "utf8")).toBe(firstMaster);
+    expect(JSON.parse(firstMaster).artifacts).toEqual({
+      masterEvidencePath: first.masterEvidencePath,
+      rawVitestJsonPath: first.rawVitestJsonPath,
+      rawStreamPath: first.rawStreamPath,
+    });
+    expect(await readFile(second.rawVitestJsonPath, "utf8")).toBe(
+      "raw-json-b\n",
+    );
+    expect(second.masterEvidencePath).not.toBe(first.masterEvidencePath);
+    expect(first.rawVitestJsonPath).not.toBe(
+      path.join(temporaryRoot, "stress-vitest.json"),
+    );
   });
 
   it("fails fast for a live lock, recovers only a proven stale lock, and does not remove a successor lock", async () => {
@@ -572,6 +1025,44 @@ describe("release gate deterministic tooling", () => {
     await expect(access(lockPath)).resolves.toBeUndefined();
   });
 
+  it("retains its lock when POSIX group cleanup cannot prove the group is gone", async () => {
+    const evidence: Record<string, unknown> = {};
+    let releases = 0;
+    const lifecycle = new runner.GateLifecycle(evidence, {
+      terminate: async () => ({
+        terminated: true,
+        childPid: 12_345,
+        processGroupId: 12_345,
+        leaderExited: true,
+        processGroupGone: false,
+        forceKillRequired: true,
+        cleanupVerification: "unknown",
+      }),
+    });
+    lifecycle.attachLock({
+      release: async () => {
+        releases += 1;
+        return true;
+      },
+    });
+
+    await lifecycle.requestTermination("SIGTERM");
+    await lifecycle.finalize();
+
+    expect(releases).toBe(0);
+    expect(evidence).toMatchObject({
+      termination: {
+        signal: "SIGTERM",
+        childTermination: {
+          processGroupGone: false,
+          cleanupVerification: "unknown",
+        },
+        lockReleased: false,
+        lockReleaseDeferred: true,
+      },
+    });
+  });
+
   it("uses a real OS signal to terminate a disposable child process group", async () => {
     if (process.platform === "win32") {
       return;
@@ -618,6 +1109,7 @@ describe("release gate deterministic tooling", () => {
     processUnderTest.stderr?.on("data", (chunk) => {
       childOutput += String(chunk);
     });
+    let disposableChildPid: number | undefined;
     try {
       let ready = false;
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -632,6 +1124,7 @@ describe("release gate deterministic tooling", () => {
       if (!ready) {
         throw new Error(`signal fixture did not start: ${childOutput}`);
       }
+      disposableChildPid = (await waitForJson(readyPath)).childPid;
       process.kill(processUnderTest.pid!, "SIGTERM");
       const [code, signal] = (await once(processUnderTest, "close")) as [
         number,
@@ -639,15 +1132,193 @@ describe("release gate deterministic tooling", () => {
       ];
       expect(signal).toBeNull();
       expect(code).not.toBe(0);
-      expect(JSON.parse(await readFile(resultPath, "utf8"))).toMatchObject({
+      const evidence = JSON.parse(await readFile(resultPath, "utf8"));
+      expect(evidence).toMatchObject({
         termination: {
           signal: "SIGTERM",
           childTermination: { terminated: true },
-          lockReleased: true,
         },
       });
+      expect(disposableChildPid).toEqual(expect.any(Number));
+      await waitForPidGone(disposableChildPid!);
+      if (evidence.termination.childTermination.processGroupGone === true) {
+        expect(evidence.termination.lockReleased).toBe(true);
+      } else {
+        expect(evidence).toMatchObject({
+          termination: {
+            childTermination: { cleanupVerification: "unknown" },
+            lockReleased: false,
+            lockReleaseDeferred: true,
+          },
+        });
+      }
     } finally {
       processUnderTest.kill("SIGKILL");
+      if (disposableChildPid && pidIsAlive(disposableChildPid)) {
+        try {
+          process.kill(disposableChildPid, "SIGKILL");
+        } catch {
+          // The fixture child can exit between the liveness check and cleanup.
+        }
+      }
+    }
+  });
+
+  it("verifies a simple POSIX process group exits gracefully", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const leader = spawn(
+      process.execPath,
+      [
+        "-e",
+        'process.on("SIGTERM", () => process.exit(0)); console.log("ready"); setInterval(() => {}, 1000)',
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    try {
+      await once(leader.stdout!, "data");
+      const cleanup = await runner.terminateChildProcessGroup(leader, {
+        graceMs: 250,
+        forceVerificationMs: 250,
+        pollMs: 10,
+      });
+      expect(cleanup).toMatchObject({
+        terminated: true,
+        childPid: leader.pid,
+        processGroupId: leader.pid,
+        leaderExited: true,
+        processGroupGone: true,
+        exitedGracefully: true,
+        forceKillRequired: false,
+        cleanupVerification: "verified-gone",
+      });
+      await waitForPidGone(leader.pid!);
+    } finally {
+      if (leader.pid && pidIsAlive(leader.pid)) {
+        try {
+          process.kill(-leader.pid, "SIGKILL");
+        } catch {
+          // The process group may already have disappeared between checks.
+        }
+      }
+    }
+  });
+
+  it("force-kills a resistant descendant group after its leader exits and verifies every recorded PID disappears", async () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const temporaryRoot = path.join(
+      os.tmpdir(),
+      "release-gate-resistant-group-",
+      `${process.pid}-${Date.now()}`,
+    );
+    temporaryPaths.push(temporaryRoot);
+    await mkdir(temporaryRoot, { recursive: true });
+    const readyPath = path.join(temporaryRoot, "descendants.json");
+    const descendantReadyPaths = [
+      path.join(temporaryRoot, "descendant-0-ready"),
+      path.join(temporaryRoot, "descendant-1-ready"),
+    ];
+    const source = `
+      const { spawn } = require("node:child_process");
+      const { writeFileSync } = require("node:fs");
+      const descendantReadyPaths = ${JSON.stringify(descendantReadyPaths)};
+      const descendants = descendantReadyPaths.map((readyPath) => spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(process.argv[1], 'ready'); setInterval(() => {}, 1000)", readyPath], { stdio: "ignore" }));
+      writeFileSync(${JSON.stringify(readyPath)}, JSON.stringify({ descendants: descendants.map((child) => child.pid) }));
+      process.exit(0);
+    `;
+    const leader = spawn(process.execPath, ["-e", source], {
+      detached: true,
+      stdio: "ignore",
+    });
+    const leaderClosed = once(leader, "close");
+    let descendants: number[] = [];
+    try {
+      await waitForPath(readyPath);
+      descendants = (await waitForJson(readyPath)).descendants;
+      expect(descendants).toHaveLength(2);
+      await Promise.all(descendantReadyPaths.map(waitForPath));
+      await leaderClosed;
+      expect(leader.exitCode).toBe(0);
+      const evidence: Record<string, unknown> = {};
+      let terminationCalls = 0;
+      let releases = 0;
+      const lifecycle = new runner.GateLifecycle(evidence, {
+        terminate: async () => {
+          terminationCalls += 1;
+          return runner.terminateChildProcessGroup(leader, {
+            graceMs: 100,
+            forceVerificationMs: 1_000,
+            pollMs: 10,
+          });
+        },
+      });
+      lifecycle.attachLock({
+        release: async () => {
+          releases += 1;
+          return true;
+        },
+      });
+      const watchdog = new runner.GateWatchdog(evidence, {
+        timeoutMs: 1,
+        terminate: () => lifecycle.requestTermination("WATCHDOG"),
+      });
+      const firstSignal = lifecycle.requestTermination("SIGTERM");
+      const repeatedSignal = lifecycle.requestTermination("SIGINT");
+      const watchdogCleanup = watchdog.expire();
+      const [cleanup] = await Promise.all([
+        firstSignal,
+        repeatedSignal,
+        watchdogCleanup,
+      ]);
+      await lifecycle.finalize();
+      expect(cleanup).toMatchObject({
+        terminated: true,
+        childPid: leader.pid,
+        processGroupId: leader.pid,
+        leaderExited: true,
+        processGroupGone: true,
+        exitedGracefully: false,
+        forceKillRequired: true,
+        cleanupVerification: "verified-gone",
+      });
+      expect(terminationCalls).toBe(1);
+      expect(releases).toBe(1);
+      expect(evidence).toMatchObject({
+        termination: {
+          signal: "SIGTERM",
+          childTermination: { forceKillRequired: true, processGroupGone: true },
+          lockReleased: true,
+        },
+        watchdog: {
+          expired: true,
+          termination: { forceKillRequired: true, processGroupGone: true },
+        },
+      });
+      await Promise.all([
+        waitForPidGone(leader.pid!),
+        ...descendants.map(waitForPidGone),
+      ]);
+      expect(descendants.every((pid) => !pidIsAlive(pid))).toBe(true);
+    } finally {
+      if (leader.pid && pidIsAlive(leader.pid)) {
+        try {
+          process.kill(-leader.pid, "SIGKILL");
+        } catch {
+          // The group may have exited between the liveness check and cleanup.
+        }
+      }
+      for (const pid of descendants) {
+        if (pidIsAlive(pid)) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // The descendant can exit during fixture cleanup.
+          }
+        }
+      }
     }
   });
 
