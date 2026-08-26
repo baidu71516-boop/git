@@ -491,13 +491,32 @@
     {
       "path": "apps/web/tests/release-gate-tooling.test.ts",
       "tests": [
-        "release gate deterministic tooling > classifies stress timeouts as non-blocking only after every frozen adjudication condition",
+        "release gate deterministic tooling > admits only exit codes zero and one before timeout adjudication",
+        "release gate deterministic tooling > correlates the ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE through exact manifest projections",
+        "release gate deterministic tooling > derives immutable per-invocation master, raw JSON, and stdout/stderr artifact paths",
+        "release gate deterministic tooling > fails closed for ambiguous leaf-only, wrong-file, wrong-hierarchy, duplicate, missing, and random timeout blocks",
+        "release gate deterministic tooling > fails closed for assertion, mixed, abnormal, and controlled PASS after assertion",
+        "release gate deterministic tooling > fails closed for missing JSON, truncated capture, explicit failure, and count mismatch on an exit-zero stress result",
         "release gate deterministic tooling > fails closed for uncertain, relevant, renamed, and binary interaction diffs",
         "release gate deterministic tooling > fails fast for a live lock, recovers only a proven stale lock, and does not remove a successor lock",
+        "release gate deterministic tooling > force-kills a resistant descendant group after its leader exits and verifies every recorded PID disappears",
         "release gate deterministic tooling > generates deterministic normalized manifest inventory and rejects non-canonical form",
+        "release gate deterministic tooling > handles SIGHUP once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > handles SIGINT once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > handles SIGTERM once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > prevents a post-signal child start and preserves the normal one-time lock release path",
+        "release gate deterministic tooling > recognizes only structured test, hook, and teardown timeout blocks after exact identity resolution",
         "release gate deterministic tooling > records watchdog expiry and process-tree cleanup without changing Vitest timeout policy",
         "release gate deterministic tooling > rejects resolved config mismatch, modes, missing, and duplicate execution identities",
-        "release gate deterministic tooling > uses locale-independent lexical full-suite order and the frozen interaction order"
+        "release gate deterministic tooling > resolves exact stream hierarchy and unique leaf-only projections without splitting JSON words",
+        "release gate deterministic tooling > retains its lock when POSIX group cleanup cannot prove the group is gone",
+        "release gate deterministic tooling > scopes same leaf titles by exact file identity and rejects a cross-file mismatch",
+        "release gate deterministic tooling > serializes signal and watchdog cleanup, including lock ownership-token protection",
+        "release gate deterministic tooling > uses a real OS signal to terminate a disposable child process group",
+        "release gate deterministic tooling > uses locale-independent lexical full-suite order and the frozen interaction order",
+        "release gate deterministic tooling > uses real Vitest file records and exact JSON identities instead of suite counters",
+        "release gate deterministic tooling > validates evidence integrity before every STRESS_PASS result",
+        "release gate deterministic tooling > verifies a simple POSIX process group exits gracefully"
       ]
     },
     {
