@@ -89,6 +89,16 @@ const ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE = {
     "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
 } as const;
 
+const ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE = {
+  label: "ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE",
+  path: "apps/web/tests/bulk-preview-workflow.test.tsx",
+  tests: [
+    "Bulk Confirm acceptance and recovery > accepts HTTP 200 dispatch data, closes the explicit Modal, and polls the Job without another Confirm",
+    "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+  ],
+  numTotalTestSuites: 2,
+} as const;
+
 type StressFailure = {
   path: string;
   name: string;
@@ -131,6 +141,19 @@ function stressManifest() {
           "Timeout kinds > hook timeout",
           "Timeout kinds > teardown timeout",
         ],
+      },
+    ],
+  };
+}
+
+function adaptedVitest410SuccessManifest() {
+  const fixture = ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE;
+  return {
+    schemaVersion: 1,
+    files: [
+      {
+        path: fixture.path,
+        tests: [...fixture.tests].sort(),
       },
     ],
   };
@@ -189,53 +212,79 @@ function completeArtifact(pathname: string) {
   };
 }
 
+function vitest410Report(
+  manifest: ReturnType<typeof stressManifest>,
+  options: {
+    failures?: StressFailure[];
+    numTotalTestSuites?: number;
+  } = {},
+) {
+  const failedKeys = new Set(
+    (options.failures ?? []).map(
+      (failure) => `${failure.path}\u0000${failure.name}`,
+    ),
+  );
+  const catalog = runner.manifestStressIdentityCatalog(manifest);
+  const assertionsByPath = new Map<string, Array<Record<string, unknown>>>();
+  for (const identity of catalog.entries) {
+    const assertions = assertionsByPath.get(identity.path) ?? [];
+    const failed = failedKeys.has(
+      `${identity.path}\u0000${identity.jsonProjection}`,
+    );
+    assertions.push({
+      status: failed ? "failed" : "passed",
+      fullName: identity.jsonProjection,
+      failureMessages: failed ? ["STACK_TRACE_ERROR"] : [],
+    });
+    assertionsByPath.set(identity.path, assertions);
+  }
+  const testResults = manifest.files.map((file) => ({
+    name: file.path.replace(/^apps\/web\//, ""),
+    assertionResults: assertionsByPath.get(file.path) ?? [],
+  }));
+  const assertions = testResults.flatMap(
+    (testResult) => testResult.assertionResults,
+  );
+  const failedTests = assertions.filter(
+    (assertion) => assertion.status === "failed",
+  ).length;
+  return {
+    testResults,
+    numTotalTests: assertions.length,
+    numPassedTests: assertions.length - failedTests,
+    numFailedTests: failedTests,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    numTotalTestSuites: options.numTotalTestSuites ?? manifest.files.length,
+    success: failedTests === 0,
+  };
+}
+
 function classifyTimeoutFixture(
   failures: StressFailure[],
   streamedOutput = timeoutStream(failures),
   manifest = stressManifest(),
+  resultCode = 1,
 ) {
   const correlation = runner.correlateStressFailures(failures, streamedOutput, {
     manifest,
   });
-  const assertionsByPath = new Map<string, Array<Record<string, unknown>>>();
-  for (const failure of failures) {
-    const assertions = assertionsByPath.get(failure.path) ?? [];
-    assertions.push({
-      status: "failed",
-      fullName: failure.name,
-      failureMessages: [],
-    });
-    assertionsByPath.set(failure.path, assertions);
-  }
-  const report = {
-    testResults: [...assertionsByPath.entries()].map(
-      ([pathname, assertionResults]) => ({
-        name: pathname.replace(/^apps\/web\//, ""),
-        assertionResults,
-      }),
-    ),
-    numTotalTests: failures.length,
-    numPassedTests: 0,
-    numFailedTests: failures.length,
-    numPendingTests: 0,
-    numTodoTests: 0,
-    numTotalTestSuites: assertionsByPath.size,
-    success: failures.length === 0,
-  };
+  const report = vitest410Report(manifest, { failures });
   const evidenceIntegrity = runner.validateStressEvidence({
-    result: { code: 1 },
+    result: { code: resultCode },
     report,
     rawVitestJson: completeArtifact("raw.json"),
     rawStream: completeArtifact("stream.json"),
     streamedOutput,
     correlation,
     failures: correlation.failures,
+    identityCatalog: runner.manifestStressIdentityCatalog(manifest),
   });
   return {
     correlation,
     evidenceIntegrity,
     classification: runner.classifyStressResult({
-      exitCode: 1,
+      exitCode: resultCode,
       failures: correlation.failures,
       identityMismatch: correlation.identityMismatch,
       evidenceIntegrity,
@@ -643,19 +692,15 @@ describe("release gate deterministic tooling", () => {
   });
 
   it("validates evidence integrity before every STRESS_PASS result", () => {
-    const cleanReport = {
-      testResults: [],
-      numTotalTests: 0,
-      numPassedTests: 0,
-      numFailedTests: 0,
-      numPendingTests: 0,
-      numTodoTests: 0,
-      numTotalTestSuites: 0,
-      success: true,
-    };
+    const manifest = adaptedVitest410SuccessManifest();
+    const identityCatalog = runner.manifestStressIdentityCatalog(manifest);
+    const cleanReport = vitest410Report(manifest, {
+      numTotalTestSuites:
+        ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE.numTotalTestSuites,
+    });
     const cleanCapture = new runner.StreamedVitestOutputCapture().evidence();
     const cleanCorrelation = runner.correlateStressFailures([], cleanCapture, {
-      manifest: stressManifest(),
+      identityCatalog,
     });
     const complete = runner.validateStressEvidence({
       result: { code: 0 },
@@ -665,6 +710,7 @@ describe("release gate deterministic tooling", () => {
       streamedOutput: cleanCapture,
       correlation: cleanCorrelation,
       failures: [],
+      identityCatalog,
     });
     expect(complete.valid).toBe(true);
     expect(
@@ -690,17 +736,240 @@ describe("release gate deterministic tooling", () => {
     }
   });
 
-  it("fails closed for missing JSON, truncated capture, explicit failure, and count mismatch on an exit-zero stress result", () => {
-    const cleanReport = {
-      testResults: [],
-      numTotalTests: 0,
-      numPassedTests: 0,
-      numFailedTests: 0,
-      numPendingTests: 0,
-      numTodoTests: 0,
-      numTotalTestSuites: 0,
-      success: true,
+  it("admits only exit codes zero and one before timeout adjudication", () => {
+    const manifest = stressManifest();
+    const timeout = {
+      path: "apps/web/tests/bulk-preview-workflow.test.tsx",
+      name: "Bulk unified preview review presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
     };
+    const timeoutStreamEvidence = timeoutStream([
+      { path: timeout.path, name: manifest.files[0].tests[0] },
+    ]);
+    const adjudicated = classifyTimeoutFixture(
+      [timeout],
+      timeoutStreamEvidence,
+      manifest,
+      1,
+    );
+    expect(adjudicated.correlation.identityMismatch).toBe(false);
+    expect(adjudicated.evidenceIntegrity.valid).toBe(true);
+    expect(adjudicated.classification).toMatchObject({
+      decision: "STRESS_RESOURCE_CONTENTION_NON_BLOCKING",
+    });
+
+    for (const exitCode of [2, 130, 137]) {
+      const unexpected = classifyTimeoutFixture(
+        [timeout],
+        timeoutStreamEvidence,
+        manifest,
+        exitCode,
+      );
+      expect(unexpected.correlation.identityMismatch).toBe(false);
+      expect(unexpected.evidenceIntegrity.valid).toBe(false);
+      expect(unexpected.evidenceIntegrity.issues).toContain(
+        "stress child exited with an unexpected code",
+      );
+      expect(unexpected.classification).toMatchObject({
+        decision: "RELEASE_BLOCKED",
+      });
+    }
+
+    const assertion = {
+      path: "apps/web/tests/influencer-preview.test.tsx",
+      name: "development influencer visual preview opens and closes preview drawer from local preview table interactions",
+    };
+    const assertionStream = new runner.StreamedVitestOutputCapture();
+    assertionStream.write(
+      "stderr",
+      ` FAIL  ${assertion.path} > ${manifest.files[1].tests[0]}\nAssertionError: expected true to be false\n`,
+    );
+    assertionStream.finish();
+    expect(
+      classifyTimeoutFixture(
+        [assertion],
+        assertionStream.evidence(),
+        manifest,
+        1,
+      ).classification,
+    ).toMatchObject({ decision: "RELEASE_BLOCKED" });
+
+    const cleanManifest = adaptedVitest410SuccessManifest();
+    const cleanCatalog = runner.manifestStressIdentityCatalog(cleanManifest);
+    const cleanCapture = new runner.StreamedVitestOutputCapture().evidence();
+    const cleanCorrelation = runner.correlateStressFailures([], cleanCapture, {
+      identityCatalog: cleanCatalog,
+    });
+    const cleanEvidence = runner.validateStressEvidence({
+      result: { code: 0 },
+      report: vitest410Report(cleanManifest, {
+        numTotalTestSuites:
+          ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE.numTotalTestSuites,
+      }),
+      rawVitestJson: completeArtifact("clean.json"),
+      rawStream: completeArtifact("clean.stream"),
+      streamedOutput: cleanCapture,
+      correlation: cleanCorrelation,
+      failures: [],
+      identityCatalog: cleanCatalog,
+    });
+    expect(cleanEvidence.valid).toBe(true);
+    expect(
+      runner.classifyStressResult({
+        exitCode: 0,
+        failures: [],
+        evidenceIntegrity: cleanEvidence,
+      }),
+    ).toMatchObject({ decision: "STRESS_PASS" });
+    const exitZeroWithFailure = classifyTimeoutFixture(
+      [timeout],
+      timeoutStreamEvidence,
+      manifest,
+      0,
+    );
+    expect(exitZeroWithFailure.evidenceIntegrity.valid).toBe(false);
+    expect(exitZeroWithFailure.classification).toMatchObject({
+      decision: "RELEASE_BLOCKED",
+    });
+  });
+
+  it("uses real Vitest file records and exact JSON identities instead of suite counters", () => {
+    const fixture = ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE;
+    const manifest = adaptedVitest410SuccessManifest();
+    const identityCatalog = runner.manifestStressIdentityCatalog(manifest);
+    const capture = new runner.StreamedVitestOutputCapture().evidence();
+    const correlation = runner.correlateStressFailures([], capture, {
+      identityCatalog,
+    });
+    const report = vitest410Report(manifest, {
+      numTotalTestSuites: fixture.numTotalTestSuites,
+    });
+    const validate = (candidate: typeof report) =>
+      runner.validateStressEvidence({
+        result: { code: 0 },
+        report: candidate,
+        rawVitestJson: completeArtifact("success.json"),
+        rawStream: completeArtifact("success.stream"),
+        streamedOutput: capture,
+        correlation,
+        failures: [],
+        identityCatalog,
+      });
+
+    expect(fixture.label).toBe(
+      "ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE",
+    );
+    expect(report.numTotalTestSuites).toBe(2);
+    expect(report.testResults).toHaveLength(1);
+    expect(report.numTotalTestSuites).not.toBe(report.testResults.length);
+    expect(
+      report.testResults[0].assertionResults.map(
+        (assertion) => assertion.fullName,
+      ),
+    ).toEqual(
+      identityCatalog.entries.map(
+        (identity: { jsonProjection: string }) => identity.jsonProjection,
+      ),
+    );
+    const coherent = validate(report);
+    expect(coherent).toMatchObject({
+      valid: true,
+      executionInventory: {
+        valid: true,
+        files: { expected: 1, actualRecords: 1 },
+        identities: { expected: 2, executedRecords: 2 },
+      },
+    });
+    expect(
+      runner.classifyStressResult({
+        exitCode: 0,
+        failures: [],
+        evidenceIntegrity: coherent,
+      }),
+    ).toMatchObject({ decision: "STRESS_PASS" });
+
+    const unexpectedFile = structuredClone(report);
+    unexpectedFile.testResults.push({
+      name: "tests/unexpected.test.ts",
+      assertionResults: [
+        {
+          status: "passed",
+          fullName: report.testResults[0].assertionResults[0].fullName,
+        },
+      ],
+    });
+    unexpectedFile.numTotalTests += 1;
+    unexpectedFile.numPassedTests += 1;
+
+    const missingFile = structuredClone(report);
+    missingFile.testResults = [];
+    missingFile.numTotalTests = 0;
+    missingFile.numPassedTests = 0;
+
+    const duplicateFile = structuredClone(report);
+    duplicateFile.testResults.push(structuredClone(report.testResults[0]));
+    duplicateFile.numTotalTests += report.numTotalTests;
+    duplicateFile.numPassedTests += report.numPassedTests;
+
+    const missingIdentity = structuredClone(report);
+    missingIdentity.testResults[0].assertionResults.pop();
+    missingIdentity.numTotalTests -= 1;
+    missingIdentity.numPassedTests -= 1;
+
+    const unexpectedIdentity = structuredClone(report);
+    unexpectedIdentity.testResults[0].assertionResults[0].fullName =
+      "Bulk unified preview review presents a different exact title";
+
+    const duplicateIdentity = structuredClone(report);
+    duplicateIdentity.testResults[0].assertionResults.push(
+      structuredClone(report.testResults[0].assertionResults[0]),
+    );
+    duplicateIdentity.numTotalTests += 1;
+    duplicateIdentity.numPassedTests += 1;
+
+    const contradictoryTotals = structuredClone(report);
+    contradictoryTotals.numTotalTests = 1;
+    contradictoryTotals.numPassedTests = 1;
+
+    const malformed = [
+      [
+        unexpectedFile,
+        "Vitest file-result inventory contains unexpected files",
+      ],
+      [missingFile, "Vitest file-result inventory is missing expected files"],
+      [duplicateFile, "Vitest file-result inventory contains duplicate files"],
+      [
+        missingIdentity,
+        "Vitest executed assertion inventory is missing expected identities",
+      ],
+      [
+        unexpectedIdentity,
+        "Vitest executed assertion identity is unresolved or ambiguous",
+      ],
+      [
+        duplicateIdentity,
+        "Vitest executed assertion inventory contains duplicate identities",
+      ],
+      [
+        contradictoryTotals,
+        "reported total-test count does not match assertion results",
+      ],
+    ] as const;
+    for (const [candidate, expectedIssue] of malformed) {
+      const evidenceIntegrity = validate(candidate);
+      expect(evidenceIntegrity.valid).toBe(false);
+      expect(evidenceIntegrity.issues).toEqual(
+        expect.arrayContaining([expect.stringContaining(expectedIssue)]),
+      );
+    }
+  });
+
+  it("fails closed for missing JSON, truncated capture, explicit failure, and count mismatch on an exit-zero stress result", () => {
+    const manifest = adaptedVitest410SuccessManifest();
+    const identityCatalog = runner.manifestStressIdentityCatalog(manifest);
+    const cleanReport = vitest410Report(manifest, {
+      numTotalTestSuites:
+        ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE.numTotalTestSuites,
+    });
     const capture = new runner.StreamedVitestOutputCapture().evidence();
     const truncatedCapture = new runner.StreamedVitestOutputCapture({
       maxBytes: 1,
@@ -710,11 +979,11 @@ describe("release gate deterministic tooling", () => {
     expect(truncatedCapture.evidence().truncated).toBe(true);
     expect(
       runner.correlateStressFailures([], truncatedCapture.evidence(), {
-        manifest: stressManifest(),
+        identityCatalog,
       }).identityMismatch,
     ).toBe(true);
     const correlation = runner.correlateStressFailures([], capture, {
-      manifest: stressManifest(),
+      identityCatalog,
     });
     const cases = [
       runner.validateStressEvidence({
@@ -724,6 +993,7 @@ describe("release gate deterministic tooling", () => {
         streamedOutput: capture,
         correlation,
         failures: [],
+        identityCatalog,
       }),
       runner.validateStressEvidence({
         result: { code: 0 },
@@ -733,6 +1003,7 @@ describe("release gate deterministic tooling", () => {
         streamedOutput: truncatedCapture.evidence(),
         correlation,
         failures: [],
+        identityCatalog,
       }),
       runner.validateStressEvidence({
         result: { code: 0 },
@@ -742,6 +1013,7 @@ describe("release gate deterministic tooling", () => {
         streamedOutput: capture,
         correlation,
         failures: [],
+        identityCatalog,
       }),
       runner.validateStressEvidence({
         result: { code: 0 },
@@ -751,6 +1023,7 @@ describe("release gate deterministic tooling", () => {
         streamedOutput: capture,
         correlation,
         failures: [],
+        identityCatalog,
       }),
       runner.validateStressEvidence({
         result: { code: 0 },
@@ -760,6 +1033,7 @@ describe("release gate deterministic tooling", () => {
         streamedOutput: capture,
         correlation,
         failures: [],
+        identityCatalog,
       }),
     ];
     for (const evidenceIntegrity of cases) {

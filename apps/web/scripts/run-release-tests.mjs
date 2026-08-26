@@ -1432,9 +1432,7 @@ async function runCanonical(
 export function parseStressFailures(report) {
   const failures = [];
   for (const testResult of report?.testResults ?? []) {
-    const testPath = normalizedStressTestPath(
-      testResult.name ?? testResult.file ?? "",
-    );
+    const testPath = normalizedStressResultPath(testResult);
     for (const assertion of testResult.assertionResults ?? []) {
       if (assertion.status === "failed") {
         failures.push({
@@ -1459,6 +1457,34 @@ function normalizedStressTestPath(testPath) {
         ? path.join(REPOSITORY_ROOT, testPath)
         : path.resolve(WEB_ROOT, testPath),
   );
+}
+
+function normalizedStressResultPath(testResult) {
+  const rawPaths = [];
+  for (const field of ["name", "file"]) {
+    const value = testResult?.[field];
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw gateError(
+        "RELEASE_BLOCKED",
+        `Vitest file-result ${field} is malformed`,
+      );
+    }
+    rawPaths.push(value);
+  }
+  if (rawPaths.length === 0) {
+    throw gateError("RELEASE_BLOCKED", "Vitest file-result path is missing");
+  }
+  const normalizedPaths = rawPaths.map(normalizedStressTestPath);
+  if (new Set(normalizedPaths).size !== 1) {
+    throw gateError(
+      "RELEASE_BLOCKED",
+      "Vitest file-result name and file paths disagree",
+    );
+  }
+  return normalizedPaths[0];
 }
 
 function manifestIdentityParts(name) {
@@ -1546,6 +1572,179 @@ function resolveManifestIdentity(catalog, path, sourceName, source) {
     };
   }
   return { state: "resolved", source, identity: candidates[0] };
+}
+
+function stressIdentityCatalog(identitySource) {
+  const source =
+    identitySource?.identityCatalog ??
+    identitySource?.manifest ??
+    identitySource;
+  if (Array.isArray(source?.entries)) {
+    return source;
+  }
+  if (Array.isArray(source?.files)) {
+    return manifestStressIdentityCatalog(source);
+  }
+  return undefined;
+}
+
+export function validateStressResultInventory(report, identitySource) {
+  const issues = [];
+  const catalog = stressIdentityCatalog(identitySource);
+  if (!catalog || !Array.isArray(catalog.entries)) {
+    return {
+      valid: false,
+      issues: ["manifest identity catalog is missing or malformed"],
+    };
+  }
+  if (!Array.isArray(report?.testResults)) {
+    return {
+      valid: false,
+      issues: ["Vitest file-result records are missing or malformed"],
+    };
+  }
+
+  const expectedFiles = new Set();
+  const expectedIdentityKeys = new Set();
+  for (const identity of catalog.entries) {
+    if (
+      !identity ||
+      typeof identity.path !== "string" ||
+      typeof identity.canonicalKey !== "string" ||
+      typeof identity.jsonProjection !== "string"
+    ) {
+      issues.push("manifest identity catalog contains a malformed entry");
+      continue;
+    }
+    expectedFiles.add(identity.path);
+    expectedIdentityKeys.add(identity.canonicalKey);
+  }
+  if (issues.length > 0) {
+    return { valid: false, issues };
+  }
+
+  const fileCounts = new Map();
+  const identityCounts = new Map();
+  const unexpectedFiles = new Set();
+  const unresolvedIdentities = [];
+  let assertionRecords = 0;
+  for (const testResult of report.testResults) {
+    let testPath;
+    try {
+      testPath = normalizedStressResultPath(testResult);
+    } catch (error) {
+      issues.push(
+        `Vitest file-result path is malformed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
+    fileCounts.set(testPath, (fileCounts.get(testPath) ?? 0) + 1);
+    if (!expectedFiles.has(testPath)) {
+      unexpectedFiles.add(testPath);
+    }
+    if (!Array.isArray(testResult?.assertionResults)) {
+      issues.push(`Vitest assertion results are missing for ${testPath}`);
+      continue;
+    }
+    for (const assertion of testResult.assertionResults) {
+      assertionRecords += 1;
+      if (
+        !assertion ||
+        typeof assertion.fullName !== "string" ||
+        assertion.fullName.length === 0
+      ) {
+        issues.push(
+          `Vitest assertion identity is missing or malformed for ${testPath}`,
+        );
+        continue;
+      }
+      if (assertion.status !== "passed" && assertion.status !== "failed") {
+        issues.push(
+          `Vitest assertion did not execute normally for ${testPath} :: ${assertion.fullName}`,
+        );
+      }
+      const resolution = resolveManifestIdentity(
+        catalog,
+        testPath,
+        assertion.fullName,
+        "json",
+      );
+      if (resolution.state !== "resolved") {
+        unresolvedIdentities.push({
+          path: testPath,
+          name: assertion.fullName,
+          reason: resolution.reason,
+          candidateCount: resolution.candidateCount,
+        });
+        continue;
+      }
+      const key = resolution.identity.canonicalKey;
+      identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1);
+    }
+  }
+
+  const missingFiles = [...expectedFiles].filter(
+    (testPath) => !fileCounts.has(testPath),
+  );
+  const duplicateFiles = [...fileCounts.entries()]
+    .filter(([, count]) => count !== 1)
+    .map(([testPath]) => testPath);
+  const missingIdentities = [...expectedIdentityKeys].filter(
+    (key) => !identityCounts.has(key),
+  );
+  const duplicateIdentities = [...identityCounts.entries()]
+    .filter(([, count]) => count !== 1)
+    .map(([key]) => key);
+
+  if (unexpectedFiles.size > 0) {
+    issues.push(
+      `Vitest file-result inventory contains unexpected files: ${lexicalSort([...unexpectedFiles]).join(", ")}`,
+    );
+  }
+  if (missingFiles.length > 0) {
+    issues.push(
+      `Vitest file-result inventory is missing expected files: ${lexicalSort(missingFiles).join(", ")}`,
+    );
+  }
+  if (duplicateFiles.length > 0) {
+    issues.push(
+      `Vitest file-result inventory contains duplicate files: ${lexicalSort(duplicateFiles).join(", ")}`,
+    );
+  }
+  if (unresolvedIdentities.length > 0) {
+    issues.push(
+      "Vitest executed assertion identity is unresolved or ambiguous",
+    );
+  }
+  if (missingIdentities.length > 0) {
+    issues.push(
+      "Vitest executed assertion inventory is missing expected identities",
+    );
+  }
+  if (duplicateIdentities.length > 0) {
+    issues.push(
+      "Vitest executed assertion inventory contains duplicate identities",
+    );
+  }
+
+  return {
+    valid: issues.length === 0,
+    issues,
+    files: {
+      expected: expectedFiles.size,
+      actualRecords: report.testResults.length,
+      unexpected: lexicalSort([...unexpectedFiles]),
+      missing: lexicalSort(missingFiles),
+      duplicates: lexicalSort(duplicateFiles),
+    },
+    identities: {
+      expected: expectedIdentityKeys.size,
+      executedRecords: assertionRecords,
+      unresolved: unresolvedIdentities,
+      missing: lexicalSort(missingIdentities),
+      duplicates: lexicalSort(duplicateIdentities),
+    },
+  };
 }
 
 export class StreamedVitestOutputCapture {
@@ -1836,6 +2035,10 @@ function validStreamCapture(capture) {
   );
 }
 
+function isNormalStressExitCode(exitCode) {
+  return exitCode === 0 || exitCode === 1;
+}
+
 export function validateStressEvidence(input) {
   const issues = [];
   const failures = input.failures ?? [];
@@ -1843,8 +2046,8 @@ export function validateStressEvidence(input) {
   const resultCode = input.result?.code;
   if (!Number.isSafeInteger(resultCode)) {
     issues.push("raw stress child outcome is missing or malformed");
-  } else if (resultCode < 0) {
-    issues.push("stress child terminated abnormally");
+  } else if (!isNormalStressExitCode(resultCode)) {
+    issues.push("stress child exited with an unexpected code");
   }
   if (
     input.abnormal ||
@@ -1879,6 +2082,13 @@ export function validateStressEvidence(input) {
     issues.push(
       "raw stdout/stderr artifact does not match captured line evidence",
     );
+  }
+  const executionInventory = validateStressResultInventory(
+    report,
+    input.identityCatalog ?? input.manifest,
+  );
+  if (!executionInventory.valid) {
+    issues.push(...executionInventory.issues);
   }
   if (!input.correlation) {
     issues.push("timeout identity correlation is missing");
@@ -1923,14 +2133,6 @@ export function validateStressEvidence(input) {
     ) {
       issues.push("reported total-test count is internally inconsistent");
     }
-    const totalSuites = numericReportValue(report, "numTotalTestSuites");
-    if (
-      totalSuites !== undefined &&
-      Array.isArray(report.testResults) &&
-      totalSuites !== report.testResults.length
-    ) {
-      issues.push("reported total-file count is internally inconsistent");
-    }
     if (Array.isArray(report.testResults)) {
       if (
         report.testResults.some(
@@ -1974,12 +2176,19 @@ export function validateStressEvidence(input) {
       issues.push("nonzero child exit disagrees with raw Vitest JSON");
     }
   }
-  return { valid: issues.length === 0, issues };
+  return { valid: issues.length === 0, issues, executionInventory };
 }
 
 export function classifyStressResult(input) {
   const failures = input.failures ?? [];
   const integrity = input.evidenceIntegrity;
+  if (!isNormalStressExitCode(input.exitCode)) {
+    return {
+      decision: "RELEASE_BLOCKED",
+      exitCode: 1,
+      reason: "stress child exited outside the allowed Vitest exit-code domain",
+    };
+  }
   if (
     integrity?.valid !== true ||
     !Array.isArray(integrity.issues) ||
@@ -2065,6 +2274,7 @@ async function runStress(evidence, watchdog) {
     identityCatalog,
   });
   const failures = correlation.failures;
+  const unexpectedExitCode = !isNormalStressExitCode(result.code);
   const evidenceIntegrity = validateStressEvidence({
     result,
     signal: effectiveSignal,
@@ -2074,6 +2284,7 @@ async function runStress(evidence, watchdog) {
     streamedOutput,
     correlation,
     failures,
+    identityCatalog,
   });
   evidence.stress = {
     result,
@@ -2091,15 +2302,16 @@ async function runStress(evidence, watchdog) {
       unresolvedIdentities: correlation.unresolvedIdentities,
       timeoutBlocks: correlation.timeoutBlocks,
     },
+    executionInventory: evidenceIntegrity.executionInventory,
     evidenceIntegrity,
     controlledAdjudication: { attempted: false },
   };
 
-  if (effectiveSignal) {
+  if (effectiveSignal || unexpectedExitCode || result.code === 0) {
     const classification = classifyStressResult({
       exitCode: result.code,
       signal: effectiveSignal,
-      abnormal: !report,
+      abnormal: !report || unexpectedExitCode,
       identityMismatch: correlation.identityMismatch,
       failures,
       evidenceIntegrity,
@@ -2109,18 +2321,6 @@ async function runStress(evidence, watchdog) {
   }
 
   watchdog?.assertNotExpired();
-
-  if (result.code === 0) {
-    const classification = classifyStressResult({
-      exitCode: result.code,
-      signal: effectiveSignal,
-      identityMismatch: correlation.identityMismatch,
-      failures,
-      evidenceIntegrity,
-    });
-    evidence.stress.classification = classification;
-    return classification;
-  }
   const prior = await latestCanonicalPass();
   evidence.stress.controlledAdjudication.priorCanonicalEvidence = prior?.path;
   const affectedPaths = lexicalSort([
