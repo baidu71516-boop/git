@@ -25,6 +25,7 @@ describe("influencer list API", () => {
       contact_filter: "has_email",
       notes_7d_filter: "zero",
       notes_60d_filter: "zero",
+      content_activity_filter: "inactive_60d",
       freshness_status: "stale",
       requires_refresh: "true",
       last_huitun_observed_before: "2026-08-14T00:00:00+08:00",

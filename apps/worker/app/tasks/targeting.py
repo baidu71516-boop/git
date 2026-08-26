@@ -6,14 +6,22 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from backend_core.config import Settings, get_settings
+from backend_core.content_activity.service import ContentActivityError, ContentActivityService
 from backend_core.db import Database
 from backend_core.growth.enums import CandidatePoolRunStatus
+from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import CandidatePoolRun
+from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.service import CandidatePoolService, TargetingError
-from backend_core.influencers.freshness import FreshnessPolicy
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    GreyDolphinActivityFreshnessPolicy,
+)
 from sqlalchemy import select
 
 from app.celery_app import celery_app
@@ -41,16 +49,127 @@ def _freshness_policy(settings: Settings) -> FreshnessPolicy:
     )
 
 
+def _content_activity_freshness_policy(settings: Settings) -> ContentActivityFreshnessPolicy:
+    """Keep worker materialization aligned with the read-side activity policy."""
+
+    return ContentActivityFreshnessPolicy.from_day_threshold(
+        settings.content_activity_trusted_freshness_days
+    )
+
+
+def _grey_dolphin_activity_freshness_policy(
+    settings: Settings,
+) -> GreyDolphinActivityFreshnessPolicy:
+    return GreyDolphinActivityFreshnessPolicy.from_day_threshold(
+        settings.grey_dolphin_activity_freshness_days
+    )
+
+
+def _long_inactivity_provider_budget(settings: Settings) -> int:
+    """Expose no enrichment allowance until every existing governance gate passes."""
+
+    if not (
+        settings.content_activity_enabled
+        and settings.content_activity_xhs_enabled
+        and settings.content_activity_provider_governance_approved
+    ):
+        return 0
+    return settings.content_activity_provider_max_calls_per_run
+
+
+async def _enrich_long_inactivity_account(
+    *,
+    database: Database,
+    settings: Settings,
+    run_id: UUID,
+    platform_account_id: UUID,
+) -> LongInactivityProviderRefresh:
+    """Refresh one account and attest only to this attempt's accepted fact.
+
+    Failed attempts may leave an older trusted projection intact.  Returning
+    that projection is useful for diagnostics, but it must not be treated as a
+    newly accepted observation by Candidate Pool execution.
+    """
+
+    async with database.session_factory() as enrichment_session:
+        service = ContentActivityService(enrichment_session, settings)
+        try:
+            refreshes = await service.create_xhs_refresh_requests(
+                platform_account_ids=(platform_account_id,),
+                idempotency_key=(f"candidate-long-inactivity:{run_id}:{platform_account_id}"),
+                operator_id=None,
+                department_id=None,
+                ip="worker",
+                user_agent="celery:long_inactivity_enrichment",
+            )
+            if len(refreshes) != 1:
+                await enrichment_session.rollback()
+                return LongInactivityProviderRefresh(
+                    content_activity=None,
+                    accepted_trusted_observation=False,
+                )
+            process_result = await service.process_refresh_request(refreshes[0].request_token)
+            facts = await CandidatePoolRepository(enrichment_session)._content_activity_facts_as_of(
+                account_ids=(platform_account_id,),
+                as_of=datetime.now(UTC),
+            )
+            await enrichment_session.rollback()
+            content_activity = facts.get(platform_account_id)
+            return LongInactivityProviderRefresh(
+                content_activity=content_activity,
+                accepted_trusted_observation=(
+                    process_result.observation_id is not None
+                    and content_activity is not None
+                    and content_activity.trusted_observation_id == process_result.observation_id
+                ),
+            )
+        except (ContentActivityError, ValueError):
+            await enrichment_session.rollback()
+            return LongInactivityProviderRefresh(
+                content_activity=None,
+                accepted_trusted_observation=False,
+            )
+        except Exception:
+            # The Content Activity service holds the secret-free failure
+            # observation/lease authority. The targeting outcome is only
+            # UNKNOWN; never surface provider exception text here.
+            await enrichment_session.rollback()
+            LOGGER.warning("long_inactivity_provider_enrichment_failed")
+            return LongInactivityProviderRefresh(
+                content_activity=None,
+                accepted_trusted_observation=False,
+            )
+        finally:
+            await service.aclose()
+
+
 async def _materialize(run_id: UUID) -> bool:
     """Delegate one ID-only delivery to the durable Candidate Pool service."""
 
     settings = get_settings()
     database = Database(settings.database_url)
+
+    async def enrich_long_inactivity_account(
+        platform_account_id: UUID,
+    ) -> LongInactivityProviderRefresh:
+        return await _enrich_long_inactivity_account(
+            database=database,
+            settings=settings,
+            run_id=run_id,
+            platform_account_id=platform_account_id,
+        )
+
     try:
         async with database.session_factory() as session:
             service = CandidatePoolService(
                 session,
                 freshness_policy=_freshness_policy(settings),
+                content_activity_freshness_policy=_content_activity_freshness_policy(settings),
+                grey_dolphin_activity_freshness_policy=(
+                    _grey_dolphin_activity_freshness_policy(settings)
+                ),
+                long_inactivity_provider_enricher=enrich_long_inactivity_account,
+                long_inactivity_provider_budget=_long_inactivity_provider_budget(settings),
             )
             try:
                 run = await service.materialize_run(run_id)
@@ -134,6 +253,19 @@ def materialize_candidate_pool_run(run_id: str) -> None:
 
 
 @celery_app.task(
+    name="targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment",
+    bind=False,
+    ignore_result=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)  # type: ignore[untyped-decorator]
+def materialize_candidate_pool_run_with_long_inactivity_enrichment(run_id: str) -> None:
+    """Materialize the opt-in D1A.1 execution on the analytics worker queue."""
+
+    asyncio.run(_materialize(UUID(run_id)))
+
+
+@celery_app.task(
     name="targeting.reconcile_pending_candidate_pool_runs",
     bind=False,
     ignore_result=True,
@@ -148,5 +280,6 @@ __all__ = [
     "PENDING_RUN_RECONCILE_BATCH_SIZE",
     "TargetingReconcileResult",
     "materialize_candidate_pool_run",
+    "materialize_candidate_pool_run_with_long_inactivity_enrichment",
     "reconcile_pending_candidate_pool_runs",
 ]

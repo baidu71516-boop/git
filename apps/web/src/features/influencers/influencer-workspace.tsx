@@ -105,6 +105,7 @@ export function InfluencerWorkspace() {
     query.contact_filter ||
     query.notes_7d_filter ||
     query.notes_60d_filter ||
+    query.content_activity_filter ||
     query.freshness_status ||
     query.requires_refresh ||
     query.last_huitun_observed_before ||

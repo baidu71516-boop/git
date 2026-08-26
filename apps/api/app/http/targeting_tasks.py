@@ -22,3 +22,16 @@ class TargetingTaskDispatcher:
             queue="targeting",
             retry=False,
         )
+
+    async def materialize_with_long_inactivity_enrichment(self, run_id: UUID) -> None:
+        """Route the explicit provider-bearing run through the analytics queue."""
+
+        token = str(UUID(str(run_id)))
+        await asyncio.to_thread(
+            self.celery_client.send_task,
+            "targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment",
+            kwargs={"run_id": token},
+            task_id=f"long-inactivity-{token}",
+            queue="analytics",
+            retry=False,
+        )

@@ -10,8 +10,15 @@ from uuid import UUID
 from backend_core.auth.enums import Role
 from backend_core.auth.models import Operator
 from backend_core.auth.service import AuthContext
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
+from backend_core.content_activity.models import ContentActivityProjection
 from backend_core.influencers.enums import CRMStage, DataSource
 from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
     FreshnessEvaluation,
     FreshnessPolicy,
     InfluencerFreshnessSummary,
@@ -31,6 +38,7 @@ from backend_core.influencers.repository import (
     InfluencerListRecord,
 )
 from backend_core.influencers.schemas import (
+    ContentActivityReadStatus,
     CurrentContactSummary,
     CurrentMetricsDetail,
     CurrentMetricsSummary,
@@ -86,6 +94,7 @@ class InfluencerReadRepository(Protocol):
         *,
         as_of: datetime | None = None,
         policy: FreshnessPolicy | None = None,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
     ) -> tuple[list[InfluencerListRecord], int]: ...
 
     async def get_influencer_detail(self, influencer_id: UUID) -> InfluencerDetailRecord | None: ...
@@ -113,11 +122,105 @@ def _source_tags(account: InfluencerPlatformAccount) -> list[str]:
     return list(account.source_tags) if account.source_tags is not None else []
 
 
+def _utc_timestamp(value: datetime | None) -> datetime | None:
+    """Normalize database timestamps without treating a local clock as UTC."""
+
+    if value is None:
+        return None
+    # SQLite test fixtures do not round-trip timezone offsets. Production
+    # TIMESTAMPTZ remains aware; the portable test representation is UTC.
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _content_activity_read_state(
+    projection: ContentActivityProjection | None,
+    *,
+    as_of: datetime,
+    freshness_policy: ContentActivityFreshnessPolicy,
+) -> tuple[ContentActivityReadStatus, int | None]:
+    """Return safe display state and transient inactivity days for one account."""
+
+    if projection is None:
+        return ContentActivityReadStatus.NOT_CHECKED, None
+    trusted_observed_at = _utc_timestamp(projection.trusted_observed_at)
+    if (
+        projection.trusted_observation_status != ContentActivityObservationStatus.COMPLETE
+        or projection.trusted_coverage_status
+        != ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+        or projection.trusted_activity_result
+        not in {
+            ContentActivityResult.PUBLICATION_FOUND,
+            ContentActivityResult.NO_PUBLIC_CONTENT,
+        }
+        or trusted_observed_at is None
+    ):
+        return ContentActivityReadStatus.UNKNOWN, None
+    if trusted_observed_at > as_of:
+        # A list/detail read must not surface a projection that was only
+        # observed after the read's captured instant.
+        return ContentActivityReadStatus.UNKNOWN, None
+    latest_attempt_observed_at = _utc_timestamp(projection.latest_attempt_observed_at)
+    if latest_attempt_observed_at is None or latest_attempt_observed_at > as_of:
+        # The present projection cannot reconstruct an older point in time, so
+        # a caller-supplied earlier as_of must not selectively use one pointer.
+        return ContentActivityReadStatus.UNKNOWN, None
+    if projection.latest_attempt_observation_id != projection.trusted_observation_id:
+        # A later failure/incomplete attempt does not erase the prior trusted
+        # fact, but it makes it last-known rather than a present-tense activity
+        # claim. Candidate Runs reconstruct immutable as-of history separately.
+        return ContentActivityReadStatus.LAST_KNOWN, None
+    if not freshness_policy.is_current(trusted_observed_at, as_of):
+        return ContentActivityReadStatus.STALE, None
+    if projection.trusted_activity_result == ContentActivityResult.NO_PUBLIC_CONTENT:
+        return ContentActivityReadStatus.CURRENT, None
+    last_publication_at = _utc_timestamp(projection.last_publication_at)
+    if last_publication_at is None or last_publication_at > as_of:
+        return ContentActivityReadStatus.UNKNOWN, None
+    return (
+        ContentActivityReadStatus.CURRENT,
+        int((as_of - last_publication_at).total_seconds() // 86_400),
+    )
+
+
 def _platform_account_summary(
     account: InfluencerPlatformAccount,
     freshness: AccountSourceFreshnessRecord | None = None,
     evaluation: FreshnessEvaluation | None = None,
+    content_activity: ContentActivityProjection | None = None,
+    content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
+    as_of: datetime | None = None,
 ) -> PlatformAccountSummary:
+    activity_as_of = _utc_timestamp(as_of)
+    activity_state, inactive_days = (
+        _content_activity_read_state(
+            content_activity,
+            as_of=activity_as_of,
+            freshness_policy=(
+                content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+            ),
+        )
+        if activity_as_of is not None
+        else (
+            (
+                ContentActivityReadStatus.NOT_CHECKED
+                if content_activity is None
+                else ContentActivityReadStatus.UNKNOWN
+            ),
+            None,
+        )
+    )
+    # A timestamp only supports a sales-facing "last public work" claim when
+    # the projection is currently trusted and complete.  Do not leak a raw
+    # provider candidate from an incomplete, untrusted, or stale projection.
+    safe_last_publication_at = (
+        _utc_timestamp(content_activity.last_publication_at)
+        if content_activity is not None
+        and activity_state is ContentActivityReadStatus.CURRENT
+        and content_activity.trusted_activity_result is ContentActivityResult.PUBLICATION_FOUND
+        else None
+    )
     return PlatformAccountSummary(
         id=account.id,
         platform=account.platform,
@@ -133,6 +236,43 @@ def _platform_account_summary(
         freshness_status=(evaluation.status if evaluation is not None else None),
         freshness_age_days=(evaluation.age_days if evaluation is not None else None),
         requires_refresh=(evaluation.requires_refresh if evaluation is not None else False),
+        content_activity_state=activity_state,
+        content_activity_trusted_observed_at=(
+            _utc_timestamp(content_activity.trusted_observed_at)
+            if content_activity is not None
+            else None
+        ),
+        content_activity_trusted_observation_status=(
+            content_activity.trusted_observation_status if content_activity is not None else None
+        ),
+        content_activity_trusted_coverage_status=(
+            content_activity.trusted_coverage_status if content_activity is not None else None
+        ),
+        content_activity_trusted_result=(
+            content_activity.trusted_activity_result if content_activity is not None else None
+        ),
+        content_activity_last_publication_at=safe_last_publication_at,
+        content_activity_inactive_days=inactive_days,
+        content_activity_latest_attempt_observed_at=(
+            _utc_timestamp(content_activity.latest_attempt_observed_at)
+            if content_activity is not None
+            else None
+        ),
+        content_activity_latest_attempt_observation_status=(
+            content_activity.latest_attempt_observation_status
+            if content_activity is not None
+            else None
+        ),
+        content_activity_latest_attempt_coverage_status=(
+            content_activity.latest_attempt_coverage_status
+            if content_activity is not None
+            else None
+        ),
+        content_activity_latest_attempt_result=(
+            content_activity.latest_attempt_activity_result
+            if content_activity is not None
+            else None
+        ),
     )
 
 
@@ -140,9 +280,19 @@ def _platform_account_detail(
     account: InfluencerPlatformAccount,
     freshness: AccountSourceFreshnessRecord | None = None,
     evaluation: FreshnessEvaluation | None = None,
+    content_activity: ContentActivityProjection | None = None,
+    content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
+    as_of: datetime | None = None,
 ) -> PlatformAccountDetail:
     return PlatformAccountDetail(
-        **_platform_account_summary(account, freshness, evaluation).model_dump(),
+        **_platform_account_summary(
+            account,
+            freshness,
+            evaluation,
+            content_activity,
+            content_activity_freshness_policy,
+            as_of,
+        ).model_dump(),
         bio=account.bio,
         gender=account.gender,
         region_raw=account.region_raw,
@@ -276,10 +426,14 @@ class InfluencerService:
         repository: InfluencerReadRepository,
         *,
         freshness_policy: FreshnessPolicy | None = None,
+        content_activity_freshness_policy: ContentActivityFreshnessPolicy | None = None,
         now_factory: Callable[[], datetime] | None = None,
     ) -> None:
         self.repository = repository
         self.freshness_policy = freshness_policy or FreshnessPolicy()
+        self.content_activity_freshness_policy = (
+            content_activity_freshness_policy or ContentActivityFreshnessPolicy()
+        )
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
 
     @staticmethod
@@ -298,6 +452,7 @@ class InfluencerService:
             query,
             as_of=as_of,
             policy=self.freshness_policy,
+            content_activity_freshness_policy=self.content_activity_freshness_policy,
         )
         items = [self._list_item(record, context.role, as_of) for record in records]
         return InfluencerListPage(
@@ -319,6 +474,10 @@ class InfluencerService:
         influencer = record.influencer
         as_of = self._now_factory()
         freshness, summary = self._evaluate_freshness(record.huitun_freshness, as_of)
+        activity_by_account = {
+            projection.platform_account_id: projection
+            for projection in record.content_activity_projections
+        }
         return InfluencerDetail(
             id=influencer.id,
             display_name=influencer.display_name,
@@ -332,6 +491,9 @@ class InfluencerService:
                     account,
                     freshness.get(account.id, (None, None))[0],
                     freshness.get(account.id, (None, None))[1],
+                    activity_by_account.get(account.id),
+                    self.content_activity_freshness_policy,
+                    as_of,
                 )
                 for account in record.platform_accounts
             ],
@@ -411,6 +573,10 @@ class InfluencerService:
     ) -> InfluencerListItem:
         influencer = record.influencer
         freshness, summary = self._evaluate_freshness(record.huitun_freshness, as_of)
+        activity_by_account = {
+            projection.platform_account_id: projection
+            for projection in record.content_activity_projections
+        }
         return InfluencerListItem(
             id=influencer.id,
             display_name=influencer.display_name,
@@ -422,6 +588,9 @@ class InfluencerService:
                     account,
                     freshness.get(account.id, (None, None))[0],
                     freshness.get(account.id, (None, None))[1],
+                    activity_by_account.get(account.id),
+                    self.content_activity_freshness_policy,
+                    as_of,
                 )
                 for account in record.platform_accounts
             ],

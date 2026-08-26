@@ -3,6 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
     FreshnessEvaluation,
     FreshnessPolicy,
     FreshnessStatus,
@@ -158,6 +159,21 @@ def test_aggregate_without_eligible_accounts_is_unknown_but_not_refreshable(
         status=FreshnessStatus.UNKNOWN,
         requires_refresh=False,
     )
+
+
+def test_content_activity_freshness_is_separate_and_rejects_future_evidence() -> None:
+    policy = ContentActivityFreshnessPolicy.from_day_threshold(7)
+
+    assert policy.is_current(AS_OF - timedelta(days=7), AS_OF)
+    assert not policy.is_current(AS_OF - timedelta(days=7, microseconds=1), AS_OF)
+    assert not policy.is_current(AS_OF + timedelta(seconds=1), AS_OF)
+    assert not policy.is_current(None, AS_OF)
+
+
+@pytest.mark.parametrize("days", (-1, 1.5, "7"))
+def test_content_activity_freshness_rejects_invalid_day_threshold(days: object) -> None:
+    with pytest.raises(ValueError, match="nonnegative integer"):
+        ContentActivityFreshnessPolicy.from_day_threshold(days)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

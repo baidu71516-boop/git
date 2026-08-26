@@ -239,7 +239,7 @@ def test_fresh_upgrade_physical_contract_and_alembic_check(
     migration_database.check()
 
     with migration_database.engine.connect() as connection:
-        assert _revision(connection) == "0007_phase3a_persistence_amendment"
+        assert _revision(connection) == "0008_content_activity_p0"
         assert int(connection.scalar(text("SHOW server_version_num"))) // 10_000 == 16
         assert (
             connection.scalar(
@@ -657,6 +657,9 @@ def test_empty_downgrade_is_reversible_and_keeps_audit_enum_labels(
         assert PHASE3A_AUDIT_ACTIONS <= set(_enum_values(connection, "audit_action"))
 
     migration_database.upgrade("0007_phase3a_persistence_amendment")
+    with migration_database.engine.connect() as connection:
+        assert _revision(connection) == "0007_phase3a_persistence_amendment"
+    migration_database.upgrade("head")
     migration_database.check()
 
 
@@ -672,7 +675,7 @@ def test_downgrade_refuses_populated_idempotency_records(
         migration_database.downgrade("0006_phase3a_persistence")
 
     with migration_database.engine.connect() as connection:
-        assert _revision(connection) == "0007_phase3a_persistence_amendment"
+        assert _revision(connection) == "0008_content_activity_p0"
         assert (
             connection.scalar(
                 text("SELECT count(*) FROM phase3a_idempotency_records WHERE id = :id"),

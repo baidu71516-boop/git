@@ -485,7 +485,7 @@ def test_fresh_upgrade_repeat_metadata_and_alembic_check(
 
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == "0007_phase3a_persistence_amendment"
+        assert _revision(connection) == "0008_content_activity_p0"
         inspector = inspect(connection)
         assert inspector.has_table("refresh_queues")
         assert inspector.has_table("refresh_queue_items")

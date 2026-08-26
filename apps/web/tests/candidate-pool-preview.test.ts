@@ -39,6 +39,12 @@ describe("Candidate Pool visual preview", () => {
         (item) => item.definition.policy_type === "BUYER_V1",
       ),
     ).toBe(true);
+    expect(
+      PREVIEW_POLICIES[PREVIEW_POOL_IDS.seller]?.[0]?.definition,
+    ).toMatchObject({
+      policy_type: "SELLER_V1",
+      content_activity: { schema_version: 1, minimum_inactive_days: 60 },
+    });
     expect(PREVIEW_CAMPAIGNS.map((campaign) => campaign.status)).toEqual([
       "DRAFT",
       "ACTIVE",

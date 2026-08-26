@@ -6,7 +6,9 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -15,6 +17,23 @@ from backend_core.audit.models import AuditLog
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.service import AuthContext
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityProvider,
+    ContentActivityPublicationType,
+    ContentActivityResult,
+    ContentActivityScanTerminalReason,
+    ContentActivitySemantics,
+    ProviderAccountIdentityNamespace,
+    ProviderAccountIdentityVerificationOutcome,
+    ProviderAccountIdentityVerificationState,
+)
+from backend_core.content_activity.models import (
+    ContentActivityObservation,
+    ProviderAccountIdentity,
+    ProviderAccountIdentityVerification,
+)
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.growth.enums import (
@@ -23,6 +42,7 @@ from backend_core.growth.enums import (
     CandidateResult,
     Phase3AOperationScope,
 )
+from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import (
     CandidatePool,
     CandidatePoolMember,
@@ -30,14 +50,21 @@ from backend_core.growth.models import (
     Phase3AIdempotencyRecord,
 )
 from backend_core.growth.repository import CandidatePoolRepository
-from backend_core.growth.schemas import CandidatePoolCreateInput, TargetingPolicyCreateInput
+from backend_core.growth.schemas import (
+    CandidatePoolCreateInput,
+    LongInactivityEnrichmentRequest,
+    TargetingPolicyCreateInput,
+)
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
+    ContentActivityFact,
     IntegerRange,
+    LongInactivityConstraint,
     SellerTargetingPolicy,
+    TargetingEvaluation,
     TaxonomyDefinition,
     TaxonomyRelation,
 )
@@ -71,6 +98,7 @@ from backend_core.influencers.freshness import FreshnessPolicy
 from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
+    InfluencerCurrentMetrics,
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
@@ -127,6 +155,7 @@ async def _account(
     *,
     owner: Operator,
     source_tags: list[str] | None = None,
+    source: DataSource = DataSource.GENERIC,
 ) -> InfluencerPlatformAccount:
     influencer = Influencer(
         display_name="Targeting Candidate",
@@ -145,7 +174,7 @@ async def _account(
         account_handle="targeting-candidate",
         profile_url=f"https://example.invalid/{uuid4().hex}",
         normalized_profile_url=f"https://example.invalid/{uuid4().hex}",
-        source=DataSource.GENERIC,
+        source=source,
         source_tags=source_tags if source_tags is not None else ["beauty"],
         is_active=True,
     )
@@ -154,8 +183,89 @@ async def _account(
     return account
 
 
-def _service(session: AsyncSession) -> CandidatePoolService:
-    return CandidatePoolService(session, freshness_policy=FreshnessPolicy())
+async def _content_activity_observation(
+    session: AsyncSession,
+    account: InfluencerPlatformAccount,
+    *,
+    last_publication_at: datetime,
+) -> ContentActivityObservation:
+    """Insert the minimum immutable trusted lineage for as-of hydration tests."""
+
+    observed_at = NOW - timedelta(days=1)
+    identity = ProviderAccountIdentity(
+        platform_account_id=account.id,
+        platform=account.platform,
+        namespace=ProviderAccountIdentityNamespace.XIAOHONGSHU_USERID,
+        opaque_external_identity=f"candidate-identity-{uuid4().hex}",
+        identity_source="TIKHUB_XHS_APP_V2",
+        resolver_contract_version="TIKHUB_XHS_APP_V2_GET_USER_INFO_RESPONSE_SCHEMA_V1",
+        verification_state=ProviderAccountIdentityVerificationState.VERIFIED_CURRENT,
+        resolved_at=observed_at,
+        verified_at=observed_at,
+        provenance_ref="candidate-fixture-identity",
+        lock_version=1,
+        superseded_at=None,
+        revoked_at=None,
+    )
+    session.add(identity)
+    await session.flush()
+    verification = ProviderAccountIdentityVerification(
+        provider_account_identity_id=identity.id,
+        identity_source="TIKHUB_XHS_APP_V2",
+        resolver_contract_version="TIKHUB_XHS_APP_V2_GET_USER_INFO_RESPONSE_SCHEMA_V1",
+        verification_outcome=ProviderAccountIdentityVerificationOutcome.POLICY_VERIFIED,
+        verified_at=observed_at,
+        provenance_ref="candidate-fixture-verification",
+        idempotency_key=f"candidate-fixture-{uuid4().hex}",
+    )
+    session.add(verification)
+    await session.flush()
+    observation = ContentActivityObservation(
+        platform_account_id=account.id,
+        platform=account.platform,
+        schema_version=1,
+        activity_semantics=ContentActivitySemantics.CURRENT_PUBLIC_VISIBLE,
+        provider_account_identity_id=identity.id,
+        provider_account_identity_verification_id=verification.id,
+        activity_source_provider=ContentActivityProvider.TIKHUB,
+        provider_product="XIAOHONGSHU_APP_V2",
+        endpoint="/api/v1/xiaohongshu/app_v2/get_user_posted_notes",
+        endpoint_version="APP_V2",
+        adapter_version="TIKHUB_XHS_CONTENT_ACTIVITY_ADAPTER_V1",
+        capability_policy_version="TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1",
+        response_schema_version="TIKHUB_XHS_APP_V2_GET_USER_POSTED_NOTES_RESPONSE_SCHEMA_V1",
+        visibility_policy_version="TIKHUB_XHS_APP_V2_CURRENT_PUBLIC_VISIBILITY_POLICY_V1",
+        attempt_started_at=observed_at - timedelta(seconds=1),
+        observed_at=observed_at,
+        observation_status=ContentActivityObservationStatus.COMPLETE,
+        coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+        activity_result=ContentActivityResult.PUBLICATION_FOUND,
+        last_publication_at=last_publication_at,
+        latest_publication_id_namespace="xiaohongshu.noteid",
+        latest_publication_id="candidate-fixture-note",
+        latest_publication_type=ContentActivityPublicationType.VIDEO,
+        co_latest_publication_count=1,
+        coverage_start_at=None,
+        coverage_end_at=None,
+        timestamp_encoding="UNIX_SECONDS",
+        source_timezone=None,
+        timezone_basis="UNIX_SECONDS",
+        normalized_timezone="UTC",
+        request_ref="candidate-fixture-request",
+        provenance_ref="candidate-fixture-observation",
+        scan_terminal_reason=ContentActivityScanTerminalReason.SINGLE_RESPONSE_COMPLETE,
+        scanned_page_count=1,
+        scanned_item_count=1,
+        provider_error_class=None,
+        provider_error_code=None,
+    )
+    session.add(observation)
+    await session.flush()
+    return observation
+
+
+def _service(session: AsyncSession, **kwargs: object) -> CandidatePoolService:
+    return CandidatePoolService(session, freshness_policy=FreshnessPolicy(), **kwargs)
 
 
 async def _collection_job(
@@ -291,6 +401,187 @@ async def _create_schema(connection: AsyncConnection) -> None:
         await connection.run_sync(Base.metadata.create_all)
     finally:
         metric_table.indexes.update(metric_indexes)
+
+
+def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_history_queries() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        statements: list[str] = []
+
+        def track_statement(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            statements.append(statement)
+
+        event.listen(engine.sync_engine, "before_cursor_execute", track_statement)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                first = await _account(session, owner=context.operator)
+                second = await _account(session, owner=context.operator)
+                first_observation = await _content_activity_observation(
+                    session,
+                    first,
+                    last_publication_at=NOW - timedelta(days=90),
+                )
+                second_observation = await _content_activity_observation(
+                    session,
+                    second,
+                    last_publication_at=NOW - timedelta(days=10),
+                )
+                await session.commit()
+                statements.clear()
+
+                facts = await CandidatePoolRepository(session)._hydrate_fact_batch(
+                    accounts=(first, second),
+                    collection_context=None,
+                    source_collection_job_id=None,
+                    buyer=False,
+                    as_of=NOW,
+                    freshness_policy=FreshnessPolicy(),
+                    include_content_activity=True,
+                )
+
+                assert [fact.content_activity is not None for fact in facts] == [True, True]
+                assert facts[0].content_activity is not None
+                assert facts[0].content_activity.trusted_observation_id == first_observation.id
+                assert facts[0].content_activity.last_publication_at == NOW - timedelta(days=90)
+                assert facts[1].content_activity is not None
+                assert facts[1].content_activity.trusted_observation_id == second_observation.id
+                assert facts[1].content_activity.last_publication_at == NOW - timedelta(days=10)
+                activity_history_reads = [
+                    statement
+                    for statement in statements
+                    if "content_activity_observations" in statement.lower()
+                    and statement.lstrip().upper().startswith("SELECT")
+                ]
+                # One latest-attempt and one trusted-current window query for
+                # the whole account batch; never a per-candidate history read.
+                assert len(activity_history_reads) == 2
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", track_statement)
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_grey_dolphin_activity_fact_requires_one_confirmed_coherent_metric_snapshot() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(
+                    session,
+                    owner=context.operator,
+                    source=DataSource.HUITUN,
+                )
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="beauty",
+                )
+                stored_file = StoredImportFile(
+                    sha256=uuid4().hex * 2,
+                    storage_key=f"targeting/{uuid4().hex}.csv",
+                    size=1,
+                    detected_type=StoredFileType.CSV,
+                    detected_mime="text/csv",
+                    expires_at=NOW + timedelta(days=1),
+                )
+                session.add(stored_file)
+                await session.flush()
+                job = ImportJob(
+                    collection_job_id=collection.id,
+                    department_id=context.department.id,
+                    operator_id=context.operator.id,
+                    source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                    status=ImportJobStatus.COMPLETED,
+                    preview_revision=1,
+                    confirmed_revision=1,
+                )
+                session.add(job)
+                await session.flush()
+                import_file = ImportJobFile(
+                    import_job_id=job.id,
+                    stored_file_id=stored_file.id,
+                    position=1,
+                    original_filename="huitun.csv",
+                    status=ImportJobFileStatus.READY,
+                    source_acquired_at=NOW - timedelta(days=1),
+                    source_acquired_at_origin=SourceAcquiredAtOrigin.SERVER_DEFAULT,
+                    source_acquired_at_confirmation_required=False,
+                )
+                session.add(import_file)
+                await session.flush()
+                row = ImportRow(
+                    import_job_id=job.id,
+                    import_job_file_id=import_file.id,
+                    row_number=2,
+                    raw_data={},
+                    normalized_data={},
+                    matched_influencer_id=account.influencer_id,
+                    matched_platform_account_id=account.id,
+                    match_type=ImportMatchType.PLATFORM_ACCOUNT_ID,
+                    action=ImportRowAction.NO_CHANGE,
+                    merge_plan=None,
+                    warnings=[],
+                    errors=[],
+                    preview_revision=1,
+                    plan_hash=uuid4().hex * 2,
+                    committed_action=ImportRowAction.NO_CHANGE,
+                    committed_at=NOW,
+                )
+                session.add(row)
+                await session.flush()
+                session.add(
+                    InfluencerCurrentMetrics(
+                        influencer_id=account.influencer_id,
+                        platform_account_id=account.id,
+                        source=DataSource.HUITUN,
+                        source_updated_at=NOW - timedelta(days=1),
+                        metrics={"notes_7d": 0, "notes_60d": 0},
+                        metrics_hash=uuid4().hex * 2,
+                        last_import_job_id=job.id,
+                        last_import_row_id=row.id,
+                    )
+                )
+                await session.commit()
+
+                fact = (
+                    await CandidatePoolRepository(session)._hydrate_fact_batch(
+                        accounts=(account,),
+                        collection_context=None,
+                        source_collection_job_id=None,
+                        buyer=False,
+                        as_of=NOW,
+                        freshness_policy=FreshnessPolicy(),
+                        include_content_activity=True,
+                    )
+                )[0]
+
+                assert fact.grey_dolphin_activity is not None
+                assert fact.grey_dolphin_activity.observed_at == NOW - timedelta(days=1)
+                assert fact.grey_dolphin_activity.notes_7d == 0
+                assert fact.grey_dolphin_activity.notes_60d == 0
+                assert fact.grey_dolphin_activity.import_row_id == row.id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_pool_create_uses_shared_idempotency_record_and_single_audits() -> None:
@@ -963,6 +1254,346 @@ def test_run_idempotency_materialization_and_member_evidence() -> None:
                 assert first_after_rerun.input_watermark["policy_hash"] == first_policy_hash
         finally:
             await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_long_inactivity_runtime_uses_planner_and_counts_full_policy_candidates() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.MANAGER)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator)
+                await session.commit()
+
+                calls: list[UUID] = []
+                observed_at = datetime.now(UTC)
+
+                async def provider_enricher(
+                    platform_account_id: UUID,
+                ) -> LongInactivityProviderRefresh:
+                    calls.append(platform_account_id)
+                    return LongInactivityProviderRefresh(
+                        content_activity=ContentActivityFact(
+                            trusted_observed_at=observed_at,
+                            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                            trusted_coverage_status=(
+                                ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+                            ),
+                            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                            last_publication_at=observed_at - timedelta(days=120),
+                        ),
+                        accepted_trusted_observation=True,
+                    )
+
+                service = _service(
+                    session,
+                    long_inactivity_provider_enricher=provider_enricher,
+                    long_inactivity_provider_budget=12,
+                )
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Explicit long inactivity candidates",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(
+                            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+                        ),
+                    ),
+                    idempotency_key="explicit-long-inactivity-pool",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    long_inactivity_enrichment=LongInactivityEnrichmentRequest(
+                        planned_assignable_target=1,
+                        max_provider_enrichment=12,
+                    ),
+                    idempotency_key="explicit-long-inactivity-run",
+                )
+
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert completed.status is CandidatePoolRunStatus.COMPLETED
+                assert completed.match_count == 1
+                assert completed.unknown_count == 0
+                assert calls == [account.id]
+                assert completed.input_watermark is not None
+                execution = completed.input_watermark["long_inactivity_enrichment"]
+                assert execution["result"]["provider_calls_attempted"] == 1
+                assert execution["result"]["target_reached"] is True
+                assert execution["result"]["budget_reached"] is False
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_long_inactivity_runtime_stops_after_twelve_additional_fully_eligible_candidates() -> None:
+    async def scenario() -> None:
+        observed_at = datetime.now(UTC)
+        calls: list[UUID] = []
+
+        async def provider_enricher(
+            platform_account_id: UUID,
+        ) -> LongInactivityProviderRefresh:
+            calls.append(platform_account_id)
+            return LongInactivityProviderRefresh(
+                content_activity=ContentActivityFact(
+                    trusted_observed_at=observed_at,
+                    trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                    trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                    trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                    last_publication_at=observed_at - timedelta(days=120),
+                ),
+                accepted_trusted_observation=True,
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_enricher,
+            long_inactivity_provider_budget=50,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        evaluations: list[tuple[CandidateFactBundle, TargetingEvaluation]] = []
+        for index in range(30):
+            trusted = (
+                ContentActivityFact(
+                    trusted_observed_at=observed_at,
+                    trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+                    trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+                    trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+                    last_publication_at=observed_at - timedelta(days=120),
+                )
+                if index < 18
+                else None
+            )
+            facts = CandidateFactBundle(
+                influencer_id=UUID(int=index + 1),
+                platform_account_id=UUID(int=index + 101),
+                platform=Platform.XIAOHONGSHU,
+                content_activity=trusted,
+            )
+            evaluations.append(
+                (facts, service._evaluate_targeting(policy, facts, as_of=observed_at))
+            )
+
+        final_evaluations, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=observed_at)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=30,
+                max_provider_enrichment=50,
+            ),
+            evaluations=evaluations,
+        )
+
+        assert len(calls) == 12
+        assert execution.fully_eligible_count == 30
+        assert execution.metrics.provider_calls_attempted == 12
+        assert execution.metrics.stopped_by_planned_target is True
+        assert (
+            sum(evaluation.result.value == "MATCH" for _facts, evaluation in final_evaluations)
+            == 30
+        )
+
+    asyncio.run(scenario())
+
+
+def test_stale_trusted_fact_preserved_after_failed_refresh_stays_unknown_and_ineligible() -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        old_observation_id = uuid4()
+        stale_fact = ContentActivityFact(
+            trusted_observation_id=old_observation_id,
+            trusted_observed_at=execution_as_of - timedelta(days=8),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+        calls: list[UUID] = []
+
+        async def provider_failure(platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            calls.append(platform_account_id)
+            # Content Activity correctly retains the prior trusted projection,
+            # but this failed attempt did not accept that old observation.
+            return LongInactivityProviderRefresh(
+                content_activity=stale_fact,
+                accepted_trusted_observation=False,
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_failure,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=stale_fact,
+        )
+        initial = service._evaluate_targeting(policy, facts, as_of=execution_as_of)
+        assert initial.result.value == "UNKNOWN"
+
+        final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[(facts, initial)],
+        )
+
+        assert calls == [facts.platform_account_id]
+        assert final[0][1].result.value == "UNKNOWN"
+        assert execution.fully_eligible_count == 0
+        assert execution.metrics.provider_calls_attempted == 1
+        assert execution.metrics.stopped_by_planned_target is False
+        assert execution.metrics.stopped_by_provider_budget is True
+        assert stale_fact.trusted_observation_id == old_observation_id
+        assert stale_fact.trusted_observed_at == execution_as_of - timedelta(days=8)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("publication_age_days", "expected_result", "expected_fully_eligible"),
+    [
+        pytest.param(120, "MATCH", 1, id="new-inactive-observation-matches"),
+        pytest.param(1, "NOT_MATCH", 0, id="new-recent-observation-does-not-match"),
+    ],
+)
+def test_successful_new_trusted_refresh_is_evaluated_at_candidate_run_as_of(
+    publication_age_days: int,
+    expected_result: str,
+    expected_fully_eligible: int,
+) -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        stale_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(days=8),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+        fresh_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(minutes=1),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=publication_age_days),
+        )
+
+        async def provider_success(_platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            return LongInactivityProviderRefresh(
+                content_activity=fresh_fact,
+                accepted_trusted_observation=True,
+            )
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_success,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=stale_fact,
+        )
+
+        final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[
+                (facts, service._evaluate_targeting(policy, facts, as_of=execution_as_of))
+            ],
+        )
+
+        assert final[0][1].result.value == expected_result
+        assert execution.fully_eligible_count == expected_fully_eligible
+        assert execution.metrics.provider_calls_attempted == 1
+        assert execution.metrics.stopped_by_planned_target is (expected_fully_eligible == 1)
+        assert execution.metrics.stopped_by_provider_budget is True
+
+    asyncio.run(scenario())
+
+
+def test_fresh_trusted_cache_short_circuits_failed_refresh_callback() -> None:
+    async def scenario() -> None:
+        execution_as_of = datetime.now(UTC)
+        calls: list[UUID] = []
+        fresh_fact = ContentActivityFact(
+            trusted_observation_id=uuid4(),
+            trusted_observed_at=execution_as_of - timedelta(minutes=1),
+            trusted_observation_status=ContentActivityObservationStatus.COMPLETE,
+            trusted_coverage_status=ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET,
+            trusted_activity_result=ContentActivityResult.PUBLICATION_FOUND,
+            last_publication_at=execution_as_of - timedelta(days=120),
+        )
+
+        async def provider_failure(platform_account_id: UUID) -> LongInactivityProviderRefresh:
+            calls.append(platform_account_id)
+            raise AssertionError("fresh trusted cache must not be refreshed")
+
+        service = CandidatePoolService(
+            cast(AsyncSession, MagicMock()),
+            freshness_policy=FreshnessPolicy(),
+            long_inactivity_provider_enricher=provider_failure,
+            long_inactivity_provider_budget=1,
+        )
+        policy = SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)
+        )
+        facts = CandidateFactBundle(
+            influencer_id=uuid4(),
+            platform_account_id=uuid4(),
+            platform=Platform.XIAOHONGSHU,
+            content_activity=fresh_fact,
+        )
+        initial = service._evaluate_targeting(policy, facts, as_of=execution_as_of)
+
+        _final, execution = await service._execute_long_inactivity_enrichment(
+            run=cast(CandidatePoolRun, SimpleNamespace(as_of=execution_as_of)),
+            policy=policy,
+            request=LongInactivityEnrichmentRequest(
+                planned_assignable_target=1,
+                max_provider_enrichment=1,
+            ),
+            evaluations=[(facts, initial)],
+        )
+
+        assert initial.result.value == "MATCH"
+        assert calls == []
+        assert execution.fully_eligible_count == 1
+        assert execution.metrics.provider_calls_attempted == 0
 
     asyncio.run(scenario())
 

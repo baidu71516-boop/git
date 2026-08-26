@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -19,10 +20,16 @@ from pydantic import (
 )
 
 from backend_core.auth.enums import OperatorStatus
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityResult,
+)
 from backend_core.influencers.enums import (
     ContactFilter,
     ContactType,
     ContactValidationStatus,
+    ContentActivityFilter,
     CRMStage,
     DataSource,
     InfluencerStatus,
@@ -102,6 +109,16 @@ class ReadContract(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
+class ContentActivityReadStatus(StrEnum):
+    """Safe UI state derived from the trusted projection at one read ``as_of``."""
+
+    NOT_CHECKED = "not_checked"
+    CURRENT = "current"
+    LAST_KNOWN = "last_known"
+    STALE = "stale"
+    UNKNOWN = "unknown"
+
+
 class InfluencerListQuery(QueryContract):
     q: str | None = Field(default=None, max_length=160)
     tag: str | None = Field(default=None, max_length=160)
@@ -112,6 +129,7 @@ class InfluencerListQuery(QueryContract):
     contact_filter: ContactFilter | None = None
     notes_7d_filter: Notes7dFilter | None = None
     notes_60d_filter: Notes60dFilter | None = None
+    content_activity_filter: ContentActivityFilter | None = None
     freshness_status: FreshnessStatus | None = None
     requires_refresh: QueryBoolean | None = None
     last_huitun_observed_before: QueryDateTime | None = None
@@ -186,6 +204,19 @@ class PlatformAccountSummary(PlatformAccountIdentitySummary):
     freshness_status: FreshnessStatus | None = None
     freshness_age_days: StrictInt | None = Field(default=None, ge=0)
     requires_refresh: bool = False
+    content_activity_state: ContentActivityReadStatus = ContentActivityReadStatus.NOT_CHECKED
+    content_activity_trusted_observed_at: datetime | None = None
+    content_activity_trusted_observation_status: ContentActivityObservationStatus | None = None
+    content_activity_trusted_coverage_status: ContentActivityCoverageStatus | None = None
+    content_activity_trusted_result: ContentActivityResult | None = None
+    content_activity_last_publication_at: datetime | None = None
+    content_activity_inactive_days: StrictInt | None = Field(default=None, ge=0)
+    content_activity_latest_attempt_observed_at: datetime | None = None
+    content_activity_latest_attempt_observation_status: ContentActivityObservationStatus | None = (
+        None
+    )
+    content_activity_latest_attempt_coverage_status: ContentActivityCoverageStatus | None = None
+    content_activity_latest_attempt_result: ContentActivityResult | None = None
 
 
 class CurrentMetricsSummary(ReadContract):
@@ -322,6 +353,7 @@ class InfluencerFilterOptions(ReadContract):
 
 
 __all__ = [
+    "ContentActivityReadStatus",
     "CurrentContactSummary",
     "CurrentMetricsDetail",
     "CurrentMetricsSummary",

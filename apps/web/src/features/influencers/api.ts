@@ -18,6 +18,7 @@ export const INFLUENCER_QUERY_PARAMETERS = [
   "contact_filter",
   "notes_7d_filter",
   "notes_60d_filter",
+  "content_activity_filter",
   "freshness_status",
   "requires_refresh",
   "last_huitun_observed_before",

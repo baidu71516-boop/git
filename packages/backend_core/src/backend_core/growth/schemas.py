@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.enums import (
@@ -43,8 +43,17 @@ class TargetingPolicyCreateInput(TargetingWriteContract):
     policy: TargetingPolicyDefinition
 
 
+class LongInactivityEnrichmentRequest(TargetingWriteContract):
+    """Explicit per-run capacity controls for D1A.1 provider resolution."""
+
+    planned_assignable_target: StrictInt = Field(ge=1, le=10_000)
+    max_provider_enrichment: StrictInt = Field(ge=0, le=100)
+
+
 class CandidatePoolRunRequest(TargetingWriteContract):
-    """Deliberately empty; the server resolves policy and captures as_of."""
+    """Server-resolved run input with an opt-in bounded D1A.1 execution path."""
+
+    long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None
 
 
 class CandidatePoolPublic(TargetingReadContract):
@@ -253,6 +262,7 @@ __all__ = [
     "CandidatePoolRunPage",
     "CandidatePoolRunPublic",
     "CandidatePoolRunRequest",
+    "LongInactivityEnrichmentRequest",
     "TargetingPolicyCreateInput",
     "TargetingPolicyCreateResultPublic",
     "TargetingPolicyPublic",

@@ -15,11 +15,20 @@ from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.security import hash_token
 from backend_core.config import get_settings
+from backend_core.content_activity.enums import (
+    ContentActivityCoverageStatus,
+    ContentActivityObservationStatus,
+    ContentActivityProviderErrorClass,
+    ContentActivityPublicationType,
+    ContentActivityResult,
+)
+from backend_core.content_activity.models import ContentActivityProjection
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
 from backend_core.influencers.enums import (
     ContactType,
     ContactValidationStatus,
+    ContentActivityFilter,
     CRMStage,
     DataSource,
     InfluencerStatus,
@@ -249,6 +258,114 @@ async def _seed_influencer_graph(session: AsyncSession) -> UUID:
     return owner.id
 
 
+async def _seed_content_activity_projection(
+    session: AsyncSession,
+    *,
+    account: InfluencerPlatformAccount,
+    trusted_observed_at: datetime | None,
+    last_publication_at: datetime | None = None,
+    latest_observed_at: datetime | None = None,
+    latest_status: ContentActivityObservationStatus = ContentActivityObservationStatus.COMPLETE,
+    latest_coverage: ContentActivityCoverageStatus = (
+        ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+    ),
+    latest_result: ContentActivityResult = ContentActivityResult.PUBLICATION_FOUND,
+) -> None:
+    """Attach only safe projection fields to an HTTP read fixture."""
+
+    has_trusted = trusted_observed_at is not None
+    trusted_observation_id = uuid4() if has_trusted else None
+    resolved_latest_observed_at = latest_observed_at or trusted_observed_at or NOW
+    latest_attempt_observation_id = (
+        trusted_observation_id
+        if (
+            trusted_observation_id is not None
+            and resolved_latest_observed_at == trusted_observed_at
+            and latest_status is ContentActivityObservationStatus.COMPLETE
+            and latest_coverage is ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET
+            and latest_result is ContentActivityResult.PUBLICATION_FOUND
+        )
+        else uuid4()
+    )
+    has_publication = has_trusted and last_publication_at is not None
+    session.add(
+        ContentActivityProjection(
+            platform_account_id=account.id,
+            platform=account.platform,
+            latest_attempt_observation_id=latest_attempt_observation_id,
+            latest_attempt_observed_at=resolved_latest_observed_at,
+            latest_attempt_observation_status=latest_status,
+            latest_attempt_coverage_status=latest_coverage,
+            latest_attempt_activity_result=latest_result,
+            latest_attempt_provider_error_class=(
+                ContentActivityProviderErrorClass.MALFORMED_RESPONSE
+                if latest_status is ContentActivityObservationStatus.PROVIDER_ERROR
+                else None
+            ),
+            latest_attempt_provider_error_code=(
+                "SYNTHETIC_ERROR"
+                if latest_status is ContentActivityObservationStatus.PROVIDER_ERROR
+                else None
+            ),
+            trusted_observation_id=trusted_observation_id,
+            trusted_observed_at=trusted_observed_at,
+            trusted_observation_status=(
+                ContentActivityObservationStatus.COMPLETE if has_trusted else None
+            ),
+            trusted_coverage_status=(
+                ContentActivityCoverageStatus.FULL_CURRENT_PUBLIC_SET if has_trusted else None
+            ),
+            trusted_activity_result=(
+                ContentActivityResult.PUBLICATION_FOUND if has_trusted else None
+            ),
+            trusted_capability_policy_version=(
+                "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1" if has_trusted else None
+            ),
+            last_publication_at=last_publication_at if has_publication else None,
+            latest_publication_id_namespace=("xiaohongshu.noteid" if has_publication else None),
+            latest_publication_id="http-activity-note" if has_publication else None,
+            latest_publication_type=(
+                ContentActivityPublicationType.VIDEO if has_publication else None
+            ),
+            co_latest_publication_count=1 if has_publication else None,
+            version=1,
+        )
+    )
+    await session.flush()
+
+
+async def _seed_activity_account(
+    session: AsyncSession,
+    *,
+    label: str,
+) -> tuple[Influencer, InfluencerPlatformAccount]:
+    influencer = Influencer(
+        display_name=f"HTTP activity {label}",
+        crm_stage=CRMStage.TO_DEVELOP,
+        status=InfluencerStatus.ACTIVE,
+        deleted_at=None,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    session.add(influencer)
+    await session.flush()
+    account = InfluencerPlatformAccount(
+        influencer_id=influencer.id,
+        platform=Platform.XIAOHONGSHU,
+        platform_account_id=f"http-activity-{label}",
+        account_name=f"HTTP activity {label}",
+        account_handle=None,
+        profile_url=f"https://example.invalid/activity/{label}",
+        normalized_profile_url=f"https://example.invalid/activity/{label}",
+        source=DataSource.GENERIC,
+        is_active=True,
+        source_tags=[],
+    )
+    session.add(account)
+    await session.flush()
+    return influencer, account
+
+
 @asynccontextmanager
 async def api_environment() -> AsyncIterator[ApiEnvironment]:
     engine = create_async_engine("sqlite+aiosqlite://")
@@ -427,6 +544,159 @@ def test_registered_endpoints_auth_csrf_contact_and_envelope() -> None:
     asyncio.run(scenario())
 
 
+def test_content_activity_read_fields_and_filters_are_fail_closed_at_http_boundary() -> None:
+    async def scenario() -> None:
+        async with api_environment() as environment:
+            now = datetime.now(UTC).replace(microsecond=0)
+            inactive_account = await environment.session.get(
+                InfluencerPlatformAccount,
+                ACCOUNT_ID,
+            )
+            assert inactive_account is not None
+            active, active_account = await _seed_activity_account(
+                environment.session,
+                label="active",
+            )
+            unknown, unknown_account = await _seed_activity_account(
+                environment.session,
+                label="unknown",
+            )
+            stale, stale_account = await _seed_activity_account(
+                environment.session,
+                label="stale",
+            )
+            last_known, last_known_account = await _seed_activity_account(
+                environment.session,
+                label="last-known",
+            )
+            await _seed_content_activity_projection(
+                environment.session,
+                account=inactive_account,
+                trusted_observed_at=now - timedelta(days=1),
+                last_publication_at=now - timedelta(days=200),
+            )
+            await _seed_content_activity_projection(
+                environment.session,
+                account=active_account,
+                trusted_observed_at=now - timedelta(days=1),
+                last_publication_at=now - timedelta(days=3),
+            )
+            await _seed_content_activity_projection(
+                environment.session,
+                account=unknown_account,
+                trusted_observed_at=None,
+                latest_observed_at=now,
+                latest_status=ContentActivityObservationStatus.RESULT_INCOMPLETE,
+                latest_coverage=ContentActivityCoverageStatus.INCOMPLETE,
+                latest_result=ContentActivityResult.UNDETERMINED,
+            )
+            await _seed_content_activity_projection(
+                environment.session,
+                account=stale_account,
+                trusted_observed_at=now - timedelta(days=8),
+                last_publication_at=now - timedelta(days=200),
+            )
+            await _seed_content_activity_projection(
+                environment.session,
+                account=last_known_account,
+                trusted_observed_at=now - timedelta(days=1),
+                last_publication_at=now - timedelta(days=200),
+                latest_observed_at=now,
+                latest_status=ContentActivityObservationStatus.PROVIDER_ERROR,
+                latest_coverage=ContentActivityCoverageStatus.UNKNOWN,
+                latest_result=ContentActivityResult.UNDETERMINED,
+            )
+            await environment.session.commit()
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                authenticated_client(client, environment.tokens[Role.VIEWER])
+                listed = await client.get("/api/v1/influencers")
+                assert listed.status_code == 200
+                list_data = assert_success_envelope(listed)["data"]
+                assert isinstance(list_data, dict)
+                by_id = {item["id"]: item for item in list_data["items"]}
+                inactive_item = by_id[str(INFLUENCER_ID)]
+                inactive_activity = inactive_item["platform_accounts"][0]
+                assert inactive_activity["content_activity_state"] == "current"
+                assert inactive_activity["content_activity_last_publication_at"] is not None
+                assert inactive_activity["content_activity_inactive_days"] >= 200
+                assert "provider_raw_response" not in listed.text
+                assert "bootstrap_input" not in listed.text
+                assert "SYNTHETIC_ERROR" not in listed.text
+
+                detail = await client.get(f"/api/v1/influencers/{INFLUENCER_ID}")
+                assert detail.status_code == 200
+                detail_account = assert_success_envelope(detail)["data"]["platform_accounts"][0]
+                assert detail_account["content_activity_state"] == "current"
+                assert detail_account["content_activity_last_publication_at"] is not None
+                assert detail_account["content_activity_inactive_days"] >= 200
+
+                active_filter = await client.get(
+                    "/api/v1/influencers",
+                    params={
+                        "content_activity_filter": ContentActivityFilter.ACTIVE_WITHIN_7D.value
+                    },
+                )
+                assert {
+                    item["id"] for item in assert_success_envelope(active_filter)["data"]["items"]
+                } == {str(active.id)}
+                for activity_filter in (
+                    ContentActivityFilter.INACTIVE_30D,
+                    ContentActivityFilter.INACTIVE_60D,
+                    ContentActivityFilter.INACTIVE_90D,
+                    ContentActivityFilter.INACTIVE_180D,
+                ):
+                    filtered = await client.get(
+                        "/api/v1/influencers",
+                        params={"content_activity_filter": activity_filter.value},
+                    )
+                    assert {
+                        item["id"] for item in assert_success_envelope(filtered)["data"]["items"]
+                    } == {str(INFLUENCER_ID)}
+
+                last_known_detail = await client.get(f"/api/v1/influencers/{last_known.id}")
+                assert last_known_detail.status_code == 200
+                last_known_activity = assert_success_envelope(last_known_detail)["data"][
+                    "platform_accounts"
+                ][0]
+                assert last_known_activity["content_activity_state"] == "last_known"
+                assert last_known_activity["content_activity_last_publication_at"] is None
+                assert last_known_activity["content_activity_inactive_days"] is None
+                assert (
+                    last_known_activity["content_activity_latest_attempt_observation_status"]
+                    == ContentActivityObservationStatus.PROVIDER_ERROR.value
+                )
+                assert str(unknown.id) not in {
+                    item["id"]
+                    for item in assert_success_envelope(
+                        await client.get(
+                            "/api/v1/influencers",
+                            params={
+                                "content_activity_filter": (
+                                    ContentActivityFilter.INACTIVE_30D.value
+                                )
+                            },
+                        )
+                    )["data"]["items"]
+                }
+                assert str(stale.id) not in {
+                    item["id"]
+                    for item in assert_success_envelope(
+                        await client.get(
+                            "/api/v1/influencers",
+                            params={
+                                "content_activity_filter": (
+                                    ContentActivityFilter.INACTIVE_30D.value
+                                )
+                            },
+                        )
+                    )["data"]["items"]
+                }
+
+    asyncio.run(scenario())
+
+
 def test_list_query_contract_validation_and_duplicate_parameters() -> None:
     async def scenario() -> None:
         async with api_environment() as environment:
@@ -453,6 +723,11 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"notes_60d_filter": "three_to_nine"},
                     {"notes_60d_filter": "ten_or_more"},
                     {"notes_60d_filter": "missing"},
+                    {"content_activity_filter": ContentActivityFilter.ACTIVE_WITHIN_7D.value},
+                    {"content_activity_filter": ContentActivityFilter.INACTIVE_30D.value},
+                    {"content_activity_filter": ContentActivityFilter.INACTIVE_60D.value},
+                    {"content_activity_filter": ContentActivityFilter.INACTIVE_90D.value},
+                    {"content_activity_filter": ContentActivityFilter.INACTIVE_180D.value},
                     {"freshness_status": FreshnessStatus.UNKNOWN.value},
                     {"requires_refresh": "true"},
                     {"requires_refresh": "false"},
@@ -480,6 +755,7 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     {"contact_filter": "email"},
                     {"notes_7d_filter": "0"},
                     {"notes_60d_filter": "0"},
+                    {"content_activity_filter": "inactive_999d"},
                     {"freshness_status": "not-a-status"},
                     {"requires_refresh": "1"},
                     {"requires_refresh": "TRUE"},
@@ -506,6 +782,10 @@ def test_list_query_contract_validation_and_duplicate_parameters() -> None:
                     "contact_filter": ("has_contact", "no_contact"),
                     "notes_7d_filter": ("zero", "missing"),
                     "notes_60d_filter": ("zero", "missing"),
+                    "content_activity_filter": (
+                        ContentActivityFilter.ACTIVE_WITHIN_7D.value,
+                        ContentActivityFilter.INACTIVE_60D.value,
+                    ),
                     "freshness_status": (
                         FreshnessStatus.FRESH.value,
                         FreshnessStatus.STALE.value,
@@ -665,6 +945,7 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
         "contact_filter",
         "notes_7d_filter",
         "notes_60d_filter",
+        "content_activity_filter",
         "freshness_status",
         "requires_refresh",
         "last_huitun_observed_before",
@@ -684,6 +965,12 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
     }
     assert schema["components"]["schemas"]["FreshnessStatus"]["enum"] == [
         status.value for status in FreshnessStatus
+    ]
+    assert parameter_schemas["content_activity_filter"]["anyOf"][0] == {
+        "$ref": "#/components/schemas/ContentActivityFilter"
+    }
+    assert schema["components"]["schemas"]["ContentActivityFilter"]["enum"] == [
+        activity_filter.value for activity_filter in ContentActivityFilter
     ]
     assert parameter_schemas["requires_refresh"]["anyOf"][0]["type"] == "boolean"
     assert parameter_schemas["last_huitun_observed_before"]["anyOf"][0] == {
@@ -705,6 +992,17 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
         "freshness_status",
         "freshness_age_days",
         "requires_refresh",
+        "content_activity_state",
+        "content_activity_trusted_observed_at",
+        "content_activity_trusted_observation_status",
+        "content_activity_trusted_coverage_status",
+        "content_activity_trusted_result",
+        "content_activity_last_publication_at",
+        "content_activity_inactive_days",
+        "content_activity_latest_attempt_observed_at",
+        "content_activity_latest_attempt_observation_status",
+        "content_activity_latest_attempt_coverage_status",
+        "content_activity_latest_attempt_result",
     } <= set(account_item["properties"])
 
     detail = success_data("/api/v1/influencers/{influencer_id}")
@@ -716,6 +1014,17 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
         "freshness_status",
         "freshness_age_days",
         "requires_refresh",
+        "content_activity_state",
+        "content_activity_trusted_observed_at",
+        "content_activity_trusted_observation_status",
+        "content_activity_trusted_coverage_status",
+        "content_activity_trusted_result",
+        "content_activity_last_publication_at",
+        "content_activity_inactive_days",
+        "content_activity_latest_attempt_observed_at",
+        "content_activity_latest_attempt_observation_status",
+        "content_activity_latest_attempt_coverage_status",
+        "content_activity_latest_attempt_result",
     } <= set(detail_account["properties"])
 
     filter_options = success_data("/api/v1/influencers/filter-options")

@@ -255,6 +255,57 @@ function safeList(value: unknown): string {
         .join("、")
     : "—";
 }
+
+function criterionConfiguredValue(
+  value: unknown,
+  criterion: string | null,
+): string {
+  const item =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  if (criterion === "content_activity" || criterion === "long_inactivity") {
+    const days = safeString(item.minimum_inactive_days);
+    return days
+      ? `${criterion === "long_inactivity" ? "长期断更" : "断更"}不少于 ${days} 天`
+      : "—";
+  }
+  return safeList(item.allowed ?? item.minimum ?? item.maximum);
+}
+
+export function criterionObservedValue(
+  value: unknown,
+  criterion: string | null,
+): string {
+  const item =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  if (criterion === "content_activity") {
+    const inactiveDays = safeString(item.inactive_days);
+    if (inactiveDays) return `已断更 ${inactiveDays} 天`;
+    const publication = safeString(item.last_publication_at);
+    if (publication) return `最后公开：${candidateDateTime(publication)}`;
+  }
+  if (criterion === "long_inactivity") {
+    const source = safeString(item.source);
+    if (source === "GREY_DOLPHIN") {
+      if (safeString(item.notes_60d) === "0")
+        return "灰豚粗略判断：近60天未检测到笔记";
+      const notes7d = safeString(item.notes_7d);
+      if (notes7d !== null && notes7d !== "0")
+        return "灰豚粗略判断：近7天检测到笔记";
+      return "断更状态：未知 · 来源：灰豚";
+    }
+    if (source === "TRUSTED_CONTENT_ACTIVITY") {
+      const inactiveDays = safeString(item.inactive_days);
+      if (inactiveDays) return `断更 ${inactiveDays} 天 · 来源：API验证`;
+    }
+    return "断更状态：未知";
+  }
+  return safeString(item.value ?? item.status) ?? "—";
+}
+
 function EvidenceContent({
   member,
   policy,
@@ -304,24 +355,14 @@ function EvidenceContent({
           {
             title: "配置",
             dataIndex: "configured",
-            render: (value: unknown) => {
-              const item =
-                value && typeof value === "object" && !Array.isArray(value)
-                  ? (value as Record<string, unknown>)
-                  : {};
-              return safeList(item.allowed ?? item.minimum ?? item.maximum);
-            },
+            render: (value: unknown, record: Record<string, unknown>) =>
+              criterionConfiguredValue(value, safeString(record.criterion)),
           },
           {
             title: "观察值",
             dataIndex: "observed",
-            render: (value: unknown) => {
-              const item =
-                value && typeof value === "object" && !Array.isArray(value)
-                  ? (value as Record<string, unknown>)
-                  : {};
-              return safeString(item.value ?? item.status) ?? "—";
-            },
+            render: (value: unknown, record: Record<string, unknown>) =>
+              criterionObservedValue(value, safeString(record.criterion)),
           },
           {
             title: "原因",

@@ -53,6 +53,18 @@ const detailData = {
       freshness_status: "stale",
       freshness_age_days: 3,
       requires_refresh: true,
+      content_activity_state: "current",
+      content_activity_trusted_observed_at: "2026-08-10T08:00:00Z",
+      content_activity_trusted_observation_status: "COMPLETE",
+      content_activity_trusted_coverage_status: "FULL_CURRENT_PUBLIC_SET",
+      content_activity_trusted_result: "PUBLICATION_FOUND",
+      content_activity_last_publication_at: "2026-06-12T08:00:00Z",
+      content_activity_inactive_days: 60,
+      content_activity_latest_attempt_observed_at: "2026-08-10T08:00:00Z",
+      content_activity_latest_attempt_observation_status: "COMPLETE",
+      content_activity_latest_attempt_coverage_status:
+        "FULL_CURRENT_PUBLIC_SET",
+      content_activity_latest_attempt_result: "PUBLICATION_FOUND",
       bio: "真实简介 <b>不能作为 HTML</b>",
       gender: "女",
       region_raw: "上海",
@@ -76,6 +88,18 @@ const detailData = {
       freshness_status: null,
       freshness_age_days: null,
       requires_refresh: false,
+      content_activity_state: "current",
+      content_activity_trusted_observed_at: "2026-08-10T08:00:00Z",
+      content_activity_trusted_observation_status: "COMPLETE",
+      content_activity_trusted_coverage_status: "FULL_CURRENT_PUBLIC_SET",
+      content_activity_trusted_result: "NO_PUBLIC_CONTENT",
+      content_activity_last_publication_at: null,
+      content_activity_inactive_days: null,
+      content_activity_latest_attempt_observed_at: "2026-08-10T08:00:00Z",
+      content_activity_latest_attempt_observation_status: "COMPLETE",
+      content_activity_latest_attempt_coverage_status:
+        "FULL_CURRENT_PUBLIC_SET",
+      content_activity_latest_attempt_result: "NO_PUBLIC_CONTENT",
       bio: null,
       gender: null,
       region_raw: null,
@@ -375,6 +399,28 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       within(platformMetrics as HTMLElement).getAllByText("来源数据更新时间"),
     ).toHaveLength(1);
+    const trustedAccount = within(platformMetrics as HTMLElement)
+      .getByText("小红书 · 账号甲")
+      .closest(".detail-platform-item");
+    expect(trustedAccount).not.toBeNull();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("可信"),
+    ).toBeInTheDocument();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("60 天"),
+    ).toBeInTheDocument();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("2026-06-12 16:00"),
+    ).toBeInTheDocument();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("已完成"),
+    ).toBeInTheDocument();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("发现公开作品"),
+    ).toBeInTheDocument();
+    expect(
+      within(trustedAccount as HTMLElement).getByText("完整当前公开作品集"),
+    ).toBeInTheDocument();
     const genericAccount = within(platformMetrics as HTMLElement)
       .getByText("小红书 · 账号乙")
       .closest(".detail-platform-item");
@@ -384,6 +430,15 @@ describe("InfluencerDetailWorkspace", () => {
     ).toBeGreaterThanOrEqual(3);
     expect(
       within(genericAccount as HTMLElement).getByText("01-01"),
+    ).toBeInTheDocument();
+    expect(
+      within(genericAccount as HTMLElement).getByText("当前无公开作品"),
+    ).toBeInTheDocument();
+    expect(
+      within(genericAccount as HTMLElement).getByText("已完成：无公开作品"),
+    ).toBeInTheDocument();
+    expect(
+      within(genericAccount as HTMLElement).getByText("无公开作品"),
     ).toBeInTheDocument();
     expect(screen.queryByText("AI Score")).not.toBeInTheDocument();
     expect(screen.queryByText(/¥|RMB|人民币/)).not.toBeInTheDocument();
@@ -420,6 +475,107 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       screen.queryByText(/Refresh Queue|刷新队列/),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows trusted result and coverage after a later provider failure", async () => {
+    mockDetailApi({
+      ...detailData,
+      platform_accounts: detailData.platform_accounts.map((account, index) =>
+        index === 0
+          ? {
+              ...account,
+              content_activity_state: "last_known",
+              content_activity_last_publication_at: null,
+              content_activity_inactive_days: null,
+              content_activity_latest_attempt_observed_at:
+                "2026-08-11T08:00:00Z",
+              content_activity_latest_attempt_observation_status:
+                "PROVIDER_ERROR",
+              content_activity_latest_attempt_coverage_status: "UNKNOWN",
+              content_activity_latest_attempt_result: "UNDETERMINED",
+            }
+          : account,
+      ),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "多账号达人" });
+    const platformMetrics = screen
+      .getByRole("heading", { name: "平台与指标", level: 5 })
+      .closest("section");
+    expect(platformMetrics).not.toBeNull();
+    const account = within(platformMetrics as HTMLElement)
+      .getByText("小红书 · 账号甲")
+      .closest(".detail-platform-item");
+    expect(account).not.toBeNull();
+    expect(
+      within(account as HTMLElement).getByText("最后可信结果"),
+    ).toBeInTheDocument();
+    expect(
+      within(account as HTMLElement).getByText("发现公开作品"),
+    ).toBeInTheDocument();
+    expect(
+      within(account as HTMLElement).getByText("完整当前公开作品集"),
+    ).toBeInTheDocument();
+    expect(
+      within(account as HTMLElement).getAllByText("检测服务暂不可用"),
+    ).toHaveLength(2);
+    expect(
+      within(account as HTMLElement).queryByText("覆盖范围未知"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(account as HTMLElement).queryByText("60 天"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders unknown activity fail-closed without raw provider detail", async () => {
+    const rawProviderSentinel = "RAW_PROVIDER_RESPONSE_MUST_NOT_RENDER";
+    mockDetailApi({
+      ...detailData,
+      platform_accounts: detailData.platform_accounts.map((account, index) =>
+        index === 0
+          ? {
+              ...account,
+              content_activity_state: "unknown",
+              content_activity_last_publication_at: null,
+              content_activity_inactive_days: null,
+              content_activity_latest_attempt_observed_at:
+                "2026-08-11T08:00:00Z",
+              content_activity_latest_attempt_observation_status:
+                "RESULT_INCOMPLETE",
+              content_activity_latest_attempt_coverage_status: "INCOMPLETE",
+              content_activity_latest_attempt_result: "UNDETERMINED",
+              provider_raw_response: rawProviderSentinel,
+            }
+          : account,
+      ),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "多账号达人" });
+    const platformMetrics = screen
+      .getByRole("heading", { name: "平台与指标", level: 5 })
+      .closest("section");
+    expect(platformMetrics).not.toBeNull();
+    const account = within(platformMetrics as HTMLElement)
+      .getByText("小红书 · 账号甲")
+      .closest(".detail-platform-item");
+    expect(account).not.toBeNull();
+    expect(
+      within(account as HTMLElement).getByText("当前未知"),
+    ).toBeInTheDocument();
+    expect(
+      within(account as HTMLElement).getAllByText("结果不完整"),
+    ).toHaveLength(2);
+    expect(
+      within(account as HTMLElement).getByText("覆盖不完整"),
+    ).toBeInTheDocument();
+    const trustedResult = within(account as HTMLElement)
+      .getByText("可信结果")
+      .closest(".detail-row-item");
+    expect(trustedResult).not.toBeNull();
+    expect(trustedResult).toHaveTextContent("—");
+    expect(screen.queryByText(rawProviderSentinel)).not.toBeInTheDocument();
   });
 
   it("renders an unassigned Owner and missing fields without inventing values", async () => {

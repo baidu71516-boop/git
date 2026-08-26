@@ -15,6 +15,7 @@ from fastapi import Depends, Header, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.http.content_activity_tasks import ContentActivityTaskDispatcher
 from app.http.import_tasks import ImportTaskDispatcher
 from app.http.targeting_tasks import TargetingTaskDispatcher
 
@@ -40,6 +41,10 @@ def get_import_task_dispatcher(request: Request) -> ImportTaskDispatcher:
 
 def get_targeting_task_dispatcher(request: Request) -> TargetingTaskDispatcher:
     return cast(TargetingTaskDispatcher, request.app.state.targeting_task_dispatcher)
+
+
+def get_content_activity_task_dispatcher(request: Request) -> ContentActivityTaskDispatcher:
+    return cast(ContentActivityTaskDispatcher, request.app.state.content_activity_task_dispatcher)
 
 
 def get_client_ip(request: Request) -> str:

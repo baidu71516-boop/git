@@ -33,6 +33,7 @@ from backend_core.growth.schemas import (
     CandidatePoolRunMemberPage,
     CandidatePoolRunPage,
     CandidatePoolRunPublic,
+    LongInactivityEnrichmentRequest,
     TargetingPolicyCreateInput,
     TargetingPolicyCreateResultPublic,
     TargetingPolicyPublic,
@@ -409,13 +410,24 @@ class FakeCandidatePoolService:
         _context: AuthContext,
         *,
         pool_id: UUID,
+        long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None,
         idempotency_key: str,
         ip: str,
         user_agent: str,
         department_id: UUID | None = None,
     ) -> CandidatePoolRunPublic:
         self.calls.append(
-            ("reserve_run", (pool_id, idempotency_key, ip, user_agent, department_id))
+            (
+                "reserve_run",
+                (
+                    pool_id,
+                    long_inactivity_enrichment,
+                    idempotency_key,
+                    ip,
+                    user_agent,
+                    department_id,
+                ),
+            )
         )
         if not idempotency_key:
             raise TargetingError(422, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key is invalid")
@@ -434,10 +446,16 @@ class FakeCandidatePoolService:
 class FakeTargetingTaskDispatcher:
     def __init__(self) -> None:
         self.run_ids: list[UUID] = []
+        self.long_inactivity_run_ids: list[UUID] = []
         self.fail = False
 
     async def materialize(self, run_id: UUID) -> None:
         self.run_ids.append(run_id)
+        if self.fail:
+            raise RuntimeError("synthetic broker failure")
+
+    async def materialize_with_long_inactivity_enrichment(self, run_id: UUID) -> None:
+        self.long_inactivity_run_ids.append(run_id)
         if self.fail:
             raise RuntimeError("synthetic broker failure")
 
@@ -629,7 +647,6 @@ def test_candidate_pool_create_requires_mutation_prerequisites_and_replays_with_
         context = _context()
         service = FakeCandidatePoolService(context)
         _install_overrides(context, service)
-        settings = get_settings()
         try:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -640,7 +657,7 @@ def test_candidate_pool_create_requires_mutation_prerequisites_and_replays_with_
                 )
                 _assert_error(missing_csrf, status_code=403, code="CSRF_FAILED")
 
-                client.cookies.set(settings.csrf_cookie_name, "candidate-pool-csrf")
+                client.cookies.set(get_settings().csrf_cookie_name, "candidate-pool-csrf")
                 wrong_csrf = await client.post(
                     "/api/v1/candidate-pools",
                     json=_pool_create_payload(),
@@ -914,6 +931,43 @@ def test_candidate_pool_run_reservation_requires_csrf_operator_viewer_and_idempo
                     },
                 )
                 _assert_error(rejected_operator, status_code=409, code="OPERATOR_REQUIRED")
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
+def test_explicit_long_inactivity_run_dispatches_only_the_bounded_analytics_path() -> None:
+    async def scenario() -> None:
+        context = _context()
+        service = FakeCandidatePoolService(context)
+        dispatcher = _install_overrides(context, service)
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                client.cookies.set(get_settings().csrf_cookie_name, "candidate-pool-csrf")
+                response = await client.post(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs",
+                    json={
+                        "long_inactivity_enrichment": {
+                            "planned_assignable_target": 30,
+                            "max_provider_enrichment": 12,
+                        }
+                    },
+                    headers={
+                        "Idempotency-Key": "long-inactivity-run-key",
+                        "X-CSRF-Token": "candidate-pool-csrf",
+                    },
+                )
+
+            assert response.status_code == 202
+            assert dispatcher.run_ids == []
+            assert dispatcher.long_inactivity_run_ids == [RUN_ID]
+            assert service.calls[-1][0] == "reserve_run"
+            request = service.calls[-1][1][1]
+            assert isinstance(request, LongInactivityEnrichmentRequest)
+            assert request.planned_assignable_target == 30
+            assert request.max_provider_enrichment == 12
         finally:
             app.dependency_overrides.clear()
 

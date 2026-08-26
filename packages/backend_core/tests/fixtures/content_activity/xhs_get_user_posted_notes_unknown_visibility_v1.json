@@ -1,0 +1,18 @@
+{
+  "code": 200,
+  "data": {
+    "data": {
+      "has_more": false,
+      "notes": [
+        {
+          "note": {
+            "note_id": "synthetic-unknown-visibility",
+            "type": "normal",
+            "create_time": 1719579078,
+            "visibility": "public"
+          }
+        }
+      ]
+    }
+  }
+}

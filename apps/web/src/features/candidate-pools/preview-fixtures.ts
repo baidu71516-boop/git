@@ -82,6 +82,7 @@ const sellerDefinition = (version: number): TargetingPolicy["definition"] => ({
   platforms: ["小红书"],
   sources: ["近期开源采集"],
   freshness: { allowed_statuses: ["新鲜"] },
+  content_activity: { schema_version: 1, minimum_inactive_days: 60 },
   contact_availability: { types: ["邮箱"] },
   ...({ _preview_version: version } as Record<string, unknown>),
 });

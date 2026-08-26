@@ -19,3 +19,19 @@ def test_materialize_dispatches_only_the_durable_run_uuid() -> None:
         queue="targeting",
         retry=False,
     )
+
+
+def test_long_inactivity_materialize_dispatches_only_the_durable_run_uuid_to_analytics() -> None:
+    celery_client = MagicMock()
+    dispatcher = TargetingTaskDispatcher(celery_client)
+    run_id = UUID("00000000-0000-0000-0000-000000000303")
+
+    asyncio.run(dispatcher.materialize_with_long_inactivity_enrichment(run_id))
+
+    celery_client.send_task.assert_called_once_with(
+        "targeting.materialize_candidate_pool_run_with_long_inactivity_enrichment",
+        kwargs={"run_id": str(run_id)},
+        task_id=f"long-inactivity-{run_id}",
+        queue="analytics",
+        retry=False,
+    )

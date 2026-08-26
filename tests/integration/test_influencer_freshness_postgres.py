@@ -37,7 +37,11 @@ from backend_core.imports.models import (
     StoredImportFile,
 )
 from backend_core.influencers.enums import CRMStage, DataSource, Platform
-from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
+from backend_core.influencers.freshness import (
+    ContentActivityFreshnessPolicy,
+    FreshnessPolicy,
+    FreshnessStatus,
+)
 from backend_core.influencers.models import (
     Influencer,
     InfluencerCurrentMetrics,
@@ -554,7 +558,10 @@ def test_confirmed_lineage_legacy_source_isolation_inactive_and_multi_account() 
                 multi_fresh.id,
                 multi_stale.id,
             }
-            assert detail_measurement.total == 7
+            # D1A adds one bounded, set-wise projection-map read for the
+            # platform-neutral Content Activity fields.  It must remain a
+            # fixed detail-read cost rather than an account-by-account load.
+            assert detail_measurement.total == 8
             assert detail_measurement.dml == 0
 
             async def names_for(query: InfluencerListQuery) -> set[str]:
@@ -856,7 +863,12 @@ async def _explain_production_filtered_count(
     assert "import_job_id" in index_definition
     await session.execute(text("ANALYZE import_rows"))
 
-    criteria = repository._list_criteria(query, as_of=AS_OF, policy=POLICY)
+    criteria = repository._list_criteria(
+        query,
+        as_of=AS_OF,
+        policy=POLICY,
+        content_activity_freshness_policy=ContentActivityFreshnessPolicy(),
+    )
     statement = select(func.count(Influencer.id)).where(*criteria)
     captured: list[tuple[str, object]] = []
 
@@ -978,7 +990,9 @@ def test_scale_query_count_pagination_combined_filters_and_explain() -> None:
                     )
                     assert total == size
                     assert measurement.dml == 0
-                    assert measurement.total == 6
+                    # The Content Activity projection map is one additional
+                    # set-wise read, independent of page/result size.
+                    assert measurement.total == 7
                     assert measurement.wall_seconds < 10
                     expected_order = list(reversed(influencer_ids))
                     assert [record.influencer.id for record in first_page] == expected_order[:17]
@@ -1045,7 +1059,7 @@ def test_scale_query_count_pagination_combined_filters_and_explain() -> None:
                             )
                         )
                         assert combined_measurement.dml == 0
-                        assert combined_measurement.total == 6
+                        assert combined_measurement.total == 7
                         assert combined_measurement.wall_seconds < 10
                         expected_combined = [
                             influencer_id

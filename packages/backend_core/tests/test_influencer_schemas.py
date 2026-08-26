@@ -7,6 +7,7 @@ from backend_core.influencers.enums import (
     ContactFilter,
     ContactType,
     ContactValidationStatus,
+    ContentActivityFilter,
     CRMStage,
     DataSource,
     InfluencerStatus,
@@ -51,6 +52,7 @@ def test_list_query_defaults_and_exact_field_set() -> None:
         "contact_filter",
         "notes_7d_filter",
         "notes_60d_filter",
+        "content_activity_filter",
         "freshness_status",
         "requires_refresh",
         "last_huitun_observed_before",
@@ -80,6 +82,15 @@ def test_list_query_trims_tag_without_changing_its_original_case() -> None:
 
     with pytest.raises(ValidationError):
         InfluencerListQuery(tag="A" * 161)
+
+
+def test_list_query_accepts_only_closed_content_activity_filters() -> None:
+    assert (
+        InfluencerListQuery(content_activity_filter="inactive_60d").content_activity_filter
+        is ContentActivityFilter.INACTIVE_60D
+    )
+    with pytest.raises(ValidationError):
+        InfluencerListQuery(content_activity_filter="inactive_999d")
 
 
 def test_list_query_validates_follower_range_without_coercing_boundaries() -> None:

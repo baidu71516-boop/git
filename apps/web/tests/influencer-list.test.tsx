@@ -51,6 +51,18 @@ const listData = {
           freshness_status: "stale",
           freshness_age_days: 41,
           requires_refresh: true,
+          content_activity_state: "current",
+          content_activity_trusted_observed_at: "2026-08-10T08:00:00Z",
+          content_activity_trusted_observation_status: "COMPLETE",
+          content_activity_trusted_coverage_status: "FULL_CURRENT_PUBLIC_SET",
+          content_activity_trusted_result: "PUBLICATION_FOUND",
+          content_activity_last_publication_at: "2026-06-11T08:00:00Z",
+          content_activity_inactive_days: 61,
+          content_activity_latest_attempt_observed_at: "2026-08-10T08:00:00Z",
+          content_activity_latest_attempt_observation_status: "COMPLETE",
+          content_activity_latest_attempt_coverage_status:
+            "FULL_CURRENT_PUBLIC_SET",
+          content_activity_latest_attempt_result: "PUBLICATION_FOUND",
         },
         {
           id: "account-2",
@@ -237,7 +249,10 @@ describe("InfluencerWorkspace", () => {
     expect(within(row).getByText("20.66万")).toBeInTheDocument();
     expect(within(row).getByText("高意向")).toBeInTheDocument();
     expect(within(row).getByText("陈旧")).toBeInTheDocument();
-    expect(within(row).getByText("距上次采集 41 天")).toBeInTheDocument();
+    expect(within(row).queryByText("距上次采集 41 天")).toBeNull();
+    expect(row).toHaveTextContent("多个小红书账号");
+    expect(row).toHaveTextContent("请查看详情");
+    expect(within(row).queryByText("61 天未更新")).toBeNull();
     expect(within(row).getByText("邮箱 · 手机")).toBeInTheDocument();
     expect(within(row).getByText("需核对")).toBeInTheDocument();
     expect(within(row).queryByText("***")).not.toBeInTheDocument();
@@ -291,6 +306,25 @@ describe("InfluencerWorkspace", () => {
 
     const row = await screen.findByRole("row", { name: /零粉多账号达人/ });
     expect(within(row).queryByRole("link", { name: "主页 ↗" })).toBeNull();
+  });
+
+  it("renders trusted Content Activity only for one unambiguous XHS account", async () => {
+    const singleXhsAccount = {
+      ...listData,
+      items: [
+        {
+          ...listData.items[0],
+          platform_accounts: [listData.items[0].platform_accounts[0]],
+        },
+      ],
+    };
+    mockApi(singleXhsAccount);
+    renderWorkspace();
+
+    const row = await screen.findByRole("row", { name: /零粉多账号达人/ });
+    expect(within(row).getByText("可信")).toBeInTheDocument();
+    expect(within(row).getByText("61 天未更新")).toBeInTheDocument();
+    expect(within(row).queryByText("多个小红书账号")).toBeNull();
   });
 
   it("restores URL filters and resets the page for search and filters", async () => {
@@ -364,6 +398,29 @@ describe("InfluencerWorkspace", () => {
     expect(
       await screen.findByRole("combobox", { name: "近7天笔记筛选" }),
     ).toBeInTheDocument();
+  });
+
+  it("syncs the strict Content Activity filter to the URL and resets pagination", async () => {
+    navigation.search =
+      "content_activity_filter=inactive_30d&page=3&page_size=50";
+    mockApi();
+    renderWorkspace();
+    await screen.findByRole("link", { name: "零粉多账号达人" });
+
+    fireEvent.mouseDown(
+      screen.getByRole("combobox", { name: "内容活跃度筛选" }),
+    );
+    await screen.findByRole("option", { name: "断更 ≥ 60 天" });
+    const inactiveSixtyDays = Array.from(
+      document.querySelectorAll<HTMLElement>(".ant-select-item-option"),
+    ).find((item) => item.textContent === "断更 ≥ 60 天");
+    expect(inactiveSixtyDays).toBeDefined();
+    fireEvent.click(inactiveSixtyDays as HTMLElement);
+    await waitFor(() =>
+      expect(navigation.replace).toHaveBeenLastCalledWith(
+        "/influencers?content_activity_filter=inactive_60d&page_size=50",
+      ),
+    );
   });
 
   it("validates follower ranges locally and supports clearing filters", async () => {
@@ -489,9 +546,7 @@ describe("InfluencerWorkspace", () => {
     await screen.findByRole("link", { name: "零粉多账号达人" });
 
     expect(screen.getAllByText("陈旧").length).toBeGreaterThanOrEqual(2);
-    expect(
-      screen.getAllByText("距上次采集 41 天").length,
-    ).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText("距上次采集 41 天")).toBeNull();
     const search = screen.getByRole("textbox", { name: "昵称搜索" });
     fireEvent.change(search, { target: { value: "国风" } });
     fireEvent.click(screen.getByRole("button", { name: /搜.*索/ }));
