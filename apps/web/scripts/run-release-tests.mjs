@@ -27,6 +27,7 @@ const EVIDENCE_ROOT = process.env.WEB_RELEASE_EVIDENCE_DIR
 const LOCK_SLUG = "influencer-outreach-web-release-gate";
 const WATCHDOG_MS = 15 * 60 * 1000;
 const TERMINATION_GRACE_MS = 5 * 1000;
+const STREAM_CAPTURE_MAX_BYTES = 2 * 1024 * 1024;
 const TEST_FILE_PATTERN = /\.(?:test|spec)\.(?:ts|tsx)$/;
 const INTERACTION_TEST_PATHS = [
   "apps/web/tests/candidate-pool-detail-tabs.test.tsx",
@@ -291,6 +292,8 @@ export class GateLock {
 }
 
 let activeChild;
+let activeChildTermination;
+let activeLifecycle;
 
 function pnpmInvocation(arguments_) {
   const npmExecPath = process.env.npm_execpath;
@@ -316,8 +319,17 @@ function pnpmInvocation(arguments_) {
   };
 }
 
-function runChild(command, arguments_, options = {}) {
+export function runChild(command, arguments_, options = {}) {
   return new Promise((resolve) => {
+    const lifecycle = options.lifecycle ?? activeLifecycle;
+    if (lifecycle?.terminating) {
+      resolve({
+        code: -1,
+        signal: lifecycle.signal,
+        error: "release invocation is terminating",
+      });
+      return;
+    }
     const child = spawn(command, arguments_, {
       cwd: options.cwd ?? WEB_ROOT,
       env: options.env ?? process.env,
@@ -326,18 +338,26 @@ function runChild(command, arguments_, options = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     activeChild = child;
-    child.stdout?.pipe(process.stdout);
-    child.stderr?.pipe(process.stderr);
+    child.stdout?.on("data", (chunk) => {
+      process.stdout.write(chunk);
+      options.streamCapture?.write("stdout", chunk);
+    });
+    child.stderr?.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      options.streamCapture?.write("stderr", chunk);
+    });
     child.once("error", (error) => {
       if (activeChild === child) {
         activeChild = undefined;
       }
+      options.streamCapture?.finish();
       resolve({ code: -1, signal: undefined, error: error.message });
     });
     child.once("close", (code, signal) => {
       if (activeChild === child) {
         activeChild = undefined;
       }
+      options.streamCapture?.finish();
       resolve({ code: code ?? -1, signal, error: undefined });
     });
   });
@@ -353,38 +373,140 @@ function waitForChild(child, milliseconds) {
   });
 }
 
-async function terminateActiveChild() {
-  const child = activeChild;
-  if (!child || child.exitCode !== null || child.killed) {
+export async function terminateChildProcessGroup(child) {
+  const target = child ?? activeChild;
+  if (!target || target.exitCode !== null || target.killed) {
     return { terminated: false };
   }
 
   try {
     if (process.platform === "win32") {
-      spawnSync("taskkill", ["/pid", String(child.pid), "/t"], {
+      spawnSync("taskkill", ["/pid", String(target.pid), "/t"], {
         windowsHide: true,
       });
     } else {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-target.pid, "SIGTERM");
     }
   } catch {
-    child.kill("SIGTERM");
+    target.kill("SIGTERM");
   }
-  const exitedGracefully = await waitForChild(child, TERMINATION_GRACE_MS);
+  const exitedGracefully = await waitForChild(target, TERMINATION_GRACE_MS);
   if (!exitedGracefully) {
     try {
       if (process.platform === "win32") {
-        spawnSync("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+        spawnSync("taskkill", ["/pid", String(target.pid), "/t", "/f"], {
           windowsHide: true,
         });
       } else {
-        process.kill(-child.pid, "SIGKILL");
+        process.kill(-target.pid, "SIGKILL");
       }
     } catch {
-      child.kill("SIGKILL");
+      target.kill("SIGKILL");
     }
   }
   return { terminated: true, exitedGracefully };
+}
+
+async function terminateActiveChild() {
+  if (!activeChildTermination) {
+    activeChildTermination = terminateChildProcessGroup(activeChild).finally(
+      () => {
+        activeChildTermination = undefined;
+      },
+    );
+  }
+  return activeChildTermination;
+}
+
+export class GateLifecycle {
+  constructor(evidence, options = {}) {
+    this.evidence = evidence;
+    this.terminate = options.terminate ?? terminateActiveChild;
+    this.signalEmitter = options.signalEmitter ?? process;
+    this.signals = options.signals ?? ["SIGINT", "SIGTERM", "SIGHUP"];
+    this.lock = undefined;
+    this.terminating = false;
+    this.signal = undefined;
+    this.cleanupPromise = undefined;
+    this.lockReleasePromise = undefined;
+    this.handlers = new Map();
+  }
+
+  attachLock(lock) {
+    this.lock = lock;
+  }
+
+  installSignalHandlers() {
+    for (const signal of this.signals) {
+      const handler = () => {
+        void this.requestTermination(signal).catch((error) => {
+          this.evidence.termination.cleanupError =
+            error instanceof Error ? error.message : String(error);
+        });
+      };
+      try {
+        this.signalEmitter.on(signal, handler);
+        this.handlers.set(signal, handler);
+      } catch {
+        // Signal registration is platform-dependent. The runner remains usable
+        // where a runtime does not expose one of these POSIX signals.
+      }
+    }
+  }
+
+  removeSignalHandlers() {
+    for (const [signal, handler] of this.handlers) {
+      this.signalEmitter.removeListener?.(signal, handler);
+    }
+    this.handlers.clear();
+  }
+
+  assertNotTerminating() {
+    if (this.terminating) {
+      throw gateError(
+        "RELEASE_BLOCKED",
+        `RELEASE_TERMINATED_BY_${this.signal ?? "WATCHDOG"}`,
+      );
+    }
+  }
+
+  async releaseLock() {
+    if (!this.lock) {
+      return false;
+    }
+    if (!this.lockReleasePromise) {
+      this.lockReleasePromise = this.lock.release();
+    }
+    return this.lockReleasePromise;
+  }
+
+  async requestTermination(signal) {
+    if (this.cleanupPromise) {
+      return this.cleanupPromise;
+    }
+    this.terminating = true;
+    this.signal = signal;
+    this.evidence.termination = {
+      requested: true,
+      signal,
+      receivedAt: new Date().toISOString(),
+    };
+    this.cleanupPromise = (async () => {
+      const termination = await this.terminate();
+      this.evidence.termination.childTermination = termination;
+      this.evidence.termination.lockReleased = await this.releaseLock();
+      return termination;
+    })();
+    return this.cleanupPromise;
+  }
+
+  async finalize() {
+    if (this.cleanupPromise) {
+      await this.cleanupPromise;
+      return this.evidence.termination?.lockReleased ?? false;
+    }
+    return this.releaseLock();
+  }
 }
 
 export class GateWatchdog {
@@ -398,7 +520,14 @@ export class GateWatchdog {
 
   arm() {
     this.timer = setTimeout(() => {
-      void this.expire();
+      void this.expire().catch((error) => {
+        this.evidence.watchdog = {
+          expired: true,
+          timeoutMs: this.timeoutMs,
+          terminationError:
+            error instanceof Error ? error.message : String(error),
+        };
+      });
     }, this.timeoutMs);
   }
 
@@ -1131,11 +1260,11 @@ async function runCanonical(
   return { decision: "PASS", exitCode: 0 };
 }
 
-function parseStressFailures(report) {
+export function parseStressFailures(report) {
   const failures = [];
   for (const testResult of report?.testResults ?? []) {
-    const testPath = normalizedRepositoryPath(
-      path.resolve(WEB_ROOT, testResult.name ?? testResult.file ?? ""),
+    const testPath = normalizedStressTestPath(
+      testResult.name ?? testResult.file ?? "",
     );
     for (const assertion of testResult.assertionResults ?? []) {
       if (assertion.status === "failed") {
@@ -1143,6 +1272,9 @@ function parseStressFailures(report) {
           path: testPath,
           name: assertion.fullName ?? assertion.title ?? "unknown test",
           messages: assertion.failureMessages ?? [],
+          errorTypes: (assertion.failureDetails ?? []).map(
+            (detail) => detail?.error?.name ?? detail?.name,
+          ),
         });
       }
     }
@@ -1150,11 +1282,166 @@ function parseStressFailures(report) {
   return failures;
 }
 
-function isTimeoutFailure(failure) {
-  return (
-    failure.messages.length > 0 &&
-    failure.messages.every((message) => /timed out|timeout/i.test(message))
+function normalizedStressTestPath(testPath) {
+  return normalizedRepositoryPath(
+    path.isAbsolute(testPath)
+      ? testPath
+      : testPath.startsWith("apps/web/")
+        ? path.join(REPOSITORY_ROOT, testPath)
+        : path.resolve(WEB_ROOT, testPath),
   );
+}
+
+export class StreamedVitestOutputCapture {
+  constructor(options = {}) {
+    this.maxBytes = options.maxBytes ?? STREAM_CAPTURE_MAX_BYTES;
+    this.bytes = 0;
+    this.truncated = false;
+    this.lines = [];
+    this.pending = new Map();
+  }
+
+  write(source, chunk) {
+    if (this.truncated) {
+      return;
+    }
+    const text = String(chunk);
+    const byteLength = Buffer.byteLength(text);
+    if (this.bytes + byteLength > this.maxBytes) {
+      this.truncated = true;
+      return;
+    }
+    this.bytes += byteLength;
+    const value = `${this.pending.get(source) ?? ""}${text}`;
+    const parts = value.split(/\r?\n/);
+    this.pending.set(source, parts.pop() ?? "");
+    for (const line of parts) {
+      this.lines.push({ source, line: this.lines.length + 1, text: line });
+    }
+  }
+
+  finish() {
+    if (this.truncated) {
+      return;
+    }
+    for (const [source, text] of this.pending) {
+      if (text) {
+        this.lines.push({ source, line: this.lines.length + 1, text });
+      }
+    }
+    this.pending.clear();
+  }
+
+  evidence() {
+    return {
+      maxBytes: this.maxBytes,
+      capturedBytes: this.bytes,
+      truncated: this.truncated,
+      lines: this.lines,
+    };
+  }
+}
+
+function stripAnsi(value) {
+  return value.replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
+function timeoutKindFromVitestBlock(lines) {
+  const text = lines.map((line) => stripAnsi(line.text)).join("\n");
+  const signatures = [
+    [
+      "test",
+      /(?:^|\n)(?:Error:\s*)?Test timed out in \d+ms\.\nIf this is a long-running test,[\s\S]*?(?:\"|`)testTimeout(?:\"|`)/,
+    ],
+    [
+      "hook",
+      /(?:^|\n)(?:Error:\s*)?Hook timed out in \d+ms\.\nIf this is a long-running hook,[\s\S]*?(?:\"|`)hookTimeout(?:\"|`)/,
+    ],
+    [
+      "teardown",
+      /(?:^|\n)The teardown phase of \"[^\"]+\" hook timed out after \d+ms\./,
+    ],
+    [
+      "hook",
+      /(?:^|\n)The setup phase of \"[^\"]+\" hook timed out after \d+ms\./,
+    ],
+  ];
+  return signatures.find(([, pattern]) => pattern.test(text))?.[0];
+}
+
+function streamedFailureBlocks(lines) {
+  const blocks = [];
+  let current;
+  for (const line of lines) {
+    const heading = stripAnsi(line.text).match(
+      /^\s*FAIL\s+(.+\.(?:test|spec)\.(?:ts|tsx))\s+>\s+(.+?)\s*$/,
+    );
+    if (heading) {
+      current = {
+        path: normalizedStressTestPath(heading[1]),
+        name: heading[2],
+        lines: [line],
+      };
+      blocks.push(current);
+    } else if (current) {
+      current.lines.push(line);
+    }
+  }
+  return blocks.map((block) => ({
+    ...block,
+    timeoutKind: timeoutKindFromVitestBlock(block.lines),
+  }));
+}
+
+export function correlateStressFailures(failures, streamedOutput) {
+  const blocks = streamedFailureBlocks(streamedOutput?.lines ?? []);
+  const timeoutBlocks = blocks.filter((block) => block.timeoutKind);
+  const keys = failures.map((failure) =>
+    manifestKey(failure.path, failure.name),
+  );
+  const uniqueKeys = new Set(keys);
+  const timeoutByKey = new Map();
+  for (const block of timeoutBlocks) {
+    const key = manifestKey(block.path, block.name);
+    const matching = timeoutByKey.get(key) ?? [];
+    matching.push(block);
+    timeoutByKey.set(key, matching);
+  }
+  const mismatch =
+    streamedOutput?.truncated === true ||
+    keys.length === 0 ||
+    uniqueKeys.size !== keys.length ||
+    timeoutBlocks.length !== failures.length ||
+    [...timeoutByKey.entries()].some(
+      ([key, matching]) => !uniqueKeys.has(key) || matching.length !== 1,
+    ) ||
+    failures.some(
+      (failure) =>
+        (timeoutByKey.get(manifestKey(failure.path, failure.name)) ?? [])
+          .length !== 1,
+    );
+  return {
+    failures: failures.map((failure) => {
+      const matching = timeoutByKey.get(
+        manifestKey(failure.path, failure.name),
+      );
+      return matching?.length === 1
+        ? { ...failure, timeoutKind: matching[0].timeoutKind }
+        : failure;
+    }),
+    identityMismatch: mismatch,
+    timeoutBlocks: timeoutBlocks.map((block) => ({
+      path: block.path,
+      name: block.name,
+      timeoutKind: block.timeoutKind,
+      lineStart: block.lines[0]?.line,
+      lineEnd: block.lines.at(-1)?.line,
+    })),
+  };
+}
+
+function isTimeoutFailure(failure) {
+  return ["test", "hook", "teardown"].includes(failure.timeoutKind);
 }
 
 async function latestCanonicalPass() {
@@ -1196,11 +1483,17 @@ export function classifyStressResult(input) {
   if (input.exitCode === 0 && !input.signal) {
     return { decision: "STRESS_PASS", exitCode: 0 };
   }
-  if (input.signal || input.abnormal || input.failures.length === 0) {
+  if (
+    input.signal ||
+    input.abnormal ||
+    input.identityMismatch ||
+    input.failures.length === 0
+  ) {
     return {
       decision: "RELEASE_BLOCKED",
       exitCode: 1,
-      reason: "stress abnormal exit or unclassified failure",
+      reason:
+        "stress abnormal exit, identity mismatch, or unclassified failure",
     };
   }
   if (!input.failures.every(isTimeoutFailure)) {
@@ -1231,7 +1524,10 @@ async function runStress(evidence, watchdog) {
     "--outputFile",
     stressPath,
   ]);
-  const result = await runChild(invocation.command, invocation.args);
+  const streamCapture = new StreamedVitestOutputCapture();
+  const result = await runChild(invocation.command, invocation.args, {
+    streamCapture,
+  });
   watchdog?.assertNotExpired();
   let report;
   try {
@@ -1239,13 +1535,26 @@ async function runStress(evidence, watchdog) {
   } catch {
     report = undefined;
   }
-  const failures = report ? parseStressFailures(report) : [];
-  evidence.stress = { result, reportPath: stressPath, failures };
+  const parsedFailures = report ? parseStressFailures(report) : [];
+  const streamedOutput = streamCapture.evidence();
+  const correlation = correlateStressFailures(parsedFailures, streamedOutput);
+  const failures = correlation.failures;
+  evidence.stress = {
+    result,
+    reportPath: stressPath,
+    failures,
+    streamedOutput,
+    timeoutCorrelation: {
+      identityMismatch: correlation.identityMismatch,
+      timeoutBlocks: correlation.timeoutBlocks,
+    },
+  };
 
   if (result.code === 0 && !result.signal) {
     return classifyStressResult({
       exitCode: result.code,
       signal: result.signal,
+      identityMismatch: correlation.identityMismatch,
       failures,
     });
   }
@@ -1254,7 +1563,12 @@ async function runStress(evidence, watchdog) {
     ...new Set(failures.map((failure) => failure.path)),
   ]);
   let controlledPass = false;
-  if (prior && affectedPaths.length > 0 && failures.every(isTimeoutFailure)) {
+  if (
+    prior &&
+    !correlation.identityMismatch &&
+    affectedPaths.length > 0 &&
+    failures.every(isTimeoutFailure)
+  ) {
     try {
       const controlled = await runCanonical(
         evidence,
@@ -1272,6 +1586,7 @@ async function runStress(evidence, watchdog) {
     exitCode: result.code,
     signal: result.signal,
     abnormal: !report,
+    identityMismatch: correlation.identityMismatch,
     failures,
     canonicalPass: Boolean(prior),
     interactionPass: Boolean(
@@ -1360,6 +1675,9 @@ async function main() {
   };
   let lock;
   let watchdog;
+  const lifecycle = new GateLifecycle(evidence);
+  activeLifecycle = lifecycle;
+  lifecycle.installSignalHandlers();
   let outcome = { decision: "RELEASE_BLOCKED", exitCode: 1 };
   try {
     const pnpmVersion = pnpmInvocation(["--version"]);
@@ -1379,8 +1697,11 @@ async function main() {
 
     lock = new GateLock({ metadata: evidence.git, token });
     evidence.lock = await lock.acquire();
+    lifecycle.attachLock(lock);
     if (parsed.mode !== "manifest-update") {
-      watchdog = new GateWatchdog(evidence);
+      watchdog = new GateWatchdog(evidence, {
+        terminate: () => lifecycle.requestTermination("WATCHDOG"),
+      });
       watchdog.arm();
     }
 
@@ -1408,17 +1729,22 @@ async function main() {
     };
   } finally {
     watchdog?.clear();
-    if (lock) {
-      try {
-        evidence.lockReleased = await lock.release();
-      } catch (error) {
-        evidence.lockReleaseError = serializeError(error);
-        outcome = { decision: "RELEASE_BLOCKED", exitCode: 1 };
-      }
+    try {
+      evidence.lockReleased = await lifecycle.finalize();
+    } catch (error) {
+      evidence.lockReleaseError = serializeError(error);
+      outcome = { decision: "RELEASE_BLOCKED", exitCode: 1 };
+    }
+    if (lifecycle.terminating) {
+      outcome = { decision: "RELEASE_BLOCKED", exitCode: 1 };
     }
     evidence.finishedAt = new Date().toISOString();
     evidence.decision = outcome.decision;
     await writeEvidence(evidencePath, evidence);
+    lifecycle.removeSignalHandlers();
+    if (activeLifecycle === lifecycle) {
+      activeLifecycle = undefined;
+    }
   }
   console.log(
     `WEB_RELEASE_GATE_RESULT ${outcome.decision} evidence=${evidencePath}`,
