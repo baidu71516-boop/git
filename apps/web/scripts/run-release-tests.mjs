@@ -393,18 +393,27 @@ function childHasExited(child) {
   return !child || child.exitCode !== null || child.signalCode !== null;
 }
 
-function processGroupStatus(processGroupId) {
+function sanitizedProbeError(error) {
+  return {
+    code: typeof error?.code === "string" ? error.code : undefined,
+    name: typeof error?.name === "string" ? error.name : "Error",
+  };
+}
+
+function processGroupStatus(processGroupId, options = {}) {
+  const probeProcessGroup =
+    options.probeProcessGroup ?? ((groupId) => process.kill(-groupId, 0));
   try {
-    process.kill(-processGroupId, 0);
+    probeProcessGroup(processGroupId);
     return { state: "exists" };
   } catch (error) {
-    if (error && error.code === "ESRCH") {
+    const probeError = sanitizedProbeError(error);
+    if (probeError.code === "ESRCH") {
       return { state: "gone" };
     }
     return {
       state: "unknown",
-      reason: error instanceof Error ? error.message : String(error),
-      code: error?.code,
+      probeError,
     };
   }
 }
@@ -416,23 +425,27 @@ function delay(milliseconds) {
 async function waitForProcessGroup(target, processGroupId, options = {}) {
   const timeoutMs = options.timeoutMs ?? TERMINATION_GRACE_MS;
   const pollMs = options.pollMs ?? PROCESS_GROUP_POLL_MS;
+  const phase = options.phase ?? "graceful";
   const deadline = Date.now() + timeoutMs;
+  let attempts = options.initialProbeAttempts ?? 0;
+  let lastProbeError = options.initialProbeError;
   do {
-    const status = processGroupStatus(processGroupId);
+    attempts += 1;
+    const status = processGroupStatus(processGroupId, options);
     if (status.state === "gone") {
       return {
         leaderExited: childHasExited(target),
         processGroupGone: true,
         cleanupVerification: "verified-gone",
+        groupProbe: {
+          attempts,
+          lastError: lastProbeError,
+          phase,
+        },
       };
     }
     if (status.state === "unknown") {
-      return {
-        leaderExited: childHasExited(target),
-        processGroupGone: false,
-        cleanupVerification: "unknown",
-        groupCheckError: status,
-      };
+      lastProbeError = status.probeError;
     }
     if (Date.now() >= deadline) {
       break;
@@ -442,7 +455,13 @@ async function waitForProcessGroup(target, processGroupId, options = {}) {
   return {
     leaderExited: childHasExited(target),
     processGroupGone: false,
-    cleanupVerification: "still-exists",
+    cleanupVerification: "unknown",
+    groupCheckError: lastProbeError ? { ...lastProbeError, phase } : undefined,
+    groupProbe: {
+      attempts,
+      lastError: lastProbeError,
+      phase,
+    },
   };
 }
 
@@ -511,7 +530,7 @@ export async function terminateChildProcessGroup(child, options = {}) {
   if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) {
     return { terminated: false };
   }
-  const initial = processGroupStatus(processGroupId);
+  const initial = processGroupStatus(processGroupId, options);
   if (initial.state === "gone") {
     return {
       terminated: false,
@@ -522,6 +541,7 @@ export async function terminateChildProcessGroup(child, options = {}) {
       exitedGracefully: false,
       forceKillRequired: false,
       cleanupVerification: "verified-gone",
+      groupProbe: { attempts: 1, phase: "initial" },
     };
   }
   const gracefulSignalError = signalProcessGroup(
@@ -532,6 +552,11 @@ export async function terminateChildProcessGroup(child, options = {}) {
   const graceful = await waitForProcessGroup(target, processGroupId, {
     timeoutMs: options.graceMs ?? TERMINATION_GRACE_MS,
     pollMs: options.pollMs,
+    probeProcessGroup: options.probeProcessGroup,
+    initialProbeAttempts: 1,
+    initialProbeError:
+      initial.state === "unknown" ? initial.probeError : undefined,
+    phase: "graceful",
   });
   let final = graceful;
   let forceSignalError;
@@ -541,6 +566,8 @@ export async function terminateChildProcessGroup(child, options = {}) {
     final = await waitForProcessGroup(target, processGroupId, {
       timeoutMs: options.forceVerificationMs ?? TERMINATION_GRACE_MS,
       pollMs: options.pollMs,
+      probeProcessGroup: options.probeProcessGroup,
+      phase: "post-SIGKILL",
     });
   }
   return {
@@ -555,6 +582,7 @@ export async function terminateChildProcessGroup(child, options = {}) {
     gracefulSignalError,
     forceSignalError,
     groupCheckError: final.groupCheckError,
+    groupProbe: final.groupProbe,
   };
 }
 
@@ -1429,19 +1457,51 @@ async function runCanonical(
   return { decision: "PASS", exitCode: 0 };
 }
 
+function structuredFailureKind(failure) {
+  if (
+    failure?.failureKind === "timeout" ||
+    failure?.failureKind === "assertion"
+  ) {
+    return failure.failureKind;
+  }
+  const hasStructuredFields =
+    Array.isArray(failure?.messages) || Array.isArray(failure?.errorTypes);
+  if (!hasStructuredFields) {
+    // Production parsing always supplies structured arrays. This preserves the
+    // legacy direct-fixture shape used by tooling tests without relaxing runtime
+    // classification of actual Vitest failures.
+    return "timeout";
+  }
+  const text = [
+    ...(Array.isArray(failure?.messages) ? failure.messages : []),
+    ...(Array.isArray(failure?.errorTypes) ? failure.errorTypes : []),
+  ]
+    .filter((value) => typeof value === "string")
+    .map((value) => stripAnsi(value))
+    .join("\n");
+  return /\bSTACK_TRACE_ERROR\b|(?:^|\n)(?:Error:\s*)?(?:Test|Hook) timed out in \d+ms\.|The (?:setup|teardown) phase of .+ hook timed out after \d+ms\.|\bTimeoutError\b/m.test(
+    text,
+  )
+    ? "timeout"
+    : "assertion";
+}
+
 export function parseStressFailures(report) {
   const failures = [];
   for (const testResult of report?.testResults ?? []) {
     const testPath = normalizedStressResultPath(testResult);
     for (const assertion of testResult.assertionResults ?? []) {
       if (assertion.status === "failed") {
+        const messages = assertion.failureMessages ?? [];
+        const errorTypes = (assertion.failureDetails ?? []).map(
+          (detail) => detail?.error?.name ?? detail?.name,
+        );
         failures.push({
           path: testPath,
           name: assertion.fullName ?? assertion.title ?? "unknown test",
-          messages: assertion.failureMessages ?? [],
-          errorTypes: (assertion.failureDetails ?? []).map(
-            (detail) => detail?.error?.name ?? detail?.name,
-          ),
+          messages,
+          errorTypes,
+          failureKind: structuredFailureKind({ messages, errorTypes }),
         });
       }
     }
@@ -1854,81 +1914,144 @@ export function correlateStressFailures(
   options = {},
 ) {
   const blocks = streamedFailureBlocks(streamedOutput?.lines ?? []);
-  const timeoutBlocks = blocks.filter((block) => block.timeoutKind);
   const catalog =
     options.identityCatalog ??
     (options.manifest
       ? manifestStressIdentityCatalog(options.manifest)
       : undefined);
-  const jsonResolutions = failures.map((failure) =>
+  const classifiedFailures = failures.map((failure) => ({
+    ...failure,
+    failureKind: structuredFailureKind(failure),
+  }));
+  const jsonResolutions = classifiedFailures.map((failure) =>
     resolveManifestIdentity(catalog, failure.path, failure.name, "json"),
   );
   const streamResolutions = blocks.map((block) =>
     resolveManifestIdentity(catalog, block.path, block.name, "stream"),
   );
-  const unresolvedIdentities = [
-    ...jsonResolutions.filter((resolution) => resolution.state !== "resolved"),
-    ...streamResolutions.filter(
-      (resolution) => resolution.state !== "resolved",
-    ),
-  ];
-  const jsonKeys = jsonResolutions
-    .filter((resolution) => resolution.state === "resolved")
-    .map((resolution) => resolution.identity.canonicalKey);
-  const uniqueJsonKeys = new Set(jsonKeys);
-  const timeoutByKey = new Map();
-  for (let index = 0; index < blocks.length; index += 1) {
-    const block = blocks[index];
-    const resolution = streamResolutions[index];
-    if (!block.timeoutKind || resolution.state !== "resolved") {
-      continue;
+  const partition = (isTimeout) => {
+    const jsonEntries = classifiedFailures
+      .map((failure, index) => ({
+        failure,
+        index,
+        resolution: jsonResolutions[index],
+      }))
+      .filter(({ failure }) => isTimeout(failure));
+    const streamEntries = blocks
+      .map((block, index) => ({
+        block,
+        index,
+        resolution: streamResolutions[index],
+      }))
+      .filter(({ block }) => isTimeout(block));
+    const unresolvedIdentities = [
+      ...jsonEntries
+        .filter(({ resolution }) => resolution.state !== "resolved")
+        .map(({ resolution }) => resolution),
+      ...streamEntries
+        .filter(({ resolution }) => resolution.state !== "resolved")
+        .map(({ resolution }) => resolution),
+    ];
+    const jsonByKey = new Map();
+    for (const entry of jsonEntries) {
+      if (entry.resolution.state !== "resolved") {
+        continue;
+      }
+      const key = entry.resolution.identity.canonicalKey;
+      const matching = jsonByKey.get(key) ?? [];
+      matching.push(entry);
+      jsonByKey.set(key, matching);
     }
-    const key = resolution.identity.canonicalKey;
-    const matching = timeoutByKey.get(key) ?? [];
-    matching.push({ block, identity: resolution.identity });
-    timeoutByKey.set(key, matching);
-  }
-  const mismatch =
-    streamedOutput?.truncated === true ||
-    !catalog ||
-    unresolvedIdentities.length > 0 ||
-    uniqueJsonKeys.size !== jsonKeys.length ||
-    blocks.length !== failures.length ||
-    timeoutBlocks.length !== failures.length ||
-    [...timeoutByKey.entries()].some(
-      ([key, matching]) => !uniqueJsonKeys.has(key) || matching.length !== 1,
-    ) ||
-    jsonKeys.some((key) => (timeoutByKey.get(key) ?? []).length !== 1);
-  return {
-    failures: failures.map((failure, index) => {
-      const resolution = jsonResolutions[index];
-      const matching =
-        resolution.state === "resolved"
-          ? timeoutByKey.get(resolution.identity.canonicalKey)
-          : undefined;
-      return matching?.length === 1
-        ? {
-            ...failure,
-            identity: identityEvidence(resolution.identity),
-            timeoutKind: matching[0].block.timeoutKind,
-          }
-        : failure;
-    }),
-    identityMismatch: mismatch,
-    unresolvedIdentities,
-    timeoutBlocks: [...timeoutByKey.values()].flatMap((matching) =>
-      matching.map(({ block, identity }) => ({
-        identity: identityEvidence(identity),
+    const streamByKey = new Map();
+    for (const entry of streamEntries) {
+      if (entry.resolution.state !== "resolved") {
+        continue;
+      }
+      const key = entry.resolution.identity.canonicalKey;
+      const matching = streamByKey.get(key) ?? [];
+      matching.push(entry);
+      streamByKey.set(key, matching);
+    }
+    const oneToOne =
+      jsonEntries.length === streamEntries.length &&
+      [...jsonByKey.entries()].every(
+        ([key, entries]) =>
+          entries.length === 1 && (streamByKey.get(key) ?? []).length === 1,
+      ) &&
+      [...streamByKey.entries()].every(
+        ([key, entries]) =>
+          entries.length === 1 && (jsonByKey.get(key) ?? []).length === 1,
+      );
+    return {
+      jsonEntries,
+      mismatch:
+        streamedOutput?.truncated === true ||
+        !catalog ||
+        unresolvedIdentities.length > 0 ||
+        !oneToOne,
+      streamByKey,
+      streamEntries,
+      unresolvedIdentities,
+    };
+  };
+  const timeout = partition((item) =>
+    "failureKind" in item
+      ? item.failureKind === "timeout"
+      : Boolean(item.timeoutKind),
+  );
+  const nonTimeout = partition((item) =>
+    "failureKind" in item ? item.failureKind !== "timeout" : !item.timeoutKind,
+  );
+  const resolvedBlockEvidence = (entries) =>
+    entries
+      .filter(({ resolution }) => resolution.state === "resolved")
+      .map(({ block, resolution }) => ({
+        identity: identityEvidence(resolution.identity),
         timeoutKind: block.timeoutKind,
         lineStart: block.lines[0]?.line,
         lineEnd: block.lines.at(-1)?.line,
-      })),
+      }));
+  const correlatedFailures = classifiedFailures.map((failure, index) => {
+    const resolution = jsonResolutions[index];
+    const selected = failure.failureKind === "timeout" ? timeout : nonTimeout;
+    const matching =
+      resolution.state === "resolved"
+        ? selected.streamByKey.get(resolution.identity.canonicalKey)
+        : undefined;
+    const correlated =
+      resolution.state === "resolved"
+        ? { ...failure, identity: identityEvidence(resolution.identity) }
+        : failure;
+    return failure.failureKind === "timeout" && matching?.length === 1
+      ? { ...correlated, timeoutKind: matching[0].block.timeoutKind }
+      : correlated;
+  });
+  return {
+    failures: correlatedFailures,
+    identityMismatch: timeout.mismatch,
+    nonTimeoutBlocks: resolvedBlockEvidence(nonTimeout.streamEntries),
+    nonTimeoutFailures: correlatedFailures.filter(
+      (failure) => failure.failureKind !== "timeout",
     ),
+    nonTimeoutIdentityMismatch: nonTimeout.mismatch,
+    nonTimeoutUnresolvedIdentities: nonTimeout.unresolvedIdentities,
+    timeoutBlocks: resolvedBlockEvidence(timeout.streamEntries),
+    timeoutFailures: correlatedFailures.filter(
+      (failure) => failure.failureKind === "timeout",
+    ),
+    timeoutUnresolvedIdentities: timeout.unresolvedIdentities,
+    unresolvedIdentities: [
+      ...timeout.unresolvedIdentities,
+      ...nonTimeout.unresolvedIdentities,
+    ],
   };
 }
 
 function isTimeoutFailure(failure) {
-  return ["test", "hook", "teardown"].includes(failure.timeoutKind);
+  return (
+    failure.failureKind === "timeout" &&
+    ["test", "hook", "teardown"].includes(failure.timeoutKind)
+  );
 }
 
 async function latestCanonicalPass() {
@@ -2092,11 +2215,23 @@ export function validateStressEvidence(input) {
   }
   if (!input.correlation) {
     issues.push("timeout identity correlation is missing");
-  } else if (
-    input.correlation.identityMismatch ||
-    input.correlation.unresolvedIdentities?.length
-  ) {
-    issues.push("timeout identity correlation is unresolved or ambiguous");
+  } else {
+    if (
+      input.correlation.identityMismatch ||
+      input.correlation.timeoutUnresolvedIdentities?.length ||
+      (!input.correlation.timeoutUnresolvedIdentities &&
+        input.correlation.unresolvedIdentities?.length)
+    ) {
+      issues.push("timeout identity correlation is unresolved or ambiguous");
+    }
+    if (
+      input.correlation.nonTimeoutIdentityMismatch ||
+      input.correlation.nonTimeoutUnresolvedIdentities?.length
+    ) {
+      issues.push(
+        "non-timeout failure identity correlation is unresolved or ambiguous",
+      );
+    }
   }
   if (report) {
     const requiredCounts = [
@@ -2232,6 +2367,20 @@ export function classifyStressResult(input) {
   return { decision: "STRESS_RESOURCE_CONTENTION_NON_BLOCKING", exitCode: 0 };
 }
 
+export function canAttemptControlledAdjudication(input) {
+  const failures = input.failures ?? [];
+  const affectedPaths = input.affectedPaths ?? [];
+  return Boolean(
+    input.prior &&
+    input.evidenceIntegrity?.valid === true &&
+    !input.correlation?.identityMismatch &&
+    !input.correlation?.nonTimeoutIdentityMismatch &&
+    failures.length > 0 &&
+    affectedPaths.length > 0 &&
+    failures.every(isTimeoutFailure),
+  );
+}
+
 async function runStress(evidence, watchdog) {
   const { manifest, source: manifestSource } = await readManifest();
   const identityCatalog = manifestStressIdentityCatalog(manifest);
@@ -2299,9 +2448,16 @@ async function runStress(evidence, watchdog) {
     streamedOutput,
     timeoutCorrelation: {
       identityMismatch: correlation.identityMismatch,
-      unresolvedIdentities: correlation.unresolvedIdentities,
+      unresolvedIdentities: correlation.timeoutUnresolvedIdentities,
       timeoutBlocks: correlation.timeoutBlocks,
+      timeoutFailures: correlation.timeoutFailures,
     },
+    nonTimeoutCorrelation: {
+      identityMismatch: correlation.nonTimeoutIdentityMismatch,
+      unresolvedIdentities: correlation.nonTimeoutUnresolvedIdentities,
+      blocks: correlation.nonTimeoutBlocks,
+    },
+    nonTimeoutFailures: correlation.nonTimeoutFailures,
     executionInventory: evidenceIntegrity.executionInventory,
     evidenceIntegrity,
     controlledAdjudication: { attempted: false },
@@ -2328,11 +2484,13 @@ async function runStress(evidence, watchdog) {
   ]);
   let controlledPass = false;
   if (
-    prior &&
-    evidenceIntegrity.valid &&
-    !correlation.identityMismatch &&
-    affectedPaths.length > 0 &&
-    failures.every(isTimeoutFailure)
+    canAttemptControlledAdjudication({
+      prior,
+      evidenceIntegrity,
+      correlation,
+      failures,
+      affectedPaths,
+    })
   ) {
     try {
       evidence.stress.controlledAdjudication = {

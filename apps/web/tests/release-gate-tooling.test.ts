@@ -99,10 +99,49 @@ const ADAPTED_RETAINED_VITEST_4_1_10_SUCCESS_FIXTURE = {
   numTotalTestSuites: 2,
 } as const;
 
+const ADAPTED_REAL_V3_MIXED_OUTPUT_FIXTURE = {
+  label: "adapted real V3 mixed-output fixture",
+  failures: [
+    {
+      failureKind: "timeout",
+      jsonFullName:
+        "AuthShell lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
+      path: "apps/web/tests/auth-shell.test.tsx",
+      streamedHierarchy:
+        "AuthShell > lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
+    },
+    {
+      failureKind: "timeout",
+      jsonFullName:
+        "Bulk unified preview review presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+      path: "apps/web/tests/bulk-preview-workflow.test.tsx",
+      streamedHierarchy:
+        "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+    },
+    {
+      failureKind: "assertion",
+      jsonFullName:
+        "AuthShell keeps Campaign reading available without a selected Operator",
+      path: "apps/web/tests/auth-shell.test.tsx",
+      streamedHierarchy:
+        "AuthShell > keeps Campaign reading available without a selected Operator",
+    },
+    {
+      failureKind: "assertion",
+      jsonFullName:
+        "release gate deterministic tooling verifies a simple POSIX process group exits gracefully",
+      path: "apps/web/tests/release-gate-tooling.test.ts",
+      streamedHierarchy:
+        "release gate deterministic tooling > verifies a simple POSIX process group exits gracefully",
+    },
+  ],
+} as const;
+
 type StressFailure = {
   path: string;
   name: string;
   messages?: string[];
+  failureKind?: "timeout" | "assertion";
 };
 
 type StreamFailure = {
@@ -212,8 +251,13 @@ function completeArtifact(pathname: string) {
   };
 }
 
+type StressManifest = {
+  schemaVersion: number;
+  files: Array<{ path: string; tests: string[] }>;
+};
+
 function vitest410Report(
-  manifest: ReturnType<typeof stressManifest>,
+  manifest: StressManifest,
   options: {
     failures?: StressFailure[];
     numTotalTestSuites?: number;
@@ -223,6 +267,12 @@ function vitest410Report(
     (options.failures ?? []).map(
       (failure) => `${failure.path}\u0000${failure.name}`,
     ),
+  );
+  const failureMessagesByKey = new Map(
+    (options.failures ?? []).map((failure) => [
+      `${failure.path}\u0000${failure.name}`,
+      failure.messages ?? ["STACK_TRACE_ERROR"],
+    ]),
   );
   const catalog = runner.manifestStressIdentityCatalog(manifest);
   const assertionsByPath = new Map<string, Array<Record<string, unknown>>>();
@@ -234,7 +284,11 @@ function vitest410Report(
     assertions.push({
       status: failed ? "failed" : "passed",
       fullName: identity.jsonProjection,
-      failureMessages: failed ? ["STACK_TRACE_ERROR"] : [],
+      failureMessages: failed
+        ? (failureMessagesByKey.get(
+            `${identity.path}\u0000${identity.jsonProjection}`,
+          ) ?? ["STACK_TRACE_ERROR"])
+        : [],
     });
     assertionsByPath.set(identity.path, assertions);
   }
@@ -463,6 +517,7 @@ describe("release gate deterministic tooling", () => {
         path: fixture.path,
         name: fixture.jsonFullName,
         messages: ["STACK_TRACE_ERROR"],
+        failureKind: "timeout",
       }),
     ]);
 
@@ -651,7 +706,7 @@ describe("release gate deterministic tooling", () => {
     ).toBe(true);
   });
 
-  it("fails closed for assertion, mixed, abnormal, and controlled PASS after assertion", () => {
+  it("fails closed for assertion, mixed, abnormal, and controlled PASS after assertion", async () => {
     const manifest = stressManifest();
     const timeout = {
       path: "apps/web/tests/bulk-preview-workflow.test.tsx",
@@ -661,7 +716,7 @@ describe("release gate deterministic tooling", () => {
     const assertion = {
       path: "apps/web/tests/influencer-preview.test.tsx",
       name: "development influencer visual preview opens and closes preview drawer from local preview table interactions",
-      messages: ["STACK_TRACE_ERROR"],
+      messages: ["AssertionError: expected true to be false"],
     };
     const assertionStream = new runner.StreamedVitestOutputCapture();
     assertionStream.write(
@@ -682,6 +737,133 @@ describe("release gate deterministic tooling", () => {
         manifest,
       ).classification,
     ).toMatchObject({ decision: "RELEASE_BLOCKED" });
+
+    const fixture = ADAPTED_REAL_V3_MIXED_OUTPUT_FIXTURE;
+    expect(fixture.label).toBe("adapted real V3 mixed-output fixture");
+    const committedManifest = JSON.parse(
+      await readFile(
+        path.join(process.cwd(), "tests/release-test-manifest.json"),
+        "utf8",
+      ),
+    ) as StressManifest;
+    const fixtureTestsByPath = new Map<string, string[]>();
+    for (const failure of fixture.failures) {
+      const committedFile = committedManifest.files.find(
+        (file) => file.path === failure.path,
+      );
+      expect(committedFile?.tests).toContain(failure.streamedHierarchy);
+      const tests = fixtureTestsByPath.get(failure.path) ?? [];
+      tests.push(failure.streamedHierarchy);
+      fixtureTestsByPath.set(failure.path, tests);
+    }
+    const fixtureManifest: StressManifest = {
+      schemaVersion: committedManifest.schemaVersion,
+      files: [...fixtureTestsByPath.entries()].map(([path, tests]) => ({
+        path,
+        tests,
+      })),
+    };
+    const assertionsByPath = new Map<string, Array<Record<string, unknown>>>();
+    for (const failure of fixture.failures) {
+      const assertions = assertionsByPath.get(failure.path) ?? [];
+      assertions.push({
+        status: "failed",
+        fullName: failure.jsonFullName,
+        failureMessages:
+          failure.failureKind === "timeout"
+            ? ["Error: STACK_TRACE_ERROR\n    at adapted fixture"]
+            : ["AssertionError: adapted real V3 assertion block"],
+      });
+      assertionsByPath.set(failure.path, assertions);
+    }
+    const parsedMixedFailures = runner.parseStressFailures({
+      testResults: [...assertionsByPath.entries()].map(
+        ([pathname, assertionResults]) => ({
+          name: pathname.replace(/^apps\/web\//, ""),
+          assertionResults,
+        }),
+      ),
+    });
+    expect(
+      parsedMixedFailures.map((failure: StressFailure) => failure.failureKind),
+    ).toEqual(["timeout", "assertion", "timeout", "assertion"]);
+
+    const mixedCapture = new runner.StreamedVitestOutputCapture();
+    for (const failure of fixture.failures) {
+      mixedCapture.write(
+        "stderr",
+        ` FAIL  ${failure.path} > ${failure.streamedHierarchy}\n`,
+      );
+      mixedCapture.write(
+        "stderr",
+        failure.failureKind === "timeout"
+          ? 'Error: Test timed out in 5000ms.\nIf this is a long-running test, pass a timeout value as the last argument or configure it globally with "testTimeout".\n'
+          : "AssertionError: adapted real V3 assertion block\n",
+      );
+    }
+    mixedCapture.finish();
+    const mixedStream = mixedCapture.evidence();
+    const mixedCorrelation = runner.correlateStressFailures(
+      parsedMixedFailures,
+      mixedStream,
+      { manifest: fixtureManifest },
+    );
+    const mixedEvidenceIntegrity = runner.validateStressEvidence({
+      result: { code: 1 },
+      report: vitest410Report(fixtureManifest, {
+        failures: parsedMixedFailures,
+      }),
+      rawVitestJson: completeArtifact("mixed.json"),
+      rawStream: completeArtifact("mixed.stream"),
+      streamedOutput: mixedStream,
+      correlation: mixedCorrelation,
+      failures: mixedCorrelation.failures,
+      identityCatalog: runner.manifestStressIdentityCatalog(fixtureManifest),
+    });
+    const mixedClassification = runner.classifyStressResult({
+      exitCode: 1,
+      failures: mixedCorrelation.failures,
+      identityMismatch: mixedCorrelation.identityMismatch,
+      evidenceIntegrity: mixedEvidenceIntegrity,
+      canonicalPass: true,
+      interactionPass: true,
+      controlledPass: true,
+    });
+    expect(mixedCorrelation).toMatchObject({
+      identityMismatch: false,
+      nonTimeoutIdentityMismatch: false,
+      timeoutFailures: [
+        expect.objectContaining({
+          failureKind: "timeout",
+          timeoutKind: "test",
+        }),
+        expect.objectContaining({
+          failureKind: "timeout",
+          timeoutKind: "test",
+        }),
+      ],
+      nonTimeoutFailures: [
+        expect.objectContaining({ failureKind: "assertion" }),
+        expect.objectContaining({ failureKind: "assertion" }),
+      ],
+    });
+    expect(mixedCorrelation.timeoutBlocks).toHaveLength(2);
+    expect(mixedCorrelation.nonTimeoutBlocks).toHaveLength(2);
+    expect(mixedEvidenceIntegrity).toMatchObject({ valid: true });
+    expect(mixedClassification).toMatchObject({
+      decision: "RELEASE_BLOCKED",
+      reason: "stress assertion failure",
+    });
+    expect(
+      runner.canAttemptControlledAdjudication({
+        prior: { path: "prior-canonical.json" },
+        evidenceIntegrity: mixedEvidenceIntegrity,
+        correlation: mixedCorrelation,
+        failures: mixedCorrelation.failures,
+        affectedPaths: fixtureManifest.files.map((file) => file.path),
+      }),
+    ).toBe(false);
+
     expect(
       runner.classifyStressResult({
         exitCode: -1,
@@ -1335,6 +1517,68 @@ describe("release gate deterministic tooling", () => {
         lockReleaseDeferred: true,
       },
     });
+
+    if (process.platform === "win32") {
+      return;
+    }
+    const persistentUnknownLeader = spawn(
+      process.execPath,
+      [
+        "-e",
+        'process.on("SIGTERM", () => process.exit(0)); console.log("ready"); setInterval(() => {}, 1000)',
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let persistentProbeAttempts = 0;
+    try {
+      await once(persistentUnknownLeader.stdout!, "data");
+      const cleanup = await runner.terminateChildProcessGroup(
+        persistentUnknownLeader,
+        {
+          graceMs: 50,
+          forceVerificationMs: 50,
+          pollMs: 5,
+          probeProcessGroup: () => {
+            persistentProbeAttempts += 1;
+            throw Object.assign(
+              new Error("redacted persistent probe failure"),
+              {
+                code: "EPERM",
+              },
+            );
+          },
+        },
+      );
+      expect(cleanup).toMatchObject({
+        processGroupGone: false,
+        exitedGracefully: false,
+        forceKillRequired: true,
+        cleanupVerification: "unknown",
+        groupCheckError: {
+          code: "EPERM",
+          name: "Error",
+          phase: "post-SIGKILL",
+        },
+        groupProbe: {
+          lastError: { code: "EPERM", name: "Error" },
+          phase: "post-SIGKILL",
+        },
+      });
+      expect(cleanup.groupProbe.attempts).toBeGreaterThan(1);
+      expect(persistentProbeAttempts).toBeGreaterThan(2);
+      await waitForPidGone(persistentUnknownLeader.pid!);
+    } finally {
+      if (
+        persistentUnknownLeader.pid &&
+        pidIsAlive(persistentUnknownLeader.pid)
+      ) {
+        try {
+          process.kill(-persistentUnknownLeader.pid, "SIGKILL");
+        } catch {
+          // The process group may already have disappeared between checks.
+        }
+      }
+    }
   });
 
   it("uses a real OS signal to terminate a disposable child process group", async () => {
@@ -1472,6 +1716,54 @@ describe("release gate deterministic tooling", () => {
       if (leader.pid && pidIsAlive(leader.pid)) {
         try {
           process.kill(-leader.pid, "SIGKILL");
+        } catch {
+          // The process group may already have disappeared between checks.
+        }
+      }
+    }
+
+    const transientLeader = spawn(
+      process.execPath,
+      [
+        "-e",
+        'process.on("SIGTERM", () => process.exit(0)); console.log("ready"); setInterval(() => {}, 1000)',
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let transientProbeAttempts = 0;
+    try {
+      await once(transientLeader.stdout!, "data");
+      const cleanup = await runner.terminateChildProcessGroup(transientLeader, {
+        graceMs: 250,
+        forceVerificationMs: 250,
+        pollMs: 10,
+        probeProcessGroup: (processGroupId: number) => {
+          transientProbeAttempts += 1;
+          if (transientProbeAttempts === 1) {
+            throw Object.assign(new Error("redacted transient probe failure"), {
+              code: "EAGAIN",
+              name: "TransientProbeError",
+            });
+          }
+          process.kill(-processGroupId, 0);
+        },
+      });
+      expect(cleanup).toMatchObject({
+        processGroupGone: true,
+        exitedGracefully: true,
+        forceKillRequired: false,
+        cleanupVerification: "verified-gone",
+        groupProbe: {
+          lastError: { code: "EAGAIN", name: "TransientProbeError" },
+          phase: "graceful",
+        },
+      });
+      expect(cleanup.groupProbe.attempts).toBeGreaterThan(1);
+      await waitForPidGone(transientLeader.pid!);
+    } finally {
+      if (transientLeader.pid && pidIsAlive(transientLeader.pid)) {
+        try {
+          process.kill(-transientLeader.pid, "SIGKILL");
         } catch {
           // The process group may already have disappeared between checks.
         }
