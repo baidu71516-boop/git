@@ -200,6 +200,13 @@
       ]
     },
     {
+      "path": "apps/web/tests/candidate-long-inactivity-wording.test.ts",
+      "tests": [
+        "Grey Dolphin Long Inactivity wording > does not convert recent aggregate evidence into a generic account update claim",
+        "Grey Dolphin Long Inactivity wording > labels the aggregate as coarse note-publication evidence"
+      ]
+    },
+    {
       "path": "apps/web/tests/candidate-pool-api.test.ts",
       "tests": [
         "Candidate Pool API > encodes route identifiers without exposing any additional endpoint",
@@ -371,7 +378,9 @@
         "InfluencerDetailWorkspace > keeps total and recovery pagination when an over-page response is empty",
         "InfluencerDetailWorkspace > renders an unassigned Owner and missing fields without inventing values",
         "InfluencerDetailWorkspace > renders frozen detail sections with exact values and safe provenance",
+        "InfluencerDetailWorkspace > renders unknown activity fail-closed without raw provider detail",
         "InfluencerDetailWorkspace > reuses the protected detail view inside a canonical URL drawer",
+        "InfluencerDetailWorkspace > shows trusted result and coverage after a later provider failure",
         "influencer value formatters > preserves frozen null, empty string, zero, and false semantics"
       ]
     },
@@ -386,6 +395,7 @@
         "influencer list formatters > formats metrics timestamps in the business timezone",
         "influencer list formatters > keeps an exact follower value for tooltips",
         "influencer list formatters > keeps both backend-defined unknown semantics as explanations",
+        "influencer list formatters > keeps trusted, no-public, and uncertain Content Activity states distinct",
         "influencer list formatters > maps backend freshness status aging",
         "influencer list formatters > maps backend freshness status fresh",
         "influencer list formatters > maps backend freshness status stale",
@@ -403,10 +413,12 @@
         "InfluencerWorkspace > keeps list browsing available when filter options fail",
         "InfluencerWorkspace > renders one influencer row with multiple accounts and exact API values",
         "InfluencerWorkspace > renders the 7-day activity filter",
+        "InfluencerWorkspace > renders trusted Content Activity only for one unambiguous XHS account",
         "InfluencerWorkspace > restores URL filters and resets the page for search and filters",
         "InfluencerWorkspace > shows empty account, metric, tag, and contact collections as missing",
         "InfluencerWorkspace > shows independent loading, list error retry, and empty states",
         "InfluencerWorkspace > syncs contact and 60-day activity filters to the URL and resets pagination",
+        "InfluencerWorkspace > syncs the strict Content Activity filter to the URL and resets pagination",
         "InfluencerWorkspace > uses API tag, owner, and CRM options and disables overlong tags",
         "InfluencerWorkspace > validates follower ranges locally and supports clearing filters",
         "InfluencerWorkspace > writes backend freshness filters to URL without adding a sort",
