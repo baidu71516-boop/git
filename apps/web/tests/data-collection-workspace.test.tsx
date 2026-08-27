@@ -18,6 +18,8 @@ import type {
   ImportJobPublic,
 } from "@/features/imports/types";
 
+const bulkFileTableMode = vi.hoisted(() => ({ compact: false }));
+
 const navigation = vi.hoisted(() => ({
   pathname: "/",
   search: "",
@@ -56,6 +58,35 @@ vi.mock("next/navigation", async () => {
     },
   };
 });
+
+vi.mock(
+  "@/features/imports/components/bulk-file-table",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/features/imports/components/bulk-file-table")
+      >();
+    return {
+      ...actual,
+      BulkFileTable: (props: {
+        files: Array<{ id: string; original_filename: string }>;
+      }) =>
+        bulkFileTableMode.compact ? (
+          <table aria-label="批量文件">
+            <tbody>
+              {props.files.map((file) => (
+                <tr key={file.id}>
+                  <td>{file.original_filename}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          actual.BulkFileTable(props as never)
+        ),
+    };
+  },
+);
 
 vi.mock("@/components/import-workspace", () => ({
   ImportWorkspace: () => {
@@ -206,6 +237,9 @@ function apiError(status: number, code: string): Response {
   );
 }
 
+const queryClients: QueryClient[] = [];
+const renderedWorkspaces: ReturnType<typeof render>[] = [];
+
 function renderWorkspace(role: "operator" | "viewer" = "operator") {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -213,12 +247,23 @@ function renderWorkspace(role: "operator" | "viewer" = "operator") {
       mutations: { retry: false },
     },
   });
+  queryClients.push(queryClient);
   const result = render(
     <QueryClientProvider client={queryClient}>
       <DataCollectionWorkspace role={role} />
     </QueryClientProvider>,
   );
+  renderedWorkspaces.push(result);
   return { ...result, queryClient };
+}
+
+async function bulkJobSummary(container: HTMLElement) {
+  await waitFor(() =>
+    expect(container.querySelector(".bulk-job-summary")).not.toBeNull(),
+  );
+  const summary = container.querySelector<HTMLElement>(".bulk-job-summary");
+  if (!summary) throw new Error("Bulk job summary was not rendered");
+  return summary;
 }
 
 function apiRouter(job: ImportJobPublic, files: ImportJobFilePublic[]) {
@@ -239,17 +284,33 @@ function countRequests(fetchSpy: ReturnType<typeof apiRouter>, suffix: string) {
 }
 
 beforeEach(() => {
+  bulkFileTableMode.compact = false;
   navigation.pathname = "/";
   navigation.search = "";
   navigation.replaceCalls.length = 0;
   navigation.pushCalls.length = 0;
 });
 
-afterEach(() => {
-  cleanup();
-  navigation.listeners.clear();
-  vi.useRealTimers();
-  vi.restoreAllMocks();
+afterEach(async () => {
+  try {
+    for (const view of renderedWorkspaces.splice(0).reverse()) view.unmount();
+    cleanup();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const clients = queryClients.splice(0);
+    await Promise.all(clients.map((client) => client.cancelQueries()));
+    for (const client of clients) {
+      expect(client.isFetching()).toBe(0);
+      expect(client.isMutating()).toBe(0);
+      client.clear();
+    }
+  } finally {
+    bulkFileTableMode.compact = false;
+    navigation.listeners.clear();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  }
 });
 
 describe("DataCollectionWorkspace", () => {
@@ -547,6 +608,7 @@ describe("DataCollectionWorkspace", () => {
   });
 
   it("saves the five real rule fields, refetches both jobs, and reuses Backend stale UI without automation", async () => {
+    bulkFileTableMode.compact = true;
     navigation.search = "workspace=bulk&bulk_job_id=job-1";
     let currentJob = makeJob({
       status: "preview_ready",
@@ -587,9 +649,11 @@ describe("DataCollectionWorkspace", () => {
         throw new Error(`Unexpected request: ${url}`);
       });
 
-    renderWorkspace();
+    const view = renderWorkspace();
+    const workspace = within(view.container);
+    const summary = await bulkJobSummary(view.container);
     fireEvent.click(
-      await screen.findByRole("button", { name: "编辑筛选规则" }),
+      within(summary).getByRole("button", { name: "编辑筛选规则" }),
     );
     const dialog = await screen.findByRole("dialog", {
       name: "编辑筛选规则",
@@ -597,7 +661,7 @@ describe("DataCollectionWorkspace", () => {
     expect(
       within(dialog).getByText("保存后，当前数据预览将失效，需要重新生成。"),
     ).toBeInTheDocument();
-    fireEvent.change(within(dialog).getAllByRole("spinbutton")[0], {
+    fireEvent.change(within(dialog).getByPlaceholderText("最低粉丝数"), {
       target: { value: "10000" },
     });
     fireEvent.click(
@@ -623,9 +687,11 @@ describe("DataCollectionWorkspace", () => {
       });
     });
     expect(
-      await screen.findByText("筛选规则已更新，请重新生成数据预览。"),
+      await workspace.findByText("筛选规则已更新，请重新生成数据预览。"),
     ).toBeInTheDocument();
-    expect(await screen.findByText("数据预览需要重新生成")).toBeInTheDocument();
+    expect(
+      await workspace.findByText("数据预览需要重新生成"),
+    ).toBeInTheDocument();
 
     const requestPaths = fetchSpy.mock.calls.map(([input]) => String(input));
     expect(

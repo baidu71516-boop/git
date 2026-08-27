@@ -26,6 +26,46 @@ import type {
 } from "@/features/imports/types";
 import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 
+const bulkPreviewPresentationMode = vi.hoisted(() => ({ compact: false }));
+
+vi.mock(
+  "@/features/imports/components/bulk-preview-table",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/features/imports/components/bulk-preview-table")
+      >();
+    return {
+      ...actual,
+      BulkPreviewTable: (props: { rows: unknown[] }) =>
+        bulkPreviewPresentationMode.compact ? (
+          <section aria-label="数据预览表格">{props.rows.length}</section>
+        ) : (
+          actual.BulkPreviewTable(props as never)
+        ),
+    };
+  },
+);
+
+vi.mock(
+  "@/features/imports/components/bulk-preview-summary",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("@/features/imports/components/bulk-preview-summary")
+      >();
+    return {
+      ...actual,
+      BulkPreviewSummary: (props: unknown) =>
+        bulkPreviewPresentationMode.compact ? (
+          <section aria-label="数据预览摘要" />
+        ) : (
+          actual.BulkPreviewSummary(props as never)
+        ),
+    };
+  },
+);
+
 const collection: CollectionJobPublic = {
   id: "collection-1",
   name: "美妆达人采集",
@@ -567,11 +607,13 @@ function mutationRequests(
 }
 
 beforeEach(() => {
+  bulkPreviewPresentationMode.compact = false;
   document.cookie = "outreach_csrf=test-csrf; path=/";
 });
 
 afterEach(() => {
   cleanup();
+  bulkPreviewPresentationMode.compact = false;
   for (const queryClient of queryClients.splice(0)) queryClient.clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -851,6 +893,7 @@ describe("Bulk Confirm acceptance and recovery", () => {
   ] as const)(
     "accepts HTTP %i dispatch data, closes the explicit Modal, and polls the Job without another Confirm",
     async (responseStatus, idempotent) => {
+      bulkPreviewPresentationMode.compact = true;
       let accepted = false;
       let postConfirmJobReads = 0;
       const fetchSpy = installBulkApi({
@@ -915,6 +958,7 @@ describe("Bulk Confirm acceptance and recovery", () => {
   it.each(["network", "server"] as const)(
     "does not retry an ambiguous %s result, freezes Confirm, and checks the Job with GET",
     async (failureKind) => {
+      bulkPreviewPresentationMode.compact = true;
       let jobReads = 0;
       const fetchSpy = installBulkApi({
         getJob: () => {

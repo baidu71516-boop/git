@@ -36,6 +36,19 @@ const detail = {
   },
 };
 
+async function readBlobText(blob: Blob): Promise<string> {
+  const text = (blob as Blob & { text?: () => Promise<string> }).text;
+  if (typeof text === "function") return text.call(blob);
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Unable to read CSV Blob text"));
+    reader.readAsText(blob);
+  });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   document.cookie = "outreach_csrf=; Max-Age=0; path=/";
@@ -113,8 +126,9 @@ describe("refresh queue API", () => {
 
     const result = await exportRefreshQueue("queue-1");
 
-    expect(result.blob).toBeInstanceOf(Blob);
+    expect(result.blob.type).toBe("text/csv");
     expect(result.blob.size).toBeGreaterThan(0);
+    expect(await readBlobText(result.blob)).toBe("account_name\nfixture");
     expect(result.contentDisposition).toBe(
       'attachment; filename="frozen-queue.csv"',
     );
