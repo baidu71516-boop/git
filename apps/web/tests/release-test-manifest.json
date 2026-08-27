@@ -1,0 +1,552 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "apps/web/tests/api-client.test.ts",
+      "tests": [
+        "apiRequest > lets the browser create the multipart boundary for FormData",
+        "apiRequest > sets JSON content type for JSON mutation bodies",
+        "apiRequest > turns a non-JSON gateway 413 into a stable client error"
+      ]
+    },
+    {
+      "path": "apps/web/tests/app-shell.test.tsx",
+      "tests": [
+        "AppShell > renders the ICP footer on authenticated application pages"
+      ]
+    },
+    {
+      "path": "apps/web/tests/auth-shell.test.tsx",
+      "tests": [
+        "AuthShell > keeps Campaign reading available without a selected Operator",
+        "AuthShell > keeps Operator selection mandatory for Refresh Queue mutations",
+        "AuthShell > keeps Operator selection mandatory for the import workspace",
+        "AuthShell > keeps an existing Viewer Operator on the influencer workspace",
+        "AuthShell > lets a Viewer without an Operator open influencer detail",
+        "AuthShell > lets a Viewer without an Operator read Refresh Queues without write entry points",
+        "AuthShell > lets a Viewer without an Operator read imports while keeping mutations disabled",
+        "AuthShell > lets a Viewer without an Operator read the influencer library",
+        "AuthShell > lets an authenticated manager without an Operator read Import Job history in Backend scope",
+        "AuthShell > lets an authenticated operator without an Operator read Import Job history in Backend scope",
+        "AuthShell > lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
+        "AuthShell > lets an authenticated viewer without an Operator read Import Job history in Backend scope",
+        "AuthShell > logs out from the App Shell and returns to department login",
+        "AuthShell > renders the Department login form for an unauthenticated user"
+      ]
+    },
+    {
+      "path": "apps/web/tests/bulk-import-api.test.ts",
+      "tests": [
+        "Bulk import API contract > centralizes and URL-encodes every resource path",
+        "Bulk import API contract > confirms only the requested revision and accepts new or idempotent dispatch data",
+        "Bulk import API contract > includes source_acquired_at only when explicitly provided",
+        "Bulk import API contract > preserves empty platform/tag arrays and both follower nulls in a rule update",
+        "Bulk import API contract > reads one category page with only category, offset, and limit",
+        "Bulk import API contract > rejects a successful envelope that lacks data",
+        "Bulk import API contract > separates first Preview, stale rebuild, and generic Job retry",
+        "Bulk import API contract > submits refresh_queue_id only when the Bulk Job is created for a Queue return",
+        "Bulk import API contract > uploads one multipart file with exact fields and omits an unset time",
+        "Bulk import API contract > uses exact per-file mutation methods, paths, and bodies",
+        "Bulk import API contract > uses the exact Collection and Bulk create/read requests",
+        "Bulk import API contract > uses the exact screening-rule PUT path and full real-schema body",
+        "Bulk import presentation truth > computes the UX Preview gate from last real File data",
+        "Bulk import presentation truth > distinguishes provisional zero rows from a parsed real zero",
+        "Bulk import presentation truth > formats acquisition time without exposing its origin enum",
+        "Bulk import presentation truth > identifies ambiguous Bulk creation without retrying it",
+        "Bulk import presentation truth > translates every required Job and File state",
+        "Bulk import presentation truth > uses safe file and API error copy instead of raw backend messages",
+        "Bulk query retry and polling policy > disables automatic retry for every Bulk mutation",
+        "Bulk query retry and polling policy > invalidates the Collection Job and current Import Job after a rule save",
+        "Bulk query retry and polling policy > invalidates the Job after Confirm is accepted",
+        "Bulk query retry and polling policy > keeps checking only the unresolved Confirm revision without widening normal polling",
+        "Bulk query retry and polling policy > keys row pages by revision, category, offset, and limit",
+        "Bulk query retry and polling policy > polls only real active Job and File states",
+        "Bulk query retry and polling policy > retries a read at most once, except client errors below 500",
+        "Refresh return cache reconciliation > invalidates Queue detail, all Queue Item pages, and Queue lists"
+      ]
+    },
+    {
+      "path": "apps/web/tests/bulk-import-workspace.test.tsx",
+      "tests": [
+        "BulkImportWorkspace Preview and compatible Job states > keeps Viewer controls read-only and never presents Confirm",
+        "BulkImportWorkspace Preview and compatible Job states > renders completed as a read-only compatibility state with no Bulk Confirm or preview contents",
+        "BulkImportWorkspace Preview and compatible Job states > renders confirm_queued as a read-only compatibility state with no Bulk Confirm or preview contents",
+        "BulkImportWorkspace Preview and compatible Job states > renders importing as a read-only compatibility state with no Bulk Confirm or preview contents",
+        "BulkImportWorkspace Preview and compatible Job states > renders preview_ready as a read-only compatibility state with no Bulk Confirm or preview contents",
+        "BulkImportWorkspace Preview and compatible Job states > treats Preview gates as UX, sends the first request with rebuild false, and safely renders a backend conflict",
+        "BulkImportWorkspace Preview and compatible Job states > uses rebuild true for stale Preview and generic Job Retry for failed state",
+        "BulkImportWorkspace URL recovery > rejects a successfully-read Legacy ID and does not follow it into Bulk files or Collection",
+        "BulkImportWorkspace URL recovery > renders a recoverable formal error for forbidden-job without guessing a Job list",
+        "BulkImportWorkspace URL recovery > renders a recoverable formal error for missing-job without guessing a Job list",
+        "BulkImportWorkspace URL recovery > renders a recoverable formal error for not-a-uuid without guessing a Job list",
+        "BulkImportWorkspace creation hardening > retries only deterministic step two with the retained Collection and selects the created Job",
+        "BulkImportWorkspace creation hardening > shows the frozen safe copy for an ambiguous step-two result and never replays either POST",
+        "BulkImportWorkspace file truth and actions > PATCHes the unchanged server acquisition time to confirm it, then freezes editing after Preview",
+        "BulkImportWorkspace file truth and actions > keeps Bulk mapping state isolated and sends Mapping, File Retry, and Exclude to their exact endpoints",
+        "BulkImportWorkspace file truth and actions > renders every backend state, unknown versus real zero rows, safe issues, and only real actions",
+        "BulkImportWorkspace upload hardening > never exposes or replays Job A's failed upload after the workspace switches to Job B",
+        "BulkImportWorkspace upload hardening > starts at most two uploads, never automatically retries a failure, and keeps its client ID for manual replay"
+      ]
+    },
+    {
+      "path": "apps/web/tests/bulk-preview-presenters.test.ts",
+      "tests": [
+        "Change Summary presentation > never returns Contact values or arbitrary extra Contact fields",
+        "Change Summary presentation > presents the exact four buckets, Chinese fields, and formatted values",
+        "Change Summary presentation > redacts embedded email and phone values a second time",
+        "Change Summary presentation > returns four empty safe buckets for missing or malformed documents",
+        "refresh return presentation mappings > keeps Preview evidence distinct from final Queue status wording",
+        "refresh return presentation mappings > maps every closed Backend reason without exposing raw enums",
+        "row and Issue whitelisting > keeps decimal strings and ISO dates while formatting safe values",
+        "row and Issue whitelisting > reads only a string display_name and safely parses row detail fields",
+        "row and Issue whitelisting > treats missing and malformed nested row data as empty",
+        "row and Issue whitelisting > uses safe employee Issue copy and never forwards dumps or contacts",
+        "screening presentation > drops malformed evidence and rejects a malformed overall result",
+        "screening presentation > returns only safe, readable overall and evidence fields",
+        "unified Preview presentation mappings > maps every backend action to the frozen employee wording",
+        "unified Preview presentation mappings > maps every category without exposing the raw enum",
+        "unified Preview presentation mappings > maps every screening result to Chinese text"
+      ]
+    },
+    {
+      "path": "apps/web/tests/bulk-preview-workflow.test.tsx",
+      "tests": [
+        "Bulk Confirm acceptance and recovery > accepts HTTP 200 dispatch data, closes the explicit Modal, and polls the Job without another Confirm",
+        "Bulk Confirm acceptance and recovery > accepts HTTP 202 dispatch data, closes the explicit Modal, and polls the Job without another Confirm",
+        "Bulk Confirm acceptance and recovery > does not retry an ambiguous network result, freezes Confirm, and checks the Job with GET",
+        "Bulk Confirm acceptance and recovery > does not retry an ambiguous server result, freezes Confirm, and checks the Job with GET",
+        "Bulk Preview and Confirm terminal states > rebuilds a stale Preview with rebuild=true and never sends Confirm",
+        "Bulk Preview and Confirm terminal states > renders the exact completed result separately from the Preview summary",
+        "Bulk Preview and Confirm terminal states > retries a failed Job through the generic retry endpoint",
+        "Bulk Preview and Confirm terminal states > shows only the real confirm_queued state without fabricated progress",
+        "Bulk Preview and Confirm terminal states > shows only the real importing state without fabricated progress",
+        "Bulk unified preview review > lets a Viewer read the same Preview rows but never presents Confirm",
+        "Bulk unified preview review > loads the real summary and category page, resets pagination, and presents the table and four change buckets in Chinese",
+        "Bulk unified preview review > presents linked Queue summary, row evidence, stale/unresolved guidance, and Confirm without blocking",
+        "Bulk unified preview review > shows final return counts only from the refetched Queue detail"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-api.test.ts",
+      "tests": [
+        "Campaign API > constructs lossless full PUT input from a fresh detail baseline",
+        "Campaign API > creates with only user fields and an Idempotency-Key",
+        "Campaign API > uses limit=50 and forwards cursor as an opaque token",
+        "Campaign API > uses one supplied canonical Department scope for list and owner options"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-detail-members-tabs.test.tsx",
+      "tests": [
+        "Campaign Detail member tabs > defaults invalid or missing tab state to 基本信息 without requesting members",
+        "Campaign Detail member tabs > uses ?tab=members and lazily loads the member list"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-formatters.test.ts",
+      "tests": [
+        "Campaign presenters > presents ACTIVE safely",
+        "Campaign presenters > presents CLOSED safely",
+        "Campaign presenters > presents DRAFT safely",
+        "Campaign presenters > presents FUTURE safely",
+        "Campaign presenters > presents PAUSED safely",
+        "Campaign presenters > uses Shanghai time and owner status rather than owner IDs"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-list.test.tsx",
+      "tests": [
+        "Campaign list > keeps Viewer read-only and shows no create affordance",
+        "Campaign list > renders fixed backend order, owner projection, and only the detail action"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-member-table.test.tsx",
+      "tests": [
+        "Campaign member table > keeps Viewer read-only and renders disabled influencers as plain text",
+        "Campaign member table > uses the four frozen columns for writers and preserves account history"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-members-api.test.ts",
+      "tests": [
+        "Campaign member API > direct bulk-add sends only influencer/account pairs and its supplied key",
+        "Campaign member API > removes with the member's exact expected_version",
+        "Campaign member API > uses the frozen active-member list path, limit, and opaque cursor"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-routing.test.tsx",
+      "tests": [
+        "Campaign routing and navigation > mounts the formal routes through AuthShell",
+        "Campaign routing and navigation > places 拓客活动 between 今日触达 and 达人库"
+      ]
+    },
+    {
+      "path": "apps/web/tests/campaign-ui2b-preview.test.tsx",
+      "tests": [
+        "Campaign UI-2B development preview > distinguishes multiple platform accounts in the drawer",
+        "Campaign UI-2B development preview > keeps CLOSED read-only and shows the member conflict modal locally",
+        "Campaign UI-2B development preview > keeps the preview development-only",
+        "Campaign UI-2B development preview > opens the add drawer and preserves selected-only local state",
+        "Campaign UI-2B development preview > renders empty and loading error scenes with the frozen Chinese copy",
+        "Campaign UI-2B development preview > renders the member table with zero network requests"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-campaign-success-feedback.test.tsx",
+      "tests": [
+        "Candidate to Campaign success feedback > keeps real counts and links to the selected Campaign members tab"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-pool-api.test.ts",
+      "tests": [
+        "Candidate Pool API > encodes route identifiers without exposing any additional endpoint",
+        "Candidate Pool API > keeps all cursors opaque and uses the requested bounded member page size",
+        "Candidate Pool API > keeps member pages isolated by one of the four supported page sizes",
+        "Candidate Pool API > keeps the explicit Campaign request body byte-for-byte compatible",
+        "Candidate Pool API > posts the exact empty run body with CSRF and the supplied attempt key",
+        "Candidate Pool API > submits server-resolved ALL_MATCH with only explicit exclusions"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-pool-detail-tabs.test.tsx",
+      "tests": [
+        "Candidate Pool detail tabs > falls back to basic without lazy tab requests for null",
+        "Candidate Pool detail tabs > falls back to basic without lazy tab requests for unexpected",
+        "Candidate Pool detail tabs > maps preview basic tab changes to the existing 规则历史 scene URL",
+        "Candidate Pool detail tabs > maps preview policies tab changes to the existing 生成记录 scene URL",
+        "Candidate Pool detail tabs > maps preview runs tab changes to the existing 基本信息 scene URL",
+        "Candidate Pool detail tabs > navigates from policies to runs exactly once",
+        "Candidate Pool detail tabs > navigates once for a different tab and ignores the current tab",
+        "Candidate Pool detail tabs > renders policies once and only loads its lazy query",
+        "Candidate Pool detail tabs > renders runs once and only loads its lazy query"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-pool-formatters.test.ts",
+      "tests": [
+        "Candidate Pool presenters > covers all frozen reason codes and treats CATEGORY_MISMATCH as a reason, not a result",
+        "Candidate Pool presenters > keeps MATCH and UNKNOWN distinct and never maps a future value to NOT_MATCH",
+        "Candidate Pool presenters > presents pool kind FUTURE safely",
+        "Candidate Pool presenters > presents pool kind POTENTIAL_BUYER safely",
+        "Candidate Pool presenters > presents pool kind POTENTIAL_SELLER safely",
+        "Candidate Pool presenters > presents pool status ACTIVE safely",
+        "Candidate Pool presenters > presents pool status ARCHIVED safely",
+        "Candidate Pool presenters > presents pool status FUTURE safely",
+        "Candidate Pool presenters > presents run status COMPLETED safely",
+        "Candidate Pool presenters > presents run status FAILED safely",
+        "Candidate Pool presenters > presents run status FUTURE safely",
+        "Candidate Pool presenters > presents run status PENDING safely",
+        "Candidate Pool presenters > presents run status RUNNING safely",
+        "Candidate Pool presenters > uses an allowlisted failed-run presenter"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-pool-preview.test.ts",
+      "tests": [
+        "Candidate Pool visual preview > is development-only and returns notFound in production",
+        "Candidate Pool visual preview > keeps preview fixtures within the approved platform and typed policy contracts"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-run-detail-selection.test.tsx",
+      "tests": [
+        "Candidate Run bulk selection > does not let a late not-found failure close or clear a new run selection",
+        "Candidate Run bulk selection > does not let a late success close or clear a new run selection",
+        "Candidate Run bulk selection > does not let a stale next-page completion overwrite a new result tab",
+        "Candidate Run bulk selection > gives same-influencer platform accounts distinct accessible selection names",
+        "Candidate Run bulk selection > keeps ALL_MATCH selected and identifies both accounts after an ambiguity error",
+        "Candidate Run bulk selection > keeps the rendered selection lifecycle scoped across A-B-A",
+        "Candidate Run bulk selection > preserves a cross-page selection through a page-size change"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-selection.test.ts",
+      "tests": [
+        "Candidate Pool selection domain > does not let an old A completion affect a fresh A selection after A-B-A",
+        "Candidate Pool selection domain > ignores delayed scoped clears after the user has changed runs",
+        "Candidate Pool selection domain > keeps both selection modes inside the 10,000-ID request bound",
+        "Candidate Pool selection domain > models ALL_MATCH as count minus exclusions without browser UUID enumeration",
+        "Candidate Pool selection domain > models current-page checkbox states without selecting NOT_MATCH",
+        "Candidate Pool selection domain > never auto-selects multiple platform accounts for one influencer in explicit mode",
+        "Candidate Pool selection domain > preserves explicit cross-page selections across result tabs and page sizes",
+        "Candidate Pool selection domain > rejects a row from another run without disturbing the scoped selection",
+        "Candidate Pool selection domain > resets on a different Candidate Pool run and clear-all returns to empty explicit mode"
+      ]
+    },
+    {
+      "path": "apps/web/tests/compliance-footer.test.tsx",
+      "tests": [
+        "ComplianceFooter > renders the ICP record as a safe external link"
+      ]
+    },
+    {
+      "path": "apps/web/tests/data-collection-preview.test.tsx",
+      "tests": [
+        "development data collection visual preview > covers refresh return Preview, stale/unresolved Drawer, Confirm, and completed result in memory",
+        "development data collection visual preview > handles local category, pagination, and row Drawer interactions",
+        "development data collection visual preview > opens and completes the local confirm Modal without submitting a request",
+        "development data collection visual preview > returns notFound outside development",
+        "development data collection visual preview > reuses formal stale, failed, Task 6, and completed result states",
+        "development data collection visual preview > uses typed in-memory Preview fixtures with zero Auth, API, or DB requests"
+      ]
+    },
+    {
+      "path": "apps/web/tests/data-collection-workspace.test.tsx",
+      "tests": [
+        "DataCollectionWorkspace > allows exiting Queue return mode before a Bulk Job exists",
+        "DataCollectionWorkspace > carries Queue context in the URL and binds it exactly once when creating the Bulk Job",
+        "DataCollectionWorkspace > defaults to Legacy, syncs Tabs to the URL, and preserves both mounted panes without storage or a Job list",
+        "DataCollectionWorkspace > does not poll an idle Bulk pane after it is hidden",
+        "DataCollectionWorkspace > keeps polling only genuine parsing files while a draft Bulk pane is hidden",
+        "DataCollectionWorkspace > keeps polling only the genuine active Job while the Bulk pane is hidden",
+        "DataCollectionWorkspace > lets a Viewer inspect all real screening fields without exposing a save action",
+        "DataCollectionWorkspace > recovers only the URL Job, retains its ID across Tab changes, and never calls a list endpoint",
+        "DataCollectionWorkspace > saves the five real rule fields, refetches both jobs, and reuses Backend stale UI without automation",
+        "DataCollectionWorkspace > shows a revision conflict and reloads latest rules without retrying or overwriting",
+        "DataCollectionWorkspace > writes the real Bulk Job ID to the URL only after both creation steps succeed"
+      ]
+    },
+    {
+      "path": "apps/web/tests/import-job-history-api.test.ts",
+      "tests": [
+        "Import Job history API contract > uses the exact GET list query with fixed caller-provided pagination",
+        "Import Job history API contract > uses the read-only detail GET path with an encoded Job id"
+      ]
+    },
+    {
+      "path": "apps/web/tests/import-job-history-presenters.test.ts",
+      "tests": [
+        "Import Job history presenters > maps only the two Backend source types",
+        "Import Job history presenters > never presents preview counters as a non-final result",
+        "Import Job history presenters > presents the persisted completed result without recomputing it",
+        "Import Job history presenters > reuses the UI-4 presenter for all 12 Job status translations"
+      ]
+    },
+    {
+      "path": "apps/web/tests/import-job-history.test.tsx",
+      "tests": [
+        "Import Job history > renders the exact read-only table and only persisted completed results",
+        "Import Job history > restores offset from the URL and pages on the server with limit 50",
+        "Import Job history > shows persisted Backend error information in the read-only Drawer",
+        "Import Job history > shows the required GET error state and can reload",
+        "Import Job history > shows the required empty state and data collection link",
+        "Import Job history > shows the required table Skeleton while the GET is pending"
+      ]
+    },
+    {
+      "path": "apps/web/tests/import-workspace.test.tsx",
+      "tests": [
+        "ImportFieldMappingEditor > emits mapping changes without owning an API request or workflow state",
+        "ImportWorkspace > cancels a cancellable Legacy job through the current endpoint",
+        "ImportWorkspace > confirms the current Legacy preview revision",
+        "ImportWorkspace > creates a collection with the current Legacy contract",
+        "ImportWorkspace > keeps Viewer imports read-only and never parses files in the browser",
+        "ImportWorkspace > keeps the shared Mapping Editor presentational and submits through Legacy state",
+        "ImportWorkspace > never renders a raw Legacy API error message",
+        "ImportWorkspace > polls only while a Legacy task has a real active status",
+        "ImportWorkspace > regenerates a stale Legacy preview through its real endpoint",
+        "ImportWorkspace > shows file metadata, invalid-email totals, and expandable row details",
+        "ImportWorkspace > shows safe Chinese failure handling, no Legacy Retry, and allows a new upload",
+        "ImportWorkspace > uploads one file with FormData and preserves the Legacy request order"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-api.test.ts",
+      "tests": [
+        "influencer detail API > converts the detail 404 envelope without treating it as empty data",
+        "influencer detail API > requests detail and independently paginated snapshots with the Session cookie",
+        "influencer list API > encodes only frozen, non-empty query parameters",
+        "influencer list API > omits blank values and converts an API error envelope"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-detail.test.tsx",
+      "tests": [
+        "InfluencerDetailWorkspace > keeps detail errors, 404, and retry behavior distinct",
+        "InfluencerDetailWorkspace > keeps drawer errors in Chinese and closes with browser history",
+        "InfluencerDetailWorkspace > keeps snapshot loading and errors independent from readable detail",
+        "InfluencerDetailWorkspace > keeps total and recovery pagination when an over-page response is empty",
+        "InfluencerDetailWorkspace > renders an unassigned Owner and missing fields without inventing values",
+        "InfluencerDetailWorkspace > renders frozen detail sections with exact values and safe provenance",
+        "InfluencerDetailWorkspace > reuses the protected detail view inside a canonical URL drawer",
+        "influencer value formatters > preserves frozen null, empty string, zero, and false semantics"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-formatters.test.ts",
+      "tests": [
+        "influencer list formatters > formats follower value 0",
+        "influencer list formatters > formats follower value 10000",
+        "influencer list formatters > formats follower value 206572",
+        "influencer list formatters > formats follower value 9999",
+        "influencer list formatters > formats follower value null",
+        "influencer list formatters > formats metrics timestamps in the business timezone",
+        "influencer list formatters > keeps an exact follower value for tooltips",
+        "influencer list formatters > keeps both backend-defined unknown semantics as explanations",
+        "influencer list formatters > maps backend freshness status aging",
+        "influencer list formatters > maps backend freshness status fresh",
+        "influencer list formatters > maps backend freshness status stale",
+        "influencer list formatters > maps backend freshness status unknown",
+        "influencer list formatters > maps backend freshness status very_stale",
+        "influencer list formatters > selects the latest real metrics source timestamp",
+        "influencer list formatters > uses centralized platform, contact, and CRM labels"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-list.test.tsx",
+      "tests": [
+        "InfluencerWorkspace > does not render a homepage link when no active account has a profile URL",
+        "InfluencerWorkspace > explains an empty result when filters are active",
+        "InfluencerWorkspace > keeps list browsing available when filter options fail",
+        "InfluencerWorkspace > renders one influencer row with multiple accounts and exact API values",
+        "InfluencerWorkspace > renders the 7-day activity filter",
+        "InfluencerWorkspace > restores URL filters and resets the page for search and filters",
+        "InfluencerWorkspace > shows empty account, metric, tag, and contact collections as missing",
+        "InfluencerWorkspace > shows independent loading, list error retry, and empty states",
+        "InfluencerWorkspace > syncs contact and 60-day activity filters to the URL and resets pagination",
+        "InfluencerWorkspace > uses API tag, owner, and CRM options and disables overlong tags",
+        "InfluencerWorkspace > validates follower ranges locally and supports clearing filters",
+        "InfluencerWorkspace > writes backend freshness filters to URL without adding a sort",
+        "InfluencerWorkspace > writes follower ranges and pagination to URL with page resets"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-preview.test.tsx",
+      "tests": [
+        "development influencer visual preview > allows the route in development",
+        "development influencer visual preview > keeps drawer detail preview route development-only and in-memory",
+        "development influencer visual preview > keeps the route unavailable outside development",
+        "development influencer visual preview > opens and closes preview drawer from local preview table interactions",
+        "development influencer visual preview > provides eight representative in-memory records",
+        "development influencer visual preview > reuses the UI-2 table and formatters without requesting any API",
+        "development influencer visual preview > reuses the same detail presentation for development drawer preview",
+        "development influencer visual preview > supports both unknown freshness semantics in development detail preview"
+      ]
+    },
+    {
+      "path": "apps/web/tests/influencer-routing.test.tsx",
+      "tests": [
+        "influencer parallel route structure > renders the list and drawer slots together",
+        "influencer parallel route structure > uses explicit null fallbacks for inactive and unmatched drawer routes"
+      ]
+    },
+    {
+      "path": "apps/web/tests/phase-zero-status.test.tsx",
+      "tests": [
+        "PhaseZeroStatus > states that business integrations are disabled"
+      ]
+    },
+    {
+      "path": "apps/web/tests/refresh-queue-api.test.ts",
+      "tests": [
+        "refresh queue API > downloads CSV as a blob and preserves Content-Disposition",
+        "refresh queue API > sends only the exact create body and includes CSRF",
+        "refresh queue API > uses POST and CSRF for cancellation",
+        "refresh queue API > uses exact Queue list pagination parameters",
+        "refresh queue API > uses the detail and server-paginated Item endpoints"
+      ]
+    },
+    {
+      "path": "apps/web/tests/refresh-queue-formatters.test.ts",
+      "tests": [
+        "refresh queue formatters > creates and revokes an object URL for the CSV",
+        "refresh queue formatters > honors plain and UTF-8 Content-Disposition filenames",
+        "refresh queue formatters > maps every Queue and return status to frozen Chinese copy",
+        "refresh queue formatters > maps snapshot Freshness and priority reasons without time recalculation",
+        "refresh queue formatters > uses the existing Asia/Shanghai minute formatter"
+      ]
+    },
+    {
+      "path": "apps/web/tests/refresh-queue-preview.test.tsx",
+      "tests": [
+        "development Refresh Queue visual preview > renders an in-memory list, status links, and local pagination with zero requests",
+        "development Refresh Queue visual preview > returns notFound outside development",
+        "development Refresh Queue visual preview > reuses detail Summary, Item table, status actions, and pagination with zero requests",
+        "development Refresh Queue visual preview > runs the real Create Modal presentation entirely in memory",
+        "development Refresh Queue visual preview > shows the shared return workflow entry for an unfinished exported Queue",
+        "development Refresh Queue visual preview > supports each valid detail preview route and rejects unknown states"
+      ]
+    },
+    {
+      "path": "apps/web/tests/refresh-queue-workspace.test.tsx",
+      "tests": [
+        "Refresh Queue detail > renders real summary and frozen Item snapshot fields",
+        "Refresh Queue detail > requests the next Item page from the server",
+        "Refresh Queue detail > requires the exact cancellation confirmation and cancels only an active Queue",
+        "Refresh Queue detail > shows no mutation actions to Viewer",
+        "Refresh Queue detail > shows only state-allowed actions for cancelled",
+        "Refresh Queue detail > shows only state-allowed actions for completed",
+        "Refresh Queue detail > shows only state-allowed actions for exported",
+        "Refresh Queue list and create > adds target department only for Super Admin",
+        "Refresh Queue list and create > creates with the exact three-field body and does not expose a department for Operators",
+        "Refresh Queue list and create > keeps Viewer read-only",
+        "Refresh Queue list and create > renders the compact Queue list with API fields",
+        "Refresh Queue list and create > requests the next Queue list page from the server",
+        "Refresh Queue list and create > shows the safe ambiguous outcome and performs no automatic create retry"
+      ]
+    },
+    {
+      "path": "apps/web/tests/release-gate-tooling.test.ts",
+      "tests": [
+        "release gate deterministic tooling > admits only exit codes zero and one before timeout adjudication",
+        "release gate deterministic tooling > correlates the ADAPTED_RETAINED_VITEST_4_1_10_FIXTURE through exact manifest projections",
+        "release gate deterministic tooling > derives immutable per-invocation master, raw JSON, and stdout/stderr artifact paths",
+        "release gate deterministic tooling > fails closed for ambiguous leaf-only, wrong-file, wrong-hierarchy, duplicate, missing, and random timeout blocks",
+        "release gate deterministic tooling > fails closed for assertion, mixed, abnormal, and controlled PASS after assertion",
+        "release gate deterministic tooling > fails closed for missing JSON, truncated capture, explicit failure, and count mismatch on an exit-zero stress result",
+        "release gate deterministic tooling > fails closed for uncertain, relevant, renamed, and binary interaction diffs",
+        "release gate deterministic tooling > fails fast for a live lock, recovers only a proven stale lock, and does not remove a successor lock",
+        "release gate deterministic tooling > force-kills a resistant descendant group after its leader exits and verifies every recorded PID disappears",
+        "release gate deterministic tooling > generates deterministic normalized manifest inventory and rejects non-canonical form",
+        "release gate deterministic tooling > handles SIGHUP once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > handles SIGINT once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > handles SIGTERM once, terminates the active child, records evidence, and releases only its lock",
+        "release gate deterministic tooling > prevents a post-signal child start and preserves the normal one-time lock release path",
+        "release gate deterministic tooling > recognizes only structured test, hook, and teardown timeout blocks after exact identity resolution",
+        "release gate deterministic tooling > records watchdog expiry and process-tree cleanup without changing Vitest timeout policy",
+        "release gate deterministic tooling > rejects resolved config mismatch, modes, missing, and duplicate execution identities",
+        "release gate deterministic tooling > resolves exact stream hierarchy and unique leaf-only projections without splitting JSON words",
+        "release gate deterministic tooling > retains its lock when POSIX group cleanup cannot prove the group is gone",
+        "release gate deterministic tooling > scopes same leaf titles by exact file identity and rejects a cross-file mismatch",
+        "release gate deterministic tooling > serializes signal and watchdog cleanup, including lock ownership-token protection",
+        "release gate deterministic tooling > uses a real OS signal to terminate a disposable child process group",
+        "release gate deterministic tooling > uses locale-independent lexical full-suite order and the frozen interaction order",
+        "release gate deterministic tooling > uses real Vitest file records and exact JSON identities instead of suite counters",
+        "release gate deterministic tooling > validates evidence integrity before every STRESS_PASS result",
+        "release gate deterministic tooling > verifies a simple POSIX process group exits gracefully"
+      ]
+    },
+    {
+      "path": "apps/web/tests/today-outreach-api.test.ts",
+      "tests": [
+        "today outreach API > passes the cursor through as an opaque continuation token",
+        "today outreach API > serializes only the frozen Today fields with the contract default limit"
+      ]
+    },
+    {
+      "path": "apps/web/tests/today-outreach-formatters.test.ts",
+      "tests": [
+        "Today outreach presenters > only presents the frozen contact and priority meanings",
+        "Today outreach presenters > uses the response business date and Asia/Shanghai due-time semantics"
+      ]
+    },
+    {
+      "path": "apps/web/tests/today-outreach-routing.test.tsx",
+      "tests": [
+        "today outreach route and navigation > mounts the formal /outreach/today route through the existing AuthShell",
+        "today outreach route and navigation > puts 今日触达 ahead of 达人库 in the workspace navigation"
+      ]
+    },
+    {
+      "path": "apps/web/tests/today-outreach-workspace.test.tsx",
+      "tests": [
+        "TodayWorkspace > hides unavailable canonical selectors without blocking the Today list",
+        "TodayWorkspace > renders the frozen read-only queue and appends the next cursor page in backend order",
+        "TodayWorkspace > resets the list from the first page when task type changes"
+      ]
+    }
+  ]
+}

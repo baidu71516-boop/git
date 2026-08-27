@@ -17,6 +17,7 @@ node_modules/
 dist/
 build/
 *.log
+.release-evidence/
 data/imports/*
 !data/imports/.gitkeep
 infrastructure/migrations/versions/__pycache__/

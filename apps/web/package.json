@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "pnpm run stress",
+    "stress": "vitest run"
   },
   "dependencies": {
     "@ant-design/icons": "6.3.2",
