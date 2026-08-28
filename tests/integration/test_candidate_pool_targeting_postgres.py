@@ -28,10 +28,10 @@ from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import (
     CandidatePoolCreateInput,
     CandidatePoolPublic,
-    TargetingPolicyCreateInput,
-    TargetingPolicyCreateResultPublic,
+    CandidatePoolRunPublic,
+    CandidatePoolRunRequest,
 )
-from backend_core.growth.service import CandidatePoolService
+from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import IntegerRange, SellerTargetingPolicy
 from backend_core.influencers.enums import CRMStage, DataSource, InfluencerStatus, Platform
 from backend_core.influencers.freshness import FreshnessPolicy
@@ -374,9 +374,7 @@ def test_concurrent_pool_create_key_replays_the_single_persisted_result(
     asyncio.run(scenario())
 
 
-def test_concurrent_policy_create_key_replays_the_single_persisted_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_concurrent_adjusted_run_key_replays_the_single_policy_and_run() -> None:
     async def scenario() -> None:
         async with _isolated_postgres() as harness:
             async with harness.factory() as setup_session:
@@ -396,53 +394,42 @@ def test_concurrent_policy_create_key_replays_the_single_persisted_result(
                     user_agent="candidate-pool-postgres-race-test",
                 )
 
-            idempotency_key = "postgres-policy-create-race"
-            payload = TargetingPolicyCreateInput(
-                policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100))
-            )
-            lookup_race = _force_shared_record_lookup_race(
-                monkeypatch,
-                operation_scope=Phase3AOperationScope.TARGETING_POLICY_CREATE,
-                idempotency_keys=frozenset((idempotency_key,)),
+            assert pool.current_policy_id is not None
+            idempotency_key = "postgres-adjusted-run-race"
+            payload = CandidatePoolRunRequest(
+                base_policy_id=pool.current_policy_id,
+                expected_pool_version=pool.version,
+                policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
             )
             start_barrier = asyncio.Barrier(3)
 
-            async def append_policy() -> TargetingPolicyCreateResultPublic:
+            async def reserve_adjusted_run() -> CandidatePoolRunPublic:
                 await start_barrier.wait()
                 async with harness.factory() as session:
                     return await CandidatePoolService(
                         session,
                         freshness_policy=FreshnessPolicy(),
-                    ).append_policy(
+                    ).reserve_run(
                         context,
-                        pool.id,
-                        payload,
+                        pool_id=pool.id,
+                        payload=payload,
                         idempotency_key=idempotency_key,
                         ip="192.0.2.44",
                         user_agent="candidate-pool-postgres-race-test",
                     )
 
-            tasks = [asyncio.create_task(append_policy()) for _ in range(2)]
+            tasks = [asyncio.create_task(reserve_adjusted_run()) for _ in range(2)]
             await start_barrier.wait()
             first, replay = await asyncio.wait_for(asyncio.gather(*tasks), timeout=20)
 
-            assert lookup_race.empty_lookup_count == 2
-            assert first.model_dump(mode="json") == replay.model_dump(mode="json")
+            assert first.id == replay.id
+            assert {first.idempotent_replay, replay.idempotent_replay} == {False, True}
 
             async with harness.factory() as session:
-                record = await session.scalar(
-                    select(Phase3AIdempotencyRecord).where(
-                        Phase3AIdempotencyRecord.department_id == context.department.id,
-                        Phase3AIdempotencyRecord.operation_scope
-                        == Phase3AOperationScope.TARGETING_POLICY_CREATE,
-                        Phase3AIdempotencyRecord.idempotency_key == idempotency_key,
-                    )
-                )
-                assert record is not None
-                assert record.result_entity_id == first.id
                 persisted_pool = await session.get(CandidatePool, pool.id)
                 assert persisted_pool is not None
-                assert persisted_pool.current_policy_id == first.id
+                assert persisted_pool.current_policy_id == first.policy_id
+                assert persisted_pool.version == pool.version + 1
                 assert (
                     int(
                         await session.scalar(
@@ -458,13 +445,8 @@ def test_concurrent_policy_create_key_replays_the_single_persisted_result(
                     int(
                         await session.scalar(
                             select(func.count())
-                            .select_from(Phase3AIdempotencyRecord)
-                            .where(
-                                Phase3AIdempotencyRecord.department_id == context.department.id,
-                                Phase3AIdempotencyRecord.operation_scope
-                                == Phase3AOperationScope.TARGETING_POLICY_CREATE,
-                                Phase3AIdempotencyRecord.idempotency_key == idempotency_key,
-                            )
+                            .select_from(database_models.CandidatePoolRun)
+                            .where(database_models.CandidatePoolRun.pool_id == pool.id)
                         )
                         or 0
                     )
@@ -474,7 +456,7 @@ def test_concurrent_policy_create_key_replays_the_single_persisted_result(
                     await _audit_count(
                         session,
                         action=AuditAction.TARGETING_POLICY_CREATED,
-                        entity_id=first.id,
+                        entity_id=first.policy_id,
                     )
                 ) == 1
                 assert (
@@ -484,13 +466,18 @@ def test_concurrent_policy_create_key_replays_the_single_persisted_result(
                         entity_id=pool.id,
                     )
                 ) == 1
+                assert (
+                    await _audit_count(
+                        session,
+                        action=AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
+                        entity_id=first.id,
+                    )
+                ) == 1
 
     asyncio.run(scenario())
 
 
-def test_concurrent_policy_appends_with_distinct_keys_preserve_serial_versions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_concurrent_adjusted_runs_with_distinct_keys_fail_closed_on_stale_pointer() -> None:
     async def scenario() -> None:
         async with _isolated_postgres() as harness:
             async with harness.factory() as setup_session:
@@ -511,63 +498,67 @@ def test_concurrent_policy_appends_with_distinct_keys_preserve_serial_versions(
                 )
                 assert pool.version == 2
 
+            assert pool.current_policy_id is not None
             requests = (
                 (
-                    "postgres-policy-distinct-a",
-                    TargetingPolicyCreateInput(
-                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100))
+                    "postgres-adjusted-distinct-a",
+                    CandidatePoolRunRequest(
+                        base_policy_id=pool.current_policy_id,
+                        expected_pool_version=pool.version,
+                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
                     ),
                 ),
                 (
-                    "postgres-policy-distinct-b",
-                    TargetingPolicyCreateInput(
-                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=200))
+                    "postgres-adjusted-distinct-b",
+                    CandidatePoolRunRequest(
+                        base_policy_id=pool.current_policy_id,
+                        expected_pool_version=pool.version,
+                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=200)),
                     ),
                 ),
-            )
-            idempotency_keys = frozenset(key for key, _payload in requests)
-            lookup_race = _force_shared_record_lookup_race(
-                monkeypatch,
-                operation_scope=Phase3AOperationScope.TARGETING_POLICY_CREATE,
-                idempotency_keys=idempotency_keys,
             )
             start_barrier = asyncio.Barrier(3)
 
-            async def append_policy(
+            async def reserve_adjusted_run(
                 idempotency_key: str,
-                payload: TargetingPolicyCreateInput,
-            ) -> TargetingPolicyCreateResultPublic:
+                payload: CandidatePoolRunRequest,
+            ) -> CandidatePoolRunPublic:
                 await start_barrier.wait()
                 async with harness.factory() as session:
                     return await CandidatePoolService(
                         session,
                         freshness_policy=FreshnessPolicy(),
-                    ).append_policy(
+                    ).reserve_run(
                         context,
-                        pool.id,
-                        payload,
+                        pool_id=pool.id,
+                        payload=payload,
                         idempotency_key=idempotency_key,
                         ip="192.0.2.44",
                         user_agent="candidate-pool-postgres-race-test",
                     )
 
             tasks = [
-                asyncio.create_task(append_policy(idempotency_key, payload))
+                asyncio.create_task(reserve_adjusted_run(idempotency_key, payload))
                 for idempotency_key, payload in requests
             ]
             await start_barrier.wait()
-            first, second = await asyncio.wait_for(asyncio.gather(*tasks), timeout=20)
-
-            assert lookup_race.empty_lookup_count == 2
-            assert first.id != second.id
-            assert {first.version, second.version} == {2, 3}
+            results = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=20
+            )
+            successful = [
+                result for result in results if isinstance(result, CandidatePoolRunPublic)
+            ]
+            failures = [result for result in results if isinstance(result, TargetingError)]
+            assert len(successful) == 1
+            assert len(failures) == 1
+            assert failures[0].code == "VERSION_CONFLICT"
+            first = successful[0]
 
             async with harness.factory() as session:
                 persisted_pool = await session.get(CandidatePool, pool.id)
                 assert persisted_pool is not None
-                assert persisted_pool.version == 4
-                latest = first if first.version == 3 else second
-                assert persisted_pool.current_policy_id == latest.id
+                assert persisted_pool.version == pool.version + 1
+                assert persisted_pool.current_policy_id == first.policy_id
 
                 policies = list(
                     await session.scalars(
@@ -576,22 +567,17 @@ def test_concurrent_policy_appends_with_distinct_keys_preserve_serial_versions(
                         .order_by(TargetingPolicy.version)
                     )
                 )
-                assert [policy.version for policy in policies] == [1, 2, 3]
-                assert {policy.id for policy in policies[1:]} == {first.id, second.id}
+                assert [policy.version for policy in policies] == [1, 2]
+                assert policies[-1].id == first.policy_id
 
-                records = list(
+                runs = list(
                     await session.scalars(
-                        select(Phase3AIdempotencyRecord).where(
-                            Phase3AIdempotencyRecord.department_id == context.department.id,
-                            Phase3AIdempotencyRecord.operation_scope
-                            == Phase3AOperationScope.TARGETING_POLICY_CREATE,
-                            Phase3AIdempotencyRecord.idempotency_key.in_(idempotency_keys),
+                        select(database_models.CandidatePoolRun).where(
+                            database_models.CandidatePoolRun.pool_id == pool.id
                         )
                     )
                 )
-                assert len(records) == 2
-                assert {record.idempotency_key for record in records} == idempotency_keys
-                assert {record.result_entity_id for record in records} == {first.id, second.id}
+                assert [run.id for run in runs] == [first.id]
 
                 assert (
                     await _audit_count(
@@ -599,19 +585,19 @@ def test_concurrent_policy_appends_with_distinct_keys_preserve_serial_versions(
                         action=AuditAction.CANDIDATE_POOL_UPDATED,
                         entity_id=pool.id,
                     )
-                ) == 2
-                assert (
-                    await _audit_count(
-                        session,
-                        action=AuditAction.TARGETING_POLICY_CREATED,
-                        entity_id=first.id,
-                    )
                 ) == 1
                 assert (
                     await _audit_count(
                         session,
                         action=AuditAction.TARGETING_POLICY_CREATED,
-                        entity_id=second.id,
+                        entity_id=first.policy_id,
+                    )
+                ) == 1
+                assert (
+                    await _audit_count(
+                        session,
+                        action=AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
+                        entity_id=first.id,
                     )
                 ) == 1
 

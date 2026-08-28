@@ -33,7 +33,7 @@ from backend_core.growth.schemas import (
     CandidatePoolRunMemberPage,
     CandidatePoolRunPage,
     CandidatePoolRunPublic,
-    LongInactivityEnrichmentRequest,
+    CandidatePoolRunRequest,
     TargetingPolicyCreateInput,
     TargetingPolicyCreateResultPublic,
     TargetingPolicyPublic,
@@ -169,6 +169,23 @@ def _pool_create_payload(
         "name": name,
         "kind": CandidatePoolKind.POTENTIAL_SELLER.value,
         "policy": _seller_policy_payload(tags=tags),
+    }
+
+
+def _buyer_pool_create_payload() -> dict[str, object]:
+    return {
+        "name": "Buyer prospects",
+        "kind": CandidatePoolKind.POTENTIAL_BUYER.value,
+        "source_collection_job_id": str(uuid4()),
+        "policy": {
+            "policy_type": "BUYER_V1",
+            "schema_version": 1,
+            "taxonomy": {
+                "schema_version": 1,
+                "taxonomy_version": "reviewed-v1",
+                "reviewed": True,
+            },
+        },
     }
 
 
@@ -410,7 +427,7 @@ class FakeCandidatePoolService:
         _context: AuthContext,
         *,
         pool_id: UUID,
-        long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None,
+        payload: CandidatePoolRunRequest,
         idempotency_key: str,
         ip: str,
         user_agent: str,
@@ -420,8 +437,8 @@ class FakeCandidatePoolService:
             (
                 "reserve_run",
                 (
+                    payload.model_dump(mode="json", exclude_none=True),
                     pool_id,
-                    long_inactivity_enrichment,
                     idempotency_key,
                     ip,
                     user_agent,
@@ -720,6 +737,14 @@ def test_candidate_pool_create_requires_mutation_prerequisites_and_replays_with_
                     "create_pool",
                 ]
 
+                buyer = await client.post(
+                    "/api/v1/candidate-pools",
+                    json=_buyer_pool_create_payload(),
+                    headers=_mutation_headers("buyer-pool-key"),
+                )
+                _assert_error(buyer, status_code=409, code="BUYER_RULE_READ_ONLY")
+                assert len(service.calls) == 3
+
                 viewer = _context(role=Role.VIEWER)
                 app.dependency_overrides[require_auth] = lambda: viewer
                 rejected_viewer = await client.post(
@@ -744,7 +769,7 @@ def test_candidate_pool_create_requires_mutation_prerequisites_and_replays_with_
     asyncio.run(scenario())
 
 
-def test_candidate_pool_policy_create_replays_with_201_and_uses_redacted_result() -> None:
+def test_candidate_pool_policy_append_is_retired_and_requires_mutation_access() -> None:
     async def scenario() -> None:
         context = _context()
         service = FakeCandidatePoolService(context)
@@ -766,63 +791,19 @@ def test_candidate_pool_policy_create_replays_with_201_and_uses_redacted_result(
                     json=_policy_create_payload(),
                     headers={"X-CSRF-Token": "candidate-pool-csrf"},
                 )
-                _assert_error(missing_idempotency, status_code=422, code="IDEMPOTENCY_KEY_INVALID")
-
-                duplicate_idempotency = await client.post(
-                    f"/api/v1/candidate-pools/{POOL_ID}/policies",
-                    json=_policy_create_payload(),
-                    headers=[
-                        ("Idempotency-Key", "policy-create-key"),
-                        ("Idempotency-Key", "other-policy-create-key"),
-                        ("X-CSRF-Token", "candidate-pool-csrf"),
-                    ],
-                )
                 _assert_error(
-                    duplicate_idempotency,
+                    missing_idempotency,
                     status_code=422,
                     code="IDEMPOTENCY_KEY_INVALID",
                 )
-                assert service.calls == []
 
-                created = await client.post(
+                retired = await client.post(
                     f"/api/v1/candidate-pools/{POOL_ID}/policies",
-                    json=_policy_create_payload(tags=("beauty",)),
-                    headers=_mutation_headers("policy-create-key"),
-                )
-                assert created.status_code == 201
-                assert set(created.json()["data"]) == {
-                    "id",
-                    "pool_id",
-                    "version",
-                    "schema_version",
-                    "canonical_hash",
-                    "created_by_operator_id",
-                    "created_at",
-                }
-                assert "definition" not in created.json()["data"]
-                assert service.calls[0][0] == "append_policy"
-
-                replay = await client.post(
-                    f"/api/v1/candidate-pools/{POOL_ID}/policies",
-                    json=_policy_create_payload(tags=("beauty",)),
-                    headers=_mutation_headers("policy-create-key"),
-                )
-                assert replay.status_code == 201
-                assert replay.json()["data"] == created.json()["data"]
-
-                conflict = await client.post(
-                    f"/api/v1/candidate-pools/{POOL_ID}/policies",
-                    json=_policy_create_payload(tags=("fashion",)),
-                    headers=_mutation_headers("policy-create-key"),
-                )
-                _assert_error(conflict, status_code=409, code="IDEMPOTENCY_KEY_REUSED")
-
-                missing_pool = await client.post(
-                    f"/api/v1/candidate-pools/{uuid4()}/policies",
                     json=_policy_create_payload(),
-                    headers=_mutation_headers("missing-pool-policy-key"),
+                    headers=_mutation_headers("policy-create-key"),
                 )
-                _assert_error(missing_pool, status_code=404, code="CANDIDATE_POOL_NOT_FOUND")
+                _assert_error(retired, status_code=409, code="TARGETING_POLICY_RUN_REQUIRED")
+                assert service.calls == []
         finally:
             app.dependency_overrides.clear()
 
@@ -908,6 +889,32 @@ def test_candidate_pool_run_reservation_requires_csrf_operator_viewer_and_idempo
                 assert non_pending.status_code == 202
                 assert dispatcher.run_ids == [RUN_ID, RUN_ID, RUN_ID]
 
+                historical = await client.post(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs",
+                    json={"policy_id": str(POLICY_ID)},
+                    headers=_mutation_headers("historical-run-key"),
+                )
+                assert historical.status_code == 202
+
+                adjusted = await client.post(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs",
+                    json={
+                        "base_policy_id": str(POLICY_ID),
+                        "expected_pool_version": 1,
+                        "policy": _seller_policy_payload(tags=("beauty",)),
+                    },
+                    headers=_mutation_headers("adjusted-run-key"),
+                )
+                assert adjusted.status_code == 202
+                assert dispatcher.run_ids == [RUN_ID, RUN_ID, RUN_ID, RUN_ID, RUN_ID]
+
+                invalid_shape = await client.post(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs",
+                    json={"policy_id": str(POLICY_ID), "unexpected": True},
+                    headers=_mutation_headers("invalid-shape-key"),
+                )
+                _assert_error(invalid_shape, status_code=422, code="VALIDATION_ERROR")
+
                 viewer = _context(role=Role.VIEWER)
                 app.dependency_overrides[require_auth] = lambda: viewer
                 rejected_viewer = await client.post(
@@ -964,10 +971,13 @@ def test_explicit_long_inactivity_run_dispatches_only_the_bounded_analytics_path
             assert dispatcher.run_ids == []
             assert dispatcher.long_inactivity_run_ids == [RUN_ID]
             assert service.calls[-1][0] == "reserve_run"
-            request = service.calls[-1][1][1]
-            assert isinstance(request, LongInactivityEnrichmentRequest)
-            assert request.planned_assignable_target == 30
-            assert request.max_provider_enrichment == 12
+            request = service.calls[-1][1][0]
+            assert request == {
+                "long_inactivity_enrichment": {
+                    "planned_assignable_target": 30,
+                    "max_provider_enrichment": 12,
+                }
+            }
         finally:
             app.dependency_overrides.clear()
 

@@ -9,6 +9,7 @@ import {
   Drawer,
   Modal,
   Skeleton,
+  Space,
   Table,
   Tabs,
   Typography,
@@ -20,6 +21,7 @@ import { useMemo, useState } from "react";
 
 import { AppEmpty } from "@/components/ui/app-empty";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { ApiClientError } from "@/lib/api/client";
 
 import {
   candidateDateTime,
@@ -37,9 +39,12 @@ import {
   useCandidateRuns,
   useCreateCandidateRunMutation,
 } from "./queries";
+import { SellerRuleBuilder } from "./seller-rule-builder";
+import { isAuthorableSellerTargetingPolicy } from "./types";
 import type {
   CandidatePoolRole,
   CandidatePoolRun,
+  SellerTargetingPolicy,
   TargetingPolicy,
   TargetingPolicyDefinition,
 } from "./types";
@@ -69,7 +74,7 @@ function Owner({ name, status }: { name: string; status: string }) {
   );
 }
 
-function PolicyDefinition({
+export function PolicyDefinition({
   definition,
 }: {
   definition: TargetingPolicyDefinition;
@@ -81,20 +86,34 @@ function PolicyDefinition({
       TargetingPolicyDefinition,
       { policy_type: "SELLER_V1" }
     >;
+    const contentActivity =
+      "content_activity" in seller ? seller.content_activity : null;
+    const longInactivity =
+      "long_inactivity" in seller ? seller.long_inactivity : null;
     const values: Array<[string, string | null]> = [
+      [
+        "联系方式",
+        seller.contact_availability === "has_contact"
+          ? "有联系方式"
+          : seller.contact_availability === "has_email"
+            ? "有邮箱"
+            : seller.contact_availability === "no_contact"
+              ? "无联系方式"
+              : (seller.contact_availability?.types?.join("、") ?? null),
+      ],
       ["粉丝数", rangeLabel(seller.followers)],
       ["近 7 天笔记数", rangeLabel(seller.notes_7d)],
       ["近 60 天笔记数", rangeLabel(seller.notes_60d)],
       [
         "内容活跃度",
-        seller.content_activity?.minimum_inactive_days != null
-          ? `断更不少于 ${seller.content_activity.minimum_inactive_days} 天`
+        contentActivity?.minimum_inactive_days != null
+          ? `断更不少于 ${contentActivity.minimum_inactive_days} 天`
           : null,
       ],
       [
         "长期断更",
-        seller.long_inactivity?.minimum_inactive_days != null
-          ? `断更不少于 ${seller.long_inactivity.minimum_inactive_days} 天`
+        longInactivity?.minimum_inactive_days != null
+          ? `断更不少于 ${longInactivity.minimum_inactive_days} 天`
           : null,
       ],
       ["标签", seller.tags_exact_any?.join("、") ?? null],
@@ -145,9 +164,15 @@ function PolicyDefinition({
 function PolicyHistory({
   poolId,
   currentPolicyId,
+  canMutate,
+  onRerun,
+  onAdjust,
 }: {
   poolId: string;
   currentPolicyId: string | null;
+  canMutate: boolean;
+  onRerun: (policy: TargetingPolicy) => void;
+  onAdjust: (policy: TargetingPolicy) => void;
 }) {
   const query = useCandidatePolicies(poolId, true);
   const [policy, setPolicy] = useState<TargetingPolicy | null>(null);
@@ -190,11 +215,31 @@ function PolicyHistory({
     {
       title: "操作",
       key: "action",
-      render: (_: unknown, item: TargetingPolicy) => (
-        <Button type="link" onClick={() => setPolicy(item)}>
-          查看规则
-        </Button>
-      ),
+      render: (_: unknown, item: TargetingPolicy) => {
+        const seller = isAuthorableSellerTargetingPolicy(item.definition);
+        const buyerRerunnable =
+          item.definition.schema_version === 1 &&
+          item.definition.policy_type === "BUYER_V1" &&
+          (item.definition as { taxonomy?: { reviewed?: unknown } }).taxonomy
+            ?.reviewed === true;
+        return (
+          <Space size="small" wrap>
+            <Button type="link" onClick={() => setPolicy(item)}>
+              查看规则
+            </Button>
+            {canMutate && (seller || buyerRerunnable) ? (
+              <Button type="link" onClick={() => onRerun(item)}>
+                重新运行此规则
+              </Button>
+            ) : null}
+            {canMutate && seller && item.id === currentPolicyId ? (
+              <Button type="link" onClick={() => onAdjust(item)}>
+                调整规则并重新运行
+              </Button>
+            ) : null}
+          </Space>
+        );
+      },
     },
   ];
   return (
@@ -394,6 +439,12 @@ export function CandidatePoolDetailView({
   const [open, setOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState<CreateAttempt | null>(null);
+  const [adjusting, setAdjusting] = useState<TargetingPolicy | null>(null);
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustRetry, setAdjustRetry] = useState<{
+    key: string;
+    payload: string;
+  } | null>(null);
   const mutation = useCreateCandidateRunMutation();
   const [messageApi, holder] = message.useMessage();
   const tab = previewTab ?? candidatePoolDetailTab(params.get("tab"));
@@ -426,6 +477,68 @@ export function CandidatePoolDetailView({
         setRetry(null);
         setError(
           mutationErrorMessage(caught, "生成候选结果失败，请稍后重试。"),
+        );
+      }
+    }
+  }
+  async function rerunPolicy(policy: TargetingPolicy) {
+    if (!pool || !showCreate || previewMode) return;
+    try {
+      const run = await mutation.mutateAsync({
+        poolId,
+        idempotencyKey: attemptKey(),
+        payload: { policy_id: policy.id },
+      });
+      void messageApi.success("候选结果已开始生成");
+      router.push(
+        `/candidate-pools/${encodeURIComponent(poolId)}/runs/${encodeURIComponent(run.id)}`,
+      );
+    } catch (caught) {
+      void messageApi.error(
+        mutationErrorMessage(caught, "重新运行规则失败，请稍后重试。"),
+      );
+    }
+  }
+  async function adjustAndRerun(policy: SellerTargetingPolicy) {
+    if (!pool || !adjusting || previewMode) return;
+    const request = {
+      base_policy_id: adjusting.id,
+      expected_pool_version: pool.version,
+      policy,
+    };
+    const serialized = JSON.stringify(request);
+    const attempt =
+      adjustRetry?.payload === serialized
+        ? adjustRetry
+        : { key: attemptKey(), payload: serialized };
+    setAdjustError(null);
+    try {
+      const run = await mutation.mutateAsync({
+        poolId,
+        idempotencyKey: attempt.key,
+        payload: request,
+      });
+      setAdjustRetry(null);
+      setAdjusting(null);
+      void messageApi.success("新规则版本已保存，候选结果已开始生成");
+      router.push(
+        `/candidate-pools/${encodeURIComponent(poolId)}/runs/${encodeURIComponent(run.id)}`,
+      );
+    } catch (caught) {
+      if (
+        caught instanceof ApiClientError &&
+        caught.code === "VERSION_CONFLICT"
+      ) {
+        setAdjustRetry(null);
+        setAdjustError("规则已被其他人更新。请刷新后在当前规则上重新调整。");
+        void query.refetch();
+      } else if (isAmbiguousMutation(caught)) {
+        setAdjustRetry(attempt);
+        setAdjustError("保存结果暂时无法确认。你可以重试本次提交。");
+      } else {
+        setAdjustRetry(null);
+        setAdjustError(
+          mutationErrorMessage(caught, "保存规则并重新运行失败，请稍后重试。"),
         );
       }
     }
@@ -533,6 +646,15 @@ export function CandidatePoolDetailView({
                 <PolicyHistory
                   poolId={poolId}
                   currentPolicyId={pool.current_policy_id}
+                  canMutate={showCreate}
+                  onRerun={(policy) => void rerunPolicy(policy)}
+                  onAdjust={(policy) => {
+                    if (!isAuthorableSellerTargetingPolicy(policy.definition))
+                      return;
+                    setAdjustError(null);
+                    setAdjustRetry(null);
+                    setAdjusting(policy);
+                  }}
                 />
               ) : null,
           },
@@ -568,6 +690,25 @@ export function CandidatePoolDetailView({
           />
         ) : null}
         <p>系统将使用当前规则和当前数据生成一份新的候选结果。</p>
+      </Modal>
+      <Modal
+        title="调整规则并重新运行"
+        open={Boolean(adjusting)}
+        footer={null}
+        width={680}
+        onCancel={() => !mutation.isPending && setAdjusting(null)}
+      >
+        {adjusting &&
+        isAuthorableSellerTargetingPolicy(adjusting.definition) ? (
+          <SellerRuleBuilder
+            key={adjusting.id}
+            initialPolicy={adjusting.definition}
+            submitLabel="保存新规则版本并重新运行"
+            loading={mutation.isPending}
+            error={adjustError}
+            onSubmit={adjustAndRerun}
+          />
+        ) : null}
       </Modal>
     </section>
   );

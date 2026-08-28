@@ -60,6 +60,10 @@ vi.mock("antd", async (importOriginal) => {
   };
 });
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 const poolId = "pool-selection";
 const runId = "run-selection";
 

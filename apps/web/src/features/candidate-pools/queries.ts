@@ -8,6 +8,7 @@ import { ApiClientError } from "@/lib/api/client";
 import {
   CANDIDATE_MEMBER_PAGE_LIMIT,
   addCandidatesToCampaign,
+  createCandidatePool,
   createCandidateRun,
   fetchCandidateMembers,
   fetchCandidatePolicies,
@@ -19,6 +20,8 @@ import {
 import type {
   CandidateCampaignSelection,
   CandidateMemberPageSize,
+  CandidatePoolCreateRequest,
+  CandidatePoolRunRequest,
 } from "./types";
 
 function retryRead(failures: number, error: Error) {
@@ -50,11 +53,11 @@ export function useCandidatePoolList() {
     retry: retryRead,
   });
 }
-export function useCandidatePool(poolId: string) {
+export function useCandidatePool(poolId: string, enabled = true) {
   return useQuery({
     queryKey: candidatePoolQueryKeys.detail(poolId),
     queryFn: () => fetchCandidatePool(poolId),
-    enabled: Boolean(poolId),
+    enabled: enabled && Boolean(poolId),
     retry: retryRead,
   });
 }
@@ -118,10 +121,12 @@ export function useCreateCandidateRunMutation() {
     mutationFn: ({
       poolId,
       idempotencyKey,
+      payload,
     }: {
       poolId: string;
       idempotencyKey: string;
-    }) => createCandidateRun(poolId, idempotencyKey),
+      payload?: CandidatePoolRunRequest;
+    }) => createCandidateRun(poolId, idempotencyKey, payload),
     retry: false,
     onSuccess: (run, variables) => {
       client.setQueryData(
@@ -131,6 +136,29 @@ export function useCreateCandidateRunMutation() {
       void client.invalidateQueries({
         queryKey: candidatePoolQueryKeys.runs(variables.poolId),
       });
+      void client.invalidateQueries({
+        queryKey: candidatePoolQueryKeys.policies(variables.poolId),
+      });
+      void client.invalidateQueries({
+        queryKey: candidatePoolQueryKeys.detail(variables.poolId),
+      });
+    },
+  });
+}
+export function useCreateCandidatePoolMutation() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      payload,
+      idempotencyKey,
+    }: {
+      payload: CandidatePoolCreateRequest;
+      idempotencyKey: string;
+    }) => createCandidatePool(payload, idempotencyKey),
+    retry: false,
+    onSuccess: (pool) => {
+      client.setQueryData(candidatePoolQueryKeys.detail(pool.id), pool);
+      void client.invalidateQueries({ queryKey: candidatePoolQueryKeys.lists });
     },
   });
 }

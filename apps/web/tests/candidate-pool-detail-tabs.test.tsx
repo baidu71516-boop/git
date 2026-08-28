@@ -35,7 +35,13 @@ function response(data: unknown) {
   );
 }
 
-function renderDetail() {
+function renderDetail({
+  role = "viewer",
+  hasSelectedOperator = false,
+}: {
+  role?: "manager" | "viewer";
+  hasSelectedOperator?: boolean;
+} = {}) {
   return render(
     <QueryClientProvider
       client={
@@ -44,8 +50,8 @@ function renderDetail() {
     >
       <CandidatePoolDetailView
         poolId="pool-1"
-        role="viewer"
-        hasSelectedOperator={false}
+        role={role}
+        hasSelectedOperator={hasSelectedOperator}
       />
     </QueryClientProvider>,
   );
@@ -153,6 +159,48 @@ describe("Candidate Pool detail tabs", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "规则历史" }));
     expect(navigation.push).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows only the current Seller V1 adjustment controls in rule history", async () => {
+    navigation.tab = "policies";
+    vi.spyOn(globalThis, "fetch").mockImplementation((input) => {
+      const url = String(input);
+      if (url === "/api/v1/candidate-pools/pool-1")
+        return Promise.resolve(response(pool));
+      if (url.endsWith("/policies"))
+        return Promise.resolve(
+          response([
+            {
+              id: pool.current_policy_id,
+              pool_id: "pool-1",
+              version: 3,
+              schema_version: 1,
+              definition: {
+                schema_version: 1,
+                policy_type: "SELLER_V1",
+                contact_availability: "has_email",
+                notes_7d: { minimum: 1 },
+              },
+              canonical_hash: "a".repeat(64),
+              created_by_operator_id: pool.owner_operator_id,
+              created_at: pool.created_at,
+              updated_at: pool.updated_at,
+            },
+          ]),
+        );
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderDetail({ role: "manager", hasSelectedOperator: true });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "调整规则并重新运行" }),
+    );
+    expect(
+      await screen.findByText("保存新规则版本并重新运行"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("近 7 天笔记数")).toBeInTheDocument();
+    expect(screen.queryByText(/活动下降|长期未发布/)).not.toBeInTheDocument();
   });
 
   it.each([

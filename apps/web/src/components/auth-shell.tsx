@@ -376,7 +376,10 @@ export function AuthShell({
             />
           )
         ) : (
-          <CandidatePoolListView />
+          <CandidatePoolListView
+            role={auth.role}
+            hasSelectedOperator={auth.operator !== null}
+          />
         )
       ) : auth.role === "viewer" || auth.operator ? (
         <DataCollectionWorkspace role={auth.role} />

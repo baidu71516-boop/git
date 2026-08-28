@@ -96,7 +96,7 @@ const buyerDefinition = (version: number): TargetingPolicy["definition"] => ({
     categories: ["家居", "生活方式"],
     aliases: [{ label: "家居生活", category_id: "家居" }],
   },
-  freshness: { allowed_statuses: ["新鲜", "可复核"] },
+  freshness: { allowed_statuses: ["fresh", "aging"] },
 });
 
 function policy(

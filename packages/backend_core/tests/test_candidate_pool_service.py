@@ -52,6 +52,7 @@ from backend_core.growth.models import (
 from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import (
     CandidatePoolCreateInput,
+    CandidatePoolRunRequest,
     LongInactivityEnrichmentRequest,
     TargetingPolicyCreateInput,
 )
@@ -1197,19 +1198,24 @@ def test_run_idempotency_materialization_and_member_evidence() -> None:
                 )
                 assert len(replayed_members.items) == 1
 
-                next_policy = await service.append_policy(
+                adjusted = await service.reserve_run(
                     context,
-                    pool.id,
-                    TargetingPolicyCreateInput(
-                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100))
+                    pool_id=pool.id,
+                    payload=CandidatePoolRunRequest(
+                        base_policy_id=pool.current_policy_id,
+                        expected_pool_version=pool.version,
+                        policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
                     ),
-                    idempotency_key="targeting-policy-run-lifecycle",
+                    idempotency_key="targeting-adjusted-run-lifecycle",
                 )
-                assert next_policy.version == 2
                 policies = await service.list_policies(context, pool.id)
                 assert [item.version for item in policies] == [1, 2]
                 assert policies[0].id == first.policy_id
-                assert policies[1].canonical_hash == next_policy.canonical_hash
+                assert policies[1].id == adjusted.policy_id
+                assert (
+                    policies[1].canonical_hash
+                    == SellerTargetingPolicy(followers=IntegerRange(minimum=100)).canonical_hash
+                )
                 with pytest.raises(TargetingError, match="different request") as raised:
                     await service.reserve_run(
                         context,
@@ -1229,7 +1235,7 @@ def test_run_idempotency_materialization_and_member_evidence() -> None:
                             ).scalars()
                         )
                     )
-                    == 1
+                    == 2
                 )
 
                 second = await service.reserve_run(
@@ -1237,10 +1243,20 @@ def test_run_idempotency_materialization_and_member_evidence() -> None:
                     pool_id=pool.id,
                     idempotency_key="targeting-run-2",
                 )
-                assert second.policy_id == next_policy.id
+                assert second.policy_id == adjusted.policy_id
                 assert second.input_watermark is not None
                 assert second.input_watermark["policy_version"] == 2
                 await service.materialize_run(second.id)
+
+                historical = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    payload=CandidatePoolRunRequest(policy_id=first.policy_id),
+                    idempotency_key="targeting-historical-run-lifecycle",
+                )
+                assert historical.policy_id == first.policy_id
+                assert historical.input_watermark is not None
+                assert historical.input_watermark["policy_version"] == 1
 
                 first_after_rerun = await service.get_run(
                     context,
@@ -1310,9 +1326,11 @@ def test_explicit_long_inactivity_runtime_uses_planner_and_counts_full_policy_ca
                 run = await service.reserve_run(
                     context,
                     pool_id=pool.id,
-                    long_inactivity_enrichment=LongInactivityEnrichmentRequest(
-                        planned_assignable_target=1,
-                        max_provider_enrichment=12,
+                    payload=CandidatePoolRunRequest(
+                        long_inactivity_enrichment=LongInactivityEnrichmentRequest(
+                            planned_assignable_target=1,
+                            max_provider_enrichment=12,
+                        )
                     ),
                     idempotency_key="explicit-long-inactivity-run",
                 )
@@ -1329,6 +1347,121 @@ def test_explicit_long_inactivity_runtime_uses_planner_and_counts_full_policy_ca
                 assert execution["result"]["provider_calls_attempted"] == 1
                 assert execution["result"]["target_reached"] is True
                 assert execution["result"]["budget_reached"] is False
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_adjusted_run_uses_current_pool_pointer_and_rejects_cross_pool_policy() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.MANAGER)
+                service = _service(session)
+                first_pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="First Seller Pool",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(tags_exact_any=("beauty",)),
+                    ),
+                    idempotency_key="c3a-first-pool",
+                )
+                second_pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Second Seller Pool",
+                        kind=CandidatePoolKind.POTENTIAL_SELLER,
+                        policy=SellerTargetingPolicy(tags_exact_any=("fashion",)),
+                    ),
+                    idempotency_key="c3a-second-pool",
+                )
+                assert first_pool.current_policy_id is not None
+                assert second_pool.current_policy_id is not None
+
+                stale_request = CandidatePoolRunRequest(
+                    base_policy_id=first_pool.current_policy_id,
+                    expected_pool_version=first_pool.version - 1,
+                    policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
+                )
+                with pytest.raises(TargetingError) as stale:
+                    await service.reserve_run(
+                        context,
+                        pool_id=first_pool.id,
+                        payload=stale_request,
+                        idempotency_key="c3a-stale-adjustment",
+                    )
+                assert stale.value.code == "VERSION_CONFLICT"
+
+                with pytest.raises(TargetingError) as cross_pool:
+                    await service.reserve_run(
+                        context,
+                        pool_id=first_pool.id,
+                        payload=CandidatePoolRunRequest(policy_id=second_pool.current_policy_id),
+                        idempotency_key="c3a-cross-pool-policy",
+                    )
+                assert cross_pool.value.code == "TARGETING_POLICY_NOT_FOUND"
+
+                adjustment = CandidatePoolRunRequest(
+                    base_policy_id=first_pool.current_policy_id,
+                    expected_pool_version=first_pool.version,
+                    policy=SellerTargetingPolicy(followers=IntegerRange(minimum=100)),
+                )
+                first = await service.reserve_run(
+                    context,
+                    pool_id=first_pool.id,
+                    payload=adjustment,
+                    idempotency_key="c3a-adjustment",
+                )
+                replay = await service.reserve_run(
+                    context,
+                    pool_id=first_pool.id,
+                    payload=adjustment,
+                    idempotency_key="c3a-adjustment",
+                )
+                assert replay.id == first.id
+                assert replay.idempotent_replay is True
+
+                with pytest.raises(TargetingError) as conflict:
+                    await service.reserve_run(
+                        context,
+                        pool_id=first_pool.id,
+                        payload=CandidatePoolRunRequest(
+                            base_policy_id=first_pool.current_policy_id,
+                            expected_pool_version=first_pool.version,
+                            policy=SellerTargetingPolicy(followers=IntegerRange(minimum=200)),
+                        ),
+                        idempotency_key="c3a-adjustment",
+                    )
+                assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
+
+                with pytest.raises(TargetingError) as stale_after_update:
+                    await service.reserve_run(
+                        context,
+                        pool_id=first_pool.id,
+                        payload=adjustment,
+                        idempotency_key="c3a-stale-after-update",
+                    )
+                assert stale_after_update.value.code == "VERSION_CONFLICT"
+
+                persisted = await session.get(CandidatePool, first_pool.id)
+                assert persisted is not None
+                assert persisted.version == first_pool.version + 1
+                assert persisted.current_policy_id == first.policy_id
+                policies = await service.list_policies(context, first_pool.id)
+                assert [policy.version for policy in policies] == [1, 2]
+                runs = await service.list_runs(
+                    context,
+                    pool_id=first_pool.id,
+                    cursor=None,
+                    limit=50,
+                )
+                assert [run.id for run in runs.items] == [first.id]
         finally:
             await engine.dispose()
 

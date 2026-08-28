@@ -208,6 +208,12 @@ async def create_candidate_pool(
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
+    if payload.kind is CandidatePoolKind.POTENTIAL_BUYER:
+        raise ApiError(
+            409,
+            "BUYER_RULE_READ_ONLY",
+            "BUYER_V1 is read-only in C3A; create or author Seller rules only",
+        )
     pool = await _service_call(
         service.create_pool(
             context,
@@ -251,21 +257,23 @@ async def create_candidate_pool_policy(
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     context: Annotated[AuthContext, Depends(require_targeting_mutation)],
-    service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
-    policy = await _service_call(
-        service.append_policy(
-            context,
-            pool_id,
-            payload,
-            department_id=scope.department_id,
-            idempotency_key=_single_idempotency_key(request, idempotency_key),
-            ip=get_client_ip(request),
-            user_agent=get_user_agent(request),
-        )
+    # C3A intentionally has no standalone policy append operation. A policy
+    # revision is only durable when its new Candidate Run is reserved in the
+    # same transaction through POST /runs' adjusted-policy request shape.
+    _ = (
+        _single_idempotency_key(request, idempotency_key),
+        pool_id,
+        payload,
+        scope,
+        context,
     )
-    return envelope(request, data=policy)
+    raise ApiError(
+        409,
+        "TARGETING_POLICY_RUN_REQUIRED",
+        "Create a policy version by adjusting and rerunning the Candidate Pool",
+    )
 
 
 @router.get(
@@ -400,7 +408,7 @@ async def reserve_candidate_pool_run(
         service.reserve_run(
             context,
             pool_id=pool_id,
-            long_inactivity_enrichment=payload.long_inactivity_enrichment,
+            payload=payload,
             department_id=scope.department_id,
             idempotency_key=_single_idempotency_key(request, idempotency_key),
             ip=get_client_ip(request),

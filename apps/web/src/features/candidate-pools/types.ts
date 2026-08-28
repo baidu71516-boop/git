@@ -27,27 +27,45 @@ export type CandidatePoolPage = {
   next_cursor: string | null;
 };
 
+export type SellerTargetingPolicy = {
+  schema_version: 1;
+  policy_type: "SELLER_V1";
+  contact_availability?: "has_contact" | "has_email" | "no_contact" | null;
+  followers?: { minimum?: number | null; maximum?: number | null } | null;
+  tags_exact_any?: string[];
+  notes_7d?: { minimum?: number | null; maximum?: number | null } | null;
+  notes_60d?: { minimum?: number | null; maximum?: number | null } | null;
+  freshness?: {
+    allowed_statuses: Array<"fresh" | "aging" | "stale" | "very_stale">;
+  } | null;
+  platforms?: string[];
+  sources?: string[];
+};
+
+type ExistingSellerTargetingPolicy = {
+  schema_version: 1;
+  policy_type: "SELLER_V1";
+  contact_availability?: { types?: string[] } | null;
+  followers?: { minimum?: number | null; maximum?: number | null } | null;
+  tags_exact_any?: string[];
+  notes_7d?: { minimum?: number | null; maximum?: number | null } | null;
+  notes_60d?: { minimum?: number | null; maximum?: number | null } | null;
+  freshness?: { allowed_statuses?: string[] } | null;
+  content_activity?: {
+    schema_version?: number;
+    minimum_inactive_days?: number;
+  } | null;
+  long_inactivity?: {
+    schema_version?: number;
+    minimum_inactive_days?: 30 | 60 | 90 | 180;
+  } | null;
+  platforms?: string[];
+  sources?: string[];
+};
+
 export type TargetingPolicyDefinition =
-  | {
-      schema_version: 1;
-      policy_type: "SELLER_V1";
-      contact_availability?: { types?: string[] } | null;
-      followers?: { minimum?: number | null; maximum?: number | null } | null;
-      tags_exact_any?: string[];
-      notes_7d?: { minimum?: number | null; maximum?: number | null } | null;
-      notes_60d?: { minimum?: number | null; maximum?: number | null } | null;
-      freshness?: { allowed_statuses?: string[] } | null;
-      content_activity?: {
-        schema_version?: number;
-        minimum_inactive_days?: number;
-      } | null;
-      long_inactivity?: {
-        schema_version?: number;
-        minimum_inactive_days?: 30 | 60 | 90 | 180;
-      } | null;
-      platforms?: string[];
-      sources?: string[];
-    }
+  | SellerTargetingPolicy
+  | ExistingSellerTargetingPolicy
   | {
       schema_version: 1;
       policy_type: "BUYER_V1";
@@ -72,6 +90,25 @@ export type TargetingPolicyDefinition =
       freshness?: { allowed_statuses?: string[] } | null;
     }
   | { schema_version: number; policy_type: string; [key: string]: unknown };
+
+export function isSellerTargetingPolicy(
+  definition: TargetingPolicyDefinition,
+): definition is SellerTargetingPolicy | ExistingSellerTargetingPolicy {
+  return (
+    definition.schema_version === 1 && definition.policy_type === "SELLER_V1"
+  );
+}
+
+export function isAuthorableSellerTargetingPolicy(
+  definition: TargetingPolicyDefinition,
+): definition is SellerTargetingPolicy {
+  return (
+    isSellerTargetingPolicy(definition) &&
+    typeof definition.contact_availability !== "object" &&
+    !("content_activity" in definition) &&
+    !("long_inactivity" in definition)
+  );
+}
 
 export type TargetingPolicy = {
   id: string;
@@ -106,6 +143,21 @@ export type CandidatePoolRunPage = {
   items: CandidatePoolRun[];
   next_cursor: string | null;
 };
+
+export type CandidatePoolCreateRequest = {
+  name: string;
+  kind: "POTENTIAL_SELLER";
+  policy: SellerTargetingPolicy;
+};
+
+export type CandidatePoolRunRequest =
+  | Record<string, never>
+  | { policy_id: string }
+  | {
+      base_policy_id: string;
+      expected_pool_version: number;
+      policy: SellerTargetingPolicy;
+    };
 
 export type CandidateMember = {
   id: string;

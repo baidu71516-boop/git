@@ -6,8 +6,10 @@ import type {
   CandidateMemberPage,
   CandidateMemberPageSize,
   CandidatePool,
+  CandidatePoolCreateRequest,
   CandidatePoolPage,
   CandidatePoolRun,
+  CandidatePoolRunRequest,
   CandidatePoolRunPage,
   TargetingPolicy,
 } from "./types";
@@ -67,6 +69,21 @@ export async function fetchCandidatePoolPage(
     (await apiRequest<CandidatePoolPage>(pagePath("/candidate-pools", cursor)))
       .data,
     "候选池列表",
+  );
+}
+export async function createCandidatePool(
+  payload: CandidatePoolCreateRequest,
+  idempotencyKey: string,
+): Promise<CandidatePool> {
+  return requireData(
+    (
+      await apiRequest<CandidatePool>("/candidate-pools", {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(payload),
+      })
+    ).data,
+    "创建候选池",
   );
 }
 export async function fetchCandidatePool(
@@ -130,13 +147,14 @@ export async function fetchCandidateMembers(
 export async function createCandidateRun(
   poolId: string,
   idempotencyKey: string,
+  payload: CandidatePoolRunRequest = {},
 ): Promise<CandidatePoolRun> {
   return requireData(
     (
       await apiRequest<CandidatePoolRun>(`${candidatePoolPath(poolId)}/runs`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey },
-        body: JSON.stringify({}),
+        body: JSON.stringify(payload),
       })
     ).data,
     "生成候选结果",

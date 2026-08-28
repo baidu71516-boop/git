@@ -6,6 +6,7 @@ import {
   candidatePoolPath,
   candidateRunPath,
   CANDIDATE_MEMBER_PAGE_SIZES,
+  createCandidatePool,
   createCandidateRun,
   fetchCandidateMembers,
   fetchCandidatePoolPage,
@@ -62,7 +63,8 @@ describe("Candidate Pool API", () => {
     document.cookie = "outreach_csrf=candidate-csrf; path=/";
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(response({ id: "run-1" }));
+      .mockResolvedValueOnce(response({ id: "run-1" }))
+      .mockResolvedValueOnce(response({ id: "run-2" }));
     await createCandidateRun("pool-1", "same-attempt-key");
     const [url, init] = fetchMock.mock.calls[0] ?? [];
     expect(url).toBe("/api/v1/candidate-pools/pool-1/runs");
@@ -73,6 +75,54 @@ describe("Candidate Pool API", () => {
     );
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe(
       "candidate-csrf",
+    );
+  });
+
+  it("posts only the two explicit historical and adjusted rerun shapes", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(response({ id: "run-1" }))
+      .mockResolvedValueOnce(response({ id: "run-2" }));
+    await createCandidateRun("pool-1", "historical-key", {
+      policy_id: "policy-v1",
+    });
+    await createCandidateRun("pool-1", "adjusted-key", {
+      base_policy_id: "policy-v1",
+      expected_pool_version: 3,
+      policy: {
+        schema_version: 1,
+        policy_type: "SELLER_V1",
+        notes_7d: { minimum: 1 },
+      },
+    });
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(
+      '{"policy_id":"policy-v1"}',
+    );
+    expect(fetchMock.mock.calls[1]?.[1]?.body).toBe(
+      '{"base_policy_id":"policy-v1","expected_pool_version":3,"policy":{"schema_version":1,"policy_type":"SELLER_V1","notes_7d":{"minimum":1}}}',
+    );
+  });
+
+  it("creates only a Seller Pool with its inline SELLER_V1 rule", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(response({ id: "pool-1" }));
+    await createCandidatePool(
+      {
+        name: "Seller pool",
+        kind: "POTENTIAL_SELLER",
+        policy: {
+          schema_version: 1,
+          policy_type: "SELLER_V1",
+          contact_availability: "has_email",
+        },
+      },
+      "pool-create-key",
+    );
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe("/api/v1/candidate-pools");
+    expect(init?.body).toBe(
+      '{"name":"Seller pool","kind":"POTENTIAL_SELLER","policy":{"schema_version":1,"policy_type":"SELLER_V1","contact_availability":"has_email"}}',
     );
   });
 

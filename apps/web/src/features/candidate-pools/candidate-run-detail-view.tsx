@@ -19,6 +19,7 @@ import {
 } from "antd";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { AppEmpty } from "@/components/ui/app-empty";
@@ -57,18 +58,24 @@ import {
   mutationErrorMessage,
   policyType,
 } from "./formatters";
+import { PolicyDefinition } from "./candidate-pool-detail-view";
 import {
   useAddCandidatesToCampaignMutation,
   useCandidateMembers,
+  useCandidatePool,
   useCandidatePolicies,
   useCandidateRun,
+  useCreateCandidateRunMutation,
 } from "./queries";
+import { SellerRuleBuilder } from "./seller-rule-builder";
+import { isAuthorableSellerTargetingPolicy } from "./types";
 import type {
   CandidateCampaignAddResult,
   CandidateCampaignSelection,
   CandidateMember,
   CandidateMemberPageSize,
   CandidatePoolRole,
+  SellerTargetingPolicy,
   TargetingPolicy,
 } from "./types";
 
@@ -628,8 +635,10 @@ export function CandidateRunDetailView({
   previewState?: "error";
 }) {
   const activePolling = !previewMode;
+  const router = useRouter();
   const runQuery = useCandidateRun(poolId, runId, activePolling);
   const policies = useCandidatePolicies(poolId, Boolean(runQuery.data));
+  const rerunMutation = useCreateCandidateRunMutation();
   const [filter, setFilter] = useState<"all" | "MATCH" | "UNKNOWN">("all");
   const [pageSize, setPageSize] = useState<CandidateMemberPageSize>(
     CANDIDATE_MEMBER_PAGE_LIMIT,
@@ -689,6 +698,14 @@ export function CandidateRunDetailView({
   const [evidence, setEvidence] = useState<CandidateMember | null>(
     previewMode ? null : (previewEvidence ?? null),
   );
+  const [ruleOpen, setRuleOpen] = useState(false);
+  const [adjusting, setAdjusting] = useState(false);
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+  const [adjustRetry, setAdjustRetry] = useState<{
+    key: string;
+    payload: string;
+  } | null>(null);
+  const poolQuery = useCandidatePool(poolId, adjusting);
   const [modalOpen, setModalOpen] = useState(
     previewMode ? false : previewModalOpen,
   );
@@ -717,7 +734,14 @@ export function CandidateRunDetailView({
       setModalOpen(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [poolId, previewMode, previewModalOpen, runId, selectionGeneration]);
+  }, [
+    poolId,
+    previewMode,
+    previewModalOpen,
+    runId,
+    selectionGeneration,
+    selectionIdentityRef,
+  ]);
   useEffect(() => {
     if (!previewMode || !previewEvidence) return;
     const timer = window.setTimeout(() => setEvidence(previewEvidence), 0);
@@ -757,6 +781,56 @@ export function CandidateRunDetailView({
     modalScope.runId === runId &&
     modalScope.generation === selectionGeneration;
   const canWrite = role !== "viewer" && hasSelectedOperator;
+  const pool = poolQuery.data;
+  const currentSellerPolicy =
+    policy !== undefined &&
+    isAuthorableSellerTargetingPolicy(policy.definition) &&
+    pool?.current_policy_id === policy.id &&
+    pool.status === "ACTIVE";
+  async function adjustAndRerun(nextPolicy: SellerTargetingPolicy) {
+    if (!pool || !policy || !currentSellerPolicy || previewMode) return;
+    const request = {
+      base_policy_id: policy.id,
+      expected_pool_version: pool.version,
+      policy: nextPolicy,
+    };
+    const serialized = JSON.stringify(request);
+    const attempt =
+      adjustRetry?.payload === serialized
+        ? adjustRetry
+        : { key: attemptKey(), payload: serialized };
+    setAdjustError(null);
+    try {
+      const nextRun = await rerunMutation.mutateAsync({
+        poolId,
+        idempotencyKey: attempt.key,
+        payload: request,
+      });
+      setAdjustRetry(null);
+      setAdjusting(false);
+      void messageApi.success("新规则版本已保存，候选结果已开始生成");
+      router.push(
+        `/candidate-pools/${encodeURIComponent(poolId)}/runs/${encodeURIComponent(nextRun.id)}`,
+      );
+    } catch (caught) {
+      if (
+        caught instanceof ApiClientError &&
+        caught.code === "VERSION_CONFLICT"
+      ) {
+        setAdjustRetry(null);
+        setAdjustError("规则已被其他人更新。请刷新后在当前规则上重新调整。");
+        void poolQuery.refetch();
+      } else if (isAmbiguousMutation(caught)) {
+        setAdjustRetry(attempt);
+        setAdjustError("保存结果暂时无法确认。你可以重试本次提交。");
+      } else {
+        setAdjustRetry(null);
+        setAdjustError(
+          mutationErrorMessage(caught, "保存规则并重新运行失败，请稍后重试。"),
+        );
+      }
+    }
+  }
   function updateMemberPageNavigation(
     nextScope: CandidateMemberNavigationScope,
     nextPageIndex: number,
@@ -999,7 +1073,18 @@ export function CandidateRunDetailView({
           　创建时间：{candidateDateTime(run.created_at)}
         </Text>
         {policy ? (
-          <Text type="secondary">　规则版本：版本 {policy.version}</Text>
+          <>
+            <Text type="secondary">　规则版本：版本 {policy.version}</Text>
+            <Button type="link" onClick={() => setRuleOpen(true)}>
+              查看规则
+            </Button>
+            {canWrite &&
+            isAuthorableSellerTargetingPolicy(policy.definition) ? (
+              <Button type="link" onClick={() => setAdjusting(true)}>
+                调整规则并重新运行
+              </Button>
+            ) : null}
+          </>
         ) : null}
       </div>
       {readError ? (
@@ -1191,6 +1276,41 @@ export function CandidateRunDetailView({
           </Card>
         </>
       )}
+      <Drawer
+        title="筛选规则"
+        open={ruleOpen}
+        size={640}
+        onClose={() => setRuleOpen(false)}
+      >
+        {policy ? <PolicyDefinition definition={policy.definition} /> : null}
+      </Drawer>
+      <Modal
+        title="调整规则并重新运行"
+        open={adjusting}
+        footer={null}
+        width={680}
+        onCancel={() => !rerunMutation.isPending && setAdjusting(false)}
+      >
+        {poolQuery.isPending ? (
+          <Skeleton active paragraph={{ rows: 5 }} />
+        ) : !currentSellerPolicy ? (
+          <Alert
+            type="warning"
+            showIcon
+            title="历史规则不可直接调整"
+            description="请在候选池的当前规则上调整后重新运行。"
+          />
+        ) : policy && isAuthorableSellerTargetingPolicy(policy.definition) ? (
+          <SellerRuleBuilder
+            key={policy.id}
+            initialPolicy={policy.definition}
+            submitLabel="保存新规则版本并重新运行"
+            loading={rerunMutation.isPending}
+            error={adjustError}
+            onSubmit={adjustAndRerun}
+          />
+        ) : null}
+      </Modal>
       <Drawer
         title="候选判断依据"
         open={Boolean(evidence)}

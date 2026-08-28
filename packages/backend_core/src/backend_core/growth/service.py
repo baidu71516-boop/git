@@ -54,6 +54,7 @@ from backend_core.growth.schemas import (
     CandidatePoolRunMemberPage,
     CandidatePoolRunPage,
     CandidatePoolRunPublic,
+    CandidatePoolRunRequest,
     LongInactivityEnrichmentRequest,
     TargetingPolicyCreateInput,
     TargetingPolicyCreateResultPublic,
@@ -76,6 +77,7 @@ from backend_core.influencers.enums import Platform
 from backend_core.influencers.freshness import (
     ContentActivityFreshnessPolicy,
     FreshnessPolicy,
+    FreshnessStatus,
     GreyDolphinActivityFreshnessPolicy,
 )
 from backend_core.influencers.schemas import (
@@ -382,6 +384,20 @@ class CandidatePoolService:
             )
 
     @staticmethod
+    def _validate_authorable_seller_policy(definition: SellerTargetingPolicy) -> None:
+        """Apply the C3A write boundary without changing historical snapshots."""
+
+        if (
+            definition.freshness is not None
+            and FreshnessStatus.UNKNOWN in definition.freshness.allowed_statuses
+        ):
+            raise TargetingError(
+                422,
+                "TARGETING_POLICY_INVALID",
+                "New SELLER_V1 policies cannot select unknown freshness",
+            )
+
+    @staticmethod
     def _policy_audit_after(policy: TargetingPolicy) -> dict[str, Any]:
         return {
             "pool_id": str(policy.pool_id),
@@ -480,6 +496,8 @@ class CandidatePoolService:
                 source_collection_job_id=payload.source_collection_job_id,
                 definition=typed_definition,
             )
+            if isinstance(typed_definition, SellerTargetingPolicy):
+                self._validate_authorable_seller_policy(typed_definition)
             if payload.kind is CandidatePoolKind.POTENTIAL_BUYER:
                 assert payload.source_collection_job_id is not None
                 collection = await self.repository.get_collection_job(
@@ -639,6 +657,8 @@ class CandidatePoolService:
                 source_collection_job_id=preflight_pool.source_collection_job_id,
                 definition=typed_definition,
             )
+            if isinstance(typed_definition, SellerTargetingPolicy):
+                self._validate_authorable_seller_policy(typed_definition)
             request_hash = hash_document(
                 {
                     "operation": "targeting_policy_create",
@@ -903,119 +923,288 @@ class CandidatePoolService:
             await self.session.rollback()
             raise
 
+    async def _stage_run_locked(
+        self,
+        *,
+        pool: CandidatePool,
+        policy_record: TargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        operator_id: UUID,
+        scope: DepartmentScope,
+        idempotency_key: str,
+        request_hash: str,
+        long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None,
+        ip: str,
+        user_agent: str,
+    ) -> CandidatePoolRun:
+        """Create one durable PENDING Run from the already-locked policy snapshot."""
+
+        as_of = _utc_now()
+        watermark = await self.repository.capture_input_watermark(pool=pool, policy=policy)
+        watermark.update(
+            {
+                "policy_id": policy_record.id,
+                "policy_version": policy_record.version,
+                "policy_hash": policy_record.canonical_hash,
+                "as_of": as_of,
+            }
+        )
+        if long_inactivity_enrichment is not None:
+            watermark["long_inactivity_enrichment"] = {
+                "request": long_inactivity_enrichment.model_dump(mode="json")
+            }
+        run = CandidatePoolRun(
+            pool_id=pool.id,
+            policy_id=policy_record.id,
+            as_of=as_of,
+            input_watermark=canonical_value(watermark),
+            status=CandidatePoolRunStatus.PENDING,
+            match_count=0,
+            unknown_count=0,
+            not_match_count=0,
+            error_code=None,
+            error_message=None,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        self.session.add(run)
+        await self.session.flush()
+        self._add_run_audit(
+            action=AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
+            result=AuditResult.SUCCESS,
+            run=run,
+            department_id=pool.department_id,
+            operator_id=operator_id,
+            ip=ip,
+            user_agent=user_agent,
+            after=self._audit_after_with_scope(self._run_requested_audit_after(run), scope),
+        )
+        return run
+
     async def reserve_run(
         self,
         context: AuthContext,
         *,
         pool_id: UUID,
-        long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None,
+        payload: CandidatePoolRunRequest | None = None,
         department_id: UUID | None = None,
         idempotency_key: str,
         ip: str = "unknown",
         user_agent: str = "unknown",
     ) -> CandidatePoolRunPublic:
+        """Reserve a current, historical, or adjusted-policy Run.
+
+        The Pool row is the concurrency boundary. In particular, adjusted
+        reruns look up an idempotent replay before applying their compare-and-
+        swap check, then append a new policy, change the Pool pointer, and add
+        a PENDING Run in the same transaction.
+        """
+
         scope, operator_id = await self._resolve_mutation_scope(context, department_id)
         self._require_idempotency_key(idempotency_key)
+        request = payload or CandidatePoolRunRequest()
+        mutation_started = False
         try:
             pool = await self._write_pool(pool_id, scope)
-            if pool.status is not CandidatePoolStatus.ACTIVE:
-                raise TargetingError(409, "CANDIDATE_POOL_INACTIVE", "Candidate Pool is not active")
-            policy_record = await self.repository.get_current_policy(pool, for_update=True)
-            if policy_record is None:
-                raise TargetingError(
-                    409, "TARGETING_POLICY_REQUIRED", "Candidate Pool has no policy"
+
+            if request.is_adjusted_policy_run:
+                assert request.base_policy_id is not None
+                assert request.expected_pool_version is not None
+                assert request.policy is not None
+                requested_policy = request.policy
+                self._validate_authorable_seller_policy(requested_policy)
+                request_hash = hash_document(
+                    {
+                        "operation": "candidate_pool_adjusted_run",
+                        "pool_id": pool.id,
+                        "base_policy_id": request.base_policy_id,
+                        "expected_pool_version": request.expected_pool_version,
+                        "policy": requested_policy.model_dump(mode="json"),
+                    }
                 )
-            policy = self._typed_policy(pool, policy_record)
-            self._require_reviewed_buyer_taxonomy(policy, status_code=409)
-            if long_inactivity_enrichment is not None and (
-                not isinstance(policy, SellerTargetingPolicy) or policy.long_inactivity is None
-            ):
-                raise TargetingError(
-                    422,
-                    "LONG_INACTIVITY_ENRICHMENT_UNAVAILABLE",
-                    "Long Inactivity enrichment requires a Seller Long Inactivity policy",
+                existing = await self.repository.get_run_by_idempotency_key(
+                    pool_id=pool.id,
+                    idempotency_key=idempotency_key,
+                    for_update=True,
                 )
-            request_hash = hash_document(
-                {
-                    "operation": "candidate_pool_run",
-                    "pool_id": pool.id,
-                    "policy_id": policy_record.id,
-                    "policy_hash": policy.canonical_hash,
-                    "long_inactivity_enrichment": (
-                        long_inactivity_enrichment.model_dump(mode="json")
-                        if long_inactivity_enrichment is not None
-                        else None
-                    ),
-                }
-            )
-            existing = await self.repository.get_run_by_idempotency_key(
-                pool_id=pool.id,
-                idempotency_key=idempotency_key,
-                for_update=True,
-            )
-            if existing is not None:
-                if existing.request_hash != request_hash:
+                if existing is not None:
+                    if existing.request_hash != request_hash:
+                        raise TargetingError(
+                            409,
+                            "IDEMPOTENCY_CONFLICT",
+                            "Idempotency-Key was already used for a different request",
+                        )
+                    response = CandidatePoolRunPublic.model_validate(existing).model_copy(
+                        update={"idempotent_replay": True}
+                    )
+                    await self.session.commit()
+                    return response
+                if (
+                    request.expected_pool_version != pool.version
+                    or request.base_policy_id != pool.current_policy_id
+                ):
                     raise TargetingError(
                         409,
-                        "IDEMPOTENCY_CONFLICT",
-                        "Idempotency-Key was already used for a different request",
+                        "VERSION_CONFLICT",
+                        "Candidate Pool policy changed; refresh before adjusting and rerunning",
                     )
-                response = CandidatePoolRunPublic.model_validate(existing).model_copy(
-                    update={"idempotent_replay": True}
+                if pool.status is not CandidatePoolStatus.ACTIVE:
+                    raise TargetingError(
+                        409, "CANDIDATE_POOL_INACTIVE", "Candidate Pool is not active"
+                    )
+                base_policy = await self.repository.get_current_policy(pool, for_update=True)
+                if base_policy is None:
+                    raise TargetingError(
+                        409, "TARGETING_POLICY_REQUIRED", "Candidate Pool has no policy"
+                    )
+                typed_base_policy = self._typed_policy(pool, base_policy)
+                if not isinstance(typed_base_policy, SellerTargetingPolicy):
+                    raise TargetingError(
+                        409,
+                        "POLICY_KIND_MISMATCH",
+                        "Only the current SELLER_V1 policy can be adjusted",
+                    )
+                if requested_policy.canonical_hash == base_policy.canonical_hash:
+                    raise TargetingError(
+                        422,
+                        "TARGETING_POLICY_UNCHANGED",
+                        "Adjusted policy is identical to the current policy",
+                    )
+                before = self._pool_audit_after(pool)
+                mutation_started = True
+                policy_record = await self._append_policy_locked(
+                    pool,
+                    operator_id,
+                    requested_policy,
                 )
-                # The lookup acquired row locks but made no mutation. Commit to
-                # release them without expiring the request's authenticated ORM
-                # context through a rollback.
-                await self.session.commit()
-                return response
-            as_of = _utc_now()
-            watermark = await self.repository.capture_input_watermark(pool=pool, policy=policy)
-            watermark.update(
-                {
-                    "policy_id": policy_record.id,
-                    "policy_version": policy_record.version,
-                    "policy_hash": policy_record.canonical_hash,
-                    "as_of": as_of,
-                }
-            )
-            if long_inactivity_enrichment is not None:
-                watermark["long_inactivity_enrichment"] = {
-                    "request": long_inactivity_enrichment.model_dump(mode="json")
-                }
-            run = CandidatePoolRun(
-                pool_id=pool.id,
-                policy_id=policy_record.id,
-                as_of=as_of,
-                input_watermark=canonical_value(watermark),
-                status=CandidatePoolRunStatus.PENDING,
-                match_count=0,
-                unknown_count=0,
-                not_match_count=0,
-                error_code=None,
-                error_message=None,
+                self.audit.add(
+                    action=AuditAction.CANDIDATE_POOL_UPDATED,
+                    result=AuditResult.SUCCESS,
+                    department_id=pool.department_id,
+                    operator_id=operator_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="candidate_pool",
+                    entity_id=pool.id,
+                    before=before,
+                    after=self._audit_after_with_scope(self._pool_audit_after(pool), scope),
+                )
+                self.audit.add(
+                    action=AuditAction.TARGETING_POLICY_CREATED,
+                    result=AuditResult.SUCCESS,
+                    department_id=pool.department_id,
+                    operator_id=operator_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="targeting_policy",
+                    entity_id=policy_record.id,
+                    after=self._audit_after_with_scope(
+                        self._policy_audit_after(policy_record), scope
+                    ),
+                )
+                policy: SellerTargetingPolicy | BuyerTargetingPolicy = requested_policy
+            else:
+                if request.is_current_policy_run or request.is_long_inactivity_current_policy_run:
+                    selected_policy_record = await self.repository.get_current_policy(
+                        pool,
+                        for_update=True,
+                    )
+                    operation = (
+                        "candidate_pool_run_current_policy_with_long_inactivity_enrichment"
+                        if request.is_long_inactivity_current_policy_run
+                        else "candidate_pool_run_current_policy"
+                    )
+                else:
+                    assert request.policy_id is not None
+                    selected_policy_record = await self.repository.get_policy(
+                        request.policy_id,
+                        pool_id=pool.id,
+                        for_update=True,
+                    )
+                    operation = "candidate_pool_run_historical_policy"
+                if selected_policy_record is None:
+                    raise TargetingError(
+                        404 if request.is_historical_policy_run else 409,
+                        (
+                            "TARGETING_POLICY_NOT_FOUND"
+                            if request.is_historical_policy_run
+                            else "TARGETING_POLICY_REQUIRED"
+                        ),
+                        (
+                            "Targeting policy not found"
+                            if request.is_historical_policy_run
+                            else "Candidate Pool has no policy"
+                        ),
+                    )
+                policy_record = selected_policy_record
+                policy = self._typed_policy(pool, policy_record)
+                if request.long_inactivity_enrichment is not None and (
+                    not isinstance(policy, SellerTargetingPolicy) or policy.long_inactivity is None
+                ):
+                    raise TargetingError(
+                        422,
+                        "LONG_INACTIVITY_ENRICHMENT_UNAVAILABLE",
+                        "Long Inactivity enrichment requires a Seller Long Inactivity policy",
+                    )
+                request_hash = hash_document(
+                    {
+                        "operation": operation,
+                        "pool_id": pool.id,
+                        "policy_id": policy_record.id,
+                        "policy_hash": policy.canonical_hash,
+                        "long_inactivity_enrichment": (
+                            request.long_inactivity_enrichment.model_dump(mode="json")
+                            if request.long_inactivity_enrichment is not None
+                            else None
+                        ),
+                    }
+                )
+                existing = await self.repository.get_run_by_idempotency_key(
+                    pool_id=pool.id,
+                    idempotency_key=idempotency_key,
+                    for_update=True,
+                )
+                if existing is not None:
+                    if existing.request_hash != request_hash:
+                        raise TargetingError(
+                            409,
+                            "IDEMPOTENCY_CONFLICT",
+                            "Idempotency-Key was already used for a different request",
+                        )
+                    response = CandidatePoolRunPublic.model_validate(existing).model_copy(
+                        update={"idempotent_replay": True}
+                    )
+                    await self.session.commit()
+                    return response
+                if pool.status is not CandidatePoolStatus.ACTIVE:
+                    raise TargetingError(
+                        409, "CANDIDATE_POOL_INACTIVE", "Candidate Pool is not active"
+                    )
+                self._require_reviewed_buyer_taxonomy(policy, status_code=409)
+                mutation_started = True
+
+            run = await self._stage_run_locked(
+                pool=pool,
+                policy_record=policy_record,
+                policy=policy,
+                operator_id=operator_id,
+                scope=scope,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
-            )
-            self.session.add(run)
-            await self.session.flush()
-            self._add_run_audit(
-                action=AuditAction.CANDIDATE_POOL_RUN_REQUESTED,
-                result=AuditResult.SUCCESS,
-                run=run,
-                department_id=pool.department_id,
-                operator_id=operator_id,
+                long_inactivity_enrichment=request.long_inactivity_enrichment,
                 ip=ip,
                 user_agent=user_agent,
-                after=self._audit_after_with_scope(self._run_requested_audit_after(run), scope),
             )
             await self.session.commit()
             await self.session.refresh(run)
             return CandidatePoolRunPublic.model_validate(run)
         except TargetingError:
-            # All domain rejections above occur before a run is staged. A
-            # read-only commit releases row locks while preserving the caller's
-            # authenticated context for an in-process follow-up read.
-            await self.session.commit()
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                # Rejections and replay checks are read-only. Commit releases
+                # the Pool/run row locks without expiring authenticated context.
+                await self.session.commit()
             raise
         except BaseException:
             await self.session.rollback()

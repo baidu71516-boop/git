@@ -16,7 +16,11 @@ from backend_core.growth.enums import (
     CandidatePoolStatus,
     CandidateResult,
 )
-from backend_core.growth.targeting import TargetingPolicyDefinition, TargetingReasonCode
+from backend_core.growth.targeting import (
+    SellerTargetingPolicy,
+    TargetingPolicyDefinition,
+    TargetingReasonCode,
+)
 from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
     PlatformAccountIdentitySummary,
@@ -51,9 +55,62 @@ class LongInactivityEnrichmentRequest(TargetingWriteContract):
 
 
 class CandidatePoolRunRequest(TargetingWriteContract):
-    """Server-resolved run input with an opt-in bounded D1A.1 execution path."""
+    """Closed C3A run shapes plus the existing D1A.1 execution input.
 
+    ``{}`` resolves the Pool's current policy. ``{policy_id}`` reuses one
+    historical policy belonging to this Pool. The third shape is the only
+    authoring path: it compares the current Pool pointer/version under lock,
+    then inserts a new Seller policy and reserves its Run atomically.
+
+    ``{long_inactivity_enrichment}`` remains the existing opt-in execution
+    path for the Pool's current D1A.1 policy; it cannot be combined with
+    policy reuse or C3A authoring.
+    """
+
+    policy_id: UUID | None = None
+    base_policy_id: UUID | None = None
+    expected_pool_version: StrictInt | None = Field(default=None, ge=1)
+    policy: SellerTargetingPolicy | None = None
     long_inactivity_enrichment: LongInactivityEnrichmentRequest | None = None
+
+    @model_validator(mode="after")
+    def require_one_closed_shape(self) -> Self:
+        supplied = self.model_fields_set
+        if not supplied:
+            return self
+        if supplied == {"policy_id"} and self.policy_id is not None:
+            return self
+        if (
+            supplied == {"long_inactivity_enrichment"}
+            and self.long_inactivity_enrichment is not None
+        ):
+            return self
+        if supplied == {"base_policy_id", "expected_pool_version", "policy"} and (
+            self.base_policy_id is not None
+            and self.expected_pool_version is not None
+            and self.policy is not None
+        ):
+            return self
+        raise ValueError(
+            "request must be {}, {policy_id}, {long_inactivity_enrichment}, or "
+            "{base_policy_id, expected_pool_version, policy}"
+        )
+
+    @property
+    def is_current_policy_run(self) -> bool:
+        return not self.model_fields_set
+
+    @property
+    def is_historical_policy_run(self) -> bool:
+        return self.model_fields_set == {"policy_id"}
+
+    @property
+    def is_adjusted_policy_run(self) -> bool:
+        return self.model_fields_set == {"base_policy_id", "expected_pool_version", "policy"}
+
+    @property
+    def is_long_inactivity_current_policy_run(self) -> bool:
+        return self.model_fields_set == {"long_inactivity_enrichment"}
 
 
 class CandidatePoolPublic(TargetingReadContract):
