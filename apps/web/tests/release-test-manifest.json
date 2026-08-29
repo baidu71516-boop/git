@@ -209,10 +209,12 @@
     {
       "path": "apps/web/tests/candidate-pool-api.test.ts",
       "tests": [
+        "Candidate Pool API > creates only a Seller Pool with its inline SELLER_V1 rule",
         "Candidate Pool API > encodes route identifiers without exposing any additional endpoint",
         "Candidate Pool API > keeps all cursors opaque and uses the requested bounded member page size",
         "Candidate Pool API > keeps member pages isolated by one of the four supported page sizes",
         "Candidate Pool API > keeps the explicit Campaign request body byte-for-byte compatible",
+        "Candidate Pool API > posts only the two explicit historical and adjusted rerun shapes",
         "Candidate Pool API > posts the exact empty run body with CSRF and the supplied attempt key",
         "Candidate Pool API > submits server-resolved ALL_MATCH with only explicit exclusions"
       ]
@@ -228,7 +230,8 @@
         "Candidate Pool detail tabs > navigates from policies to runs exactly once",
         "Candidate Pool detail tabs > navigates once for a different tab and ignores the current tab",
         "Candidate Pool detail tabs > renders policies once and only loads its lazy query",
-        "Candidate Pool detail tabs > renders runs once and only loads its lazy query"
+        "Candidate Pool detail tabs > renders runs once and only loads its lazy query",
+        "Candidate Pool detail tabs > shows only the current Seller V1 adjustment controls in rule history"
       ]
     },
     {
