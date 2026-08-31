@@ -178,7 +178,9 @@ describe("Candidate Pool detail tabs", () => {
               definition: {
                 schema_version: 1,
                 policy_type: "SELLER_V1",
-                contact_availability: "has_email",
+                contact_availability: null,
+                content_activity: null,
+                long_inactivity: null,
                 notes_7d: { minimum: 1 },
               },
               canonical_hash: "a".repeat(64),
@@ -193,8 +195,11 @@ describe("Candidate Pool detail tabs", () => {
 
     renderDetail({ role: "manager", hasSelectedOperator: true });
 
+    expect(
+      await screen.findByRole("button", { name: "重新运行此规则" }),
+    ).toBeInTheDocument();
     fireEvent.click(
-      await screen.findByRole("button", { name: "调整规则并重新运行" }),
+      screen.getByRole("button", { name: "调整规则并重新运行" }),
     );
     expect(
       await screen.findByText("保存新规则版本并重新运行"),

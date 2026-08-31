@@ -102,11 +102,13 @@ export function isSellerTargetingPolicy(
 export function isAuthorableSellerTargetingPolicy(
   definition: TargetingPolicyDefinition,
 ): definition is SellerTargetingPolicy {
+  const existingSeller = definition as ExistingSellerTargetingPolicy;
   return (
     isSellerTargetingPolicy(definition) &&
-    typeof definition.contact_availability !== "object" &&
-    !("content_activity" in definition) &&
-    !("long_inactivity" in definition)
+    (definition.contact_availability == null ||
+      typeof definition.contact_availability === "string") &&
+    existingSeller.content_activity == null &&
+    existingSeller.long_inactivity == null
   );
 }
 
