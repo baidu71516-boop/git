@@ -9,23 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
-from enum import StrEnum
 from uuid import UUID
 
-from backend_core.auth.enums import Role, role_at_or_below
+from backend_core.auth.enums import ModuleKey, Role, role_at_or_below
 from backend_core.auth.errors import AuthError
 from backend_core.auth.models import AuthSession, Department, Operator
-
-
-class ModuleKey(StrEnum):
-    TODAY_OUTREACH = "today_outreach"
-    CAMPAIGNS = "campaigns"
-    CANDIDATE_POOLS = "candidate_pools"
-    INFLUENCER_LIBRARY = "influencer_library"
-    DATA_COLLECTION = "data_collection"
-    IMPORT_HISTORY = "import_history"
-    DATA_UPDATES = "data_updates"
-    ADMIN = "admin"
 
 
 @dataclass(frozen=True, slots=True)

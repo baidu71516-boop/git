@@ -4,15 +4,35 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    Enum,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Index,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.enums import (
+    CANONICAL_MODULE_KEY_ORDER,
+    DepartmentStatus,
+    ModuleKey,
+    OperatorStatus,
+    Role,
+)
 from backend_core.db.base import Base
 from backend_core.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 
-def enum_values(enum_type: type[Role] | type[DepartmentStatus] | type[OperatorStatus]) -> list[str]:
+def enum_values(
+    enum_type: type[Role] | type[DepartmentStatus] | type[ModuleKey] | type[OperatorStatus],
+) -> list[str]:
     return [item.value for item in enum_type]
 
 
@@ -85,6 +105,58 @@ class Operator(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     department: Mapped[Department] = relationship(back_populates="operators")
+
+
+_MODULE_KEY_CHECK_VALUES = ", ".join(
+    f"'{module_key.value}'" for module_key in CANONICAL_MODULE_KEY_ORDER
+)
+
+
+class OperatorModulePermission(TimestampMixin, Base):
+    """One positive, same-Department module grant for one Operator.
+
+    The table deliberately has no surrogate ID, policy blob, allow/deny flag,
+    wildcard, action, or resource scope.  A row is the grant; its absence is a
+    denial.
+    """
+
+    __tablename__ = "operator_module_permissions"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "operator_id",
+            "module_key",
+            name="pk_operator_module_permissions",
+        ),
+        ForeignKeyConstraint(
+            ["operator_id", "department_id"],
+            ["operators.id", "operators.department_id"],
+            name="fk_operator_module_permissions_operator_department",
+            ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            f"module_key IN ({_MODULE_KEY_CHECK_VALUES})",
+            name="ck_operator_module_permissions_module_key",
+        ),
+        Index(
+            "ix_operator_module_permissions_department_operator",
+            "department_id",
+            "operator_id",
+        ),
+    )
+
+    operator_id: Mapped[UUID] = mapped_column(nullable=False)
+    department_id: Mapped[UUID] = mapped_column(nullable=False)
+    module_key: Mapped[ModuleKey] = mapped_column(
+        Enum(
+            ModuleKey,
+            name="operator_module_key",
+            native_enum=False,
+            create_constraint=False,
+            length=18,
+            values_callable=enum_values,
+        ),
+        nullable=False,
+    )
 
 
 class AuthSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):

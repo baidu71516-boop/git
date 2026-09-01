@@ -1,7 +1,13 @@
 """Import all model modules so Alembic sees complete metadata."""
 
 from backend_core.audit.models import AuditLog
-from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.models import (
+    AuthSession,
+    Department,
+    DepartmentPermission,
+    Operator,
+    OperatorModulePermission,
+)
 from backend_core.content_activity.models import (
     ContentActivityObservation,
     ContentActivityProjection,
@@ -74,6 +80,7 @@ __all__ = [
     "RefreshQueue",
     "RefreshQueueItem",
     "Operator",
+    "OperatorModulePermission",
     "Phase3AIdempotencyRecord",
     "ProviderAccountIdentity",
     "ProviderAccountIdentityVerification",

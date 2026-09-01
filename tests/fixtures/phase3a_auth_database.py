@@ -22,6 +22,7 @@ _SQLITE_AUTH_TABLES = (
     "departments",
     "department_permissions",
     "operators",
+    "operator_module_permissions",
     "sessions",
     "audit_logs",
 )
