@@ -38,7 +38,8 @@ export function AppShell({
   description,
   department,
   operator,
-  role,
+  effectiveRole,
+  showPermissionsNav,
   onLogout,
   logoutLoading,
   children,
@@ -47,7 +48,8 @@ export function AppShell({
   description?: string;
   department: string;
   operator: string | null;
-  role: string;
+  effectiveRole: string | null;
+  showPermissionsNav?: boolean;
   onLogout: () => void;
   logoutLoading?: boolean;
   children: ReactNode;
@@ -58,7 +60,8 @@ export function AppShell({
         <SidebarNav
           department={department}
           operator={operator}
-          role={role}
+          effectiveRole={effectiveRole}
+          showPermissionsNav={showPermissionsNav}
           onLogout={onLogout}
           logoutLoading={logoutLoading}
         />
@@ -68,7 +71,7 @@ export function AppShell({
             <UserMenu
               department={department}
               operator={operator}
-              role={role}
+              effectiveRole={effectiveRole}
               onLogout={onLogout}
               loading={logoutLoading}
             />

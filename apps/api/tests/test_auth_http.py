@@ -36,10 +36,17 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                 role=Role.VIEWER,
                 status=OperatorStatus.ACTIVE,
             )
+            below_ceiling_operator = Operator(
+                department_id=department.id,
+                name="Operator Below Super Admin Ceiling",
+                role=Role.OPERATOR,
+                status=OperatorStatus.ACTIVE,
+            )
             session.add_all(
                 [
-                    DepartmentPermission(department_id=department.id, role=Role.VIEWER),
+                    DepartmentPermission(department_id=department.id, role=Role.SUPER_ADMIN),
                     operator,
+                    below_ceiling_operator,
                 ]
             )
             await session.commit()
@@ -84,7 +91,9 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                             },
                         )
                         assert login.status_code == 200
-                        assert login.json()["data"]["role"] == "viewer"
+                        assert login.json()["data"]["role"] == "super_admin"
+                        assert login.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert login.json()["data"]["effective_role"] is None
                         assert "session_token" not in login.text
                         session_cookie = login.headers.get_list("set-cookie")[0].lower()
                         assert "httponly" in session_cookie
@@ -96,6 +105,8 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         before_selection = await client.get("/api/v1/auth/me")
                         assert before_selection.status_code == 200
                         assert before_selection.json()["data"]["operator"] is None
+                        assert before_selection.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert before_selection.json()["data"]["effective_role"] is None
 
                         business_before_selection = await client.get("/api/v1/influencers")
                         assert business_before_selection.status_code == 409
@@ -117,9 +128,25 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         )
                         assert selected.status_code == 200
                         assert selected.json()["data"]["operator"]["id"] == str(operator.id)
-                        # Public `role` remains the legacy Department-role field until Web and
-                        # API response composition change together in a later Task.
-                        assert selected.json()["data"]["role"] == "viewer"
+                        # The legacy role is a Department ceiling. Current authority is
+                        # only the separately resolved, persisted Operator role.
+                        assert selected.json()["data"]["role"] == "super_admin"
+                        assert selected.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert selected.json()["data"]["effective_role"] == "viewer"
+
+                        selected_me = await client.get("/api/v1/auth/me")
+                        assert selected_me.status_code == 200
+                        assert selected_me.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert selected_me.json()["data"]["effective_role"] == "viewer"
+
+                        selected_operator = await client.post(
+                            "/api/v1/auth/select-operator",
+                            json={"operator_id": str(below_ceiling_operator.id)},
+                            headers={"X-CSRF-Token": csrf_token},
+                        )
+                        assert selected_operator.status_code == 200
+                        assert selected_operator.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert selected_operator.json()["data"]["effective_role"] == "operator"
 
                         denied_admin = await client.post(
                             f"/api/v1/admin/departments/{department.id}/reset-password",

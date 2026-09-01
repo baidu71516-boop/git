@@ -121,7 +121,7 @@ export function BulkImportPreviewWorkspace() {
       description="上传达人数据，完成文件检查后生成数据预览。"
       department="界面预览"
       operator="预览用户"
-      role="仅展示"
+      effectiveRole="仅展示"
       onLogout={noOperation}
     >
       <section

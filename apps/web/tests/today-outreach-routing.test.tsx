@@ -23,7 +23,7 @@ describe("today outreach route and navigation", () => {
       <SidebarNav
         department="测试部门"
         operator="王小明"
-        role="操作员"
+        effectiveRole="操作员"
         onLogout={() => undefined}
       />,
     );

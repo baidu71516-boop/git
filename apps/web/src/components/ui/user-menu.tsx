@@ -7,7 +7,7 @@ const { Text } = Typography;
 type UserMenuProps = {
   department: string;
   operator: string | null;
-  role: string;
+  effectiveRole: string | null;
   onLogout: () => void;
   loading?: boolean;
 };
@@ -15,7 +15,7 @@ type UserMenuProps = {
 export function UserMenu({
   department,
   operator,
-  role,
+  effectiveRole,
   onLogout,
   loading = false,
 }: UserMenuProps) {
@@ -23,7 +23,9 @@ export function UserMenu({
     {
       key: "identity",
       disabled: true,
-      label: `${department} · ${operator ?? "待选择"} · ${role}`,
+      label: `${department} · ${operator ?? "待选择"}${
+        effectiveRole ? ` · ${effectiveRole}` : " · 未选择身份"
+      }`,
     },
     { type: "divider" },
     {
@@ -48,6 +50,9 @@ export function UserMenu({
         <Avatar size="small" icon={<UserOutlined />} />
         <span className="user-menu-copy">
           <Text strong>{operator ?? "待选择"}</Text>
+          {effectiveRole ? (
+            <Text type="secondary"> · {effectiveRole}</Text>
+          ) : null}
         </span>
         <DownOutlined />
       </button>

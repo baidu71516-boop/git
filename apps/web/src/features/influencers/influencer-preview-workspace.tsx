@@ -65,7 +65,7 @@ export function InfluencerPreviewWorkspace({
       title="达人库"
       department="界面预览"
       operator="虚构数据"
-      role="仅供开发"
+      effectiveRole="仅供开发"
       onLogout={noOperation}
     >
       <section className="influencer-workspace" aria-label="达人库视觉预览">

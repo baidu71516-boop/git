@@ -51,7 +51,7 @@ export function TodayPreviewWorkspace() {
       title="今日触达"
       department="开发预览"
       operator="内存 fixture"
-      role="仅供开发"
+      effectiveRole="仅供开发"
       onLogout={noOperation}
     >
       <section

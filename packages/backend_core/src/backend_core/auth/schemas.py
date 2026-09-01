@@ -43,6 +43,8 @@ class OperatorPublic(BaseModel):
 class LoginPublic(BaseModel):
     department: DepartmentPublic
     role: Role
+    department_role_ceiling: Role
+    effective_role: Role | None
     operator_required: bool
     expires_at: datetime
 
@@ -51,6 +53,8 @@ class AuthMePublic(BaseModel):
     department: DepartmentPublic
     operator: OperatorPublic | None
     role: Role
+    department_role_ceiling: Role
+    effective_role: Role | None
     expires_at: datetime
 
 

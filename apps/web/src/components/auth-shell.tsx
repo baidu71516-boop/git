@@ -28,6 +28,7 @@ import { CampaignListView } from "@/features/campaigns/campaign-list-view";
 import { CandidatePoolDetailView } from "@/features/candidate-pools/candidate-pool-detail-view";
 import { CandidatePoolListView } from "@/features/candidate-pools/candidate-pool-list-view";
 import { CandidateRunDetailView } from "@/features/candidate-pools/candidate-run-detail-view";
+import { PermissionsWorkspace } from "@/features/permissions/permissions-workspace";
 import { AppShell } from "@/components/app-shell";
 import { ComplianceFooter } from "@/components/compliance-footer";
 import { ApiClientError, apiRequest } from "@/lib/api/client";
@@ -53,7 +54,11 @@ type Operator = {
 type AuthMe = {
   department: Department;
   operator: Operator | null;
+  // Legacy Department ceiling retained only for response compatibility. It is
+  // never used by this shell as a selected Operator's business authority.
   role: Role;
+  department_role_ceiling: Role;
+  effective_role: Role | null;
   expires_at: string;
 };
 
@@ -77,16 +82,13 @@ type AuthWorkspace =
   | "refresh-queues"
   | "outreach-today"
   | "campaigns"
-  | "candidate-pools";
+  | "candidate-pools"
+  | "permissions";
 
-function workspaceRequiresOperator(
-  workspace: AuthWorkspace,
-  role: Role,
-): boolean {
-  return (
-    (workspace === "imports" && role !== "viewer") ||
-    (workspace === "refresh-queues" && role !== "viewer")
-  );
+function workspaceRequiresOperator(workspace: AuthWorkspace): boolean {
+  // Import history and the influencer shell are bootstrap/read surfaces. Every
+  // business workspace waits for the authoritative selected-role response.
+  return workspace !== "import-jobs" && workspace !== "influencers";
 }
 
 export function AuthShell({
@@ -110,9 +112,7 @@ export function AuthShell({
   const [operators, setOperators] = useState<Operator[]>([]);
   const [auth, setAuth] = useState<AuthMe | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const requiresOperator = auth
-    ? workspaceRequiresOperator(workspace, auth.role)
-    : false;
+  const requiresOperator = auth ? workspaceRequiresOperator(workspace) : false;
 
   const loadDepartments = useCallback(async () => {
     const response = await apiRequest<Department[]>("/departments");
@@ -131,14 +131,14 @@ export function AuthShell({
         setAuth(response.data);
         if (
           response.data &&
-          workspaceRequiresOperator(workspace, response.data.role) &&
+          workspaceRequiresOperator(workspace) &&
           !response.data.operator
         ) {
           await loadOperators();
         }
         if (
           workspace === "refresh-queues" &&
-          response.data?.role === "super_admin"
+          response.data?.effective_role === "super_admin"
         ) {
           await loadDepartments();
         }
@@ -166,14 +166,14 @@ export function AuthShell({
       setAuth(meResponse.data);
       if (
         meResponse.data &&
-        workspaceRequiresOperator(workspace, meResponse.data.role) &&
+        workspaceRequiresOperator(workspace) &&
         !meResponse.data.operator
       ) {
         await loadOperators();
       }
       if (
         workspace === "refresh-queues" &&
-        meResponse.data?.role === "super_admin"
+        meResponse.data?.effective_role === "super_admin"
       ) {
         await loadDepartments();
       }
@@ -211,6 +211,21 @@ export function AuthShell({
       setError(caught instanceof Error ? caught.message : "退出失败");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function refreshAuth() {
+    try {
+      const response = await apiRequest<AuthMe>("/auth/me");
+      setAuth(response.data);
+    } catch (caught) {
+      if (caught instanceof ApiClientError && caught.status === 401) {
+        setAuth(null);
+        setOperators([]);
+        await loadDepartments();
+        return;
+      }
+      throw caught;
     }
   }
 
@@ -303,9 +318,11 @@ export function AuthShell({
                   : candidatePoolId
                     ? "候选池详情"
                     : "候选池"
-                : influencerId
-                  ? "达人详情"
-                  : "达人库";
+                : workspace === "permissions"
+                  ? "权限管理"
+                  : influencerId
+                    ? "达人详情"
+                    : "达人库";
 
   return (
     <AppShell
@@ -317,12 +334,30 @@ export function AuthShell({
       }
       department={auth.department.name}
       operator={auth.operator?.name ?? null}
-      role={roleLabels[auth.role]}
+      effectiveRole={
+        auth.effective_role ? roleLabels[auth.effective_role] : null
+      }
+      showPermissionsNav={auth.effective_role === "super_admin"}
       onLogout={() => void handleLogout()}
       logoutLoading={submitting}
     >
       {error ? <Alert type="error" showIcon message={error} /> : null}
-      {workspace === "influencers" ? (
+      {workspace === "permissions" ? (
+        auth.effective_role === "super_admin" ? (
+          <PermissionsWorkspace onAuthRefresh={refreshAuth} />
+        ) : (
+          <Alert
+            type="warning"
+            showIcon
+            message="当前身份无权访问权限管理"
+            description={
+              auth.operator
+                ? "请使用拥有超级管理员有效角色的操作人。"
+                : "请选择操作人后继续。"
+            }
+          />
+        )
+      ) : workspace === "influencers" ? (
         influencerId ? (
           <InfluencerDetailWorkspace influencerId={influencerId} />
         ) : (
@@ -331,12 +366,15 @@ export function AuthShell({
       ) : workspace === "import-jobs" ? (
         <ImportJobHistory />
       ) : workspace === "refresh-queues" ? (
-        auth.role === "viewer" || auth.operator ? (
+        auth.effective_role ? (
           refreshQueueId ? (
-            <RefreshQueueDetail queueId={refreshQueueId} role={auth.role} />
+            <RefreshQueueDetail
+              queueId={refreshQueueId}
+              role={auth.effective_role}
+            />
           ) : (
             <RefreshQueueList
-              role={auth.role}
+              role={auth.effective_role}
               departments={departments.filter(
                 (department) => department.status === "active",
               )}
@@ -347,42 +385,46 @@ export function AuthShell({
       ) : workspace === "outreach-today" ? (
         <TodayWorkspace />
       ) : workspace === "campaigns" ? (
-        campaignId ? (
-          <CampaignDetailView
-            campaignId={campaignId}
-            role={auth.role}
-            hasSelectedOperator={auth.operator !== null}
-          />
-        ) : (
-          <CampaignListView
-            role={auth.role}
-            hasSelectedOperator={auth.operator !== null}
-          />
-        )
-      ) : workspace === "candidate-pools" ? (
-        candidatePoolId ? (
-          candidateRunId ? (
-            <CandidateRunDetailView
-              poolId={candidatePoolId}
-              runId={candidateRunId}
-              role={auth.role}
+        auth.effective_role ? (
+          campaignId ? (
+            <CampaignDetailView
+              campaignId={campaignId}
+              role={auth.effective_role}
               hasSelectedOperator={auth.operator !== null}
             />
           ) : (
-            <CandidatePoolDetailView
-              poolId={candidatePoolId}
-              role={auth.role}
+            <CampaignListView
+              role={auth.effective_role}
               hasSelectedOperator={auth.operator !== null}
             />
           )
-        ) : (
-          <CandidatePoolListView
-            role={auth.role}
-            hasSelectedOperator={auth.operator !== null}
-          />
-        )
-      ) : auth.role === "viewer" || auth.operator ? (
-        <DataCollectionWorkspace role={auth.role} />
+        ) : null
+      ) : workspace === "candidate-pools" ? (
+        auth.effective_role ? (
+          candidatePoolId ? (
+            candidateRunId ? (
+              <CandidateRunDetailView
+                poolId={candidatePoolId}
+                runId={candidateRunId}
+                role={auth.effective_role}
+                hasSelectedOperator={auth.operator !== null}
+              />
+            ) : (
+              <CandidatePoolDetailView
+                poolId={candidatePoolId}
+                role={auth.effective_role}
+                hasSelectedOperator={auth.operator !== null}
+              />
+            )
+          ) : (
+            <CandidatePoolListView
+              role={auth.effective_role}
+              hasSelectedOperator={auth.operator !== null}
+            />
+          )
+        ) : null
+      ) : auth.effective_role ? (
+        <DataCollectionWorkspace role={auth.effective_role} />
       ) : null}
 
       <Modal

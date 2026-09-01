@@ -39,6 +39,8 @@ def context_public(context: AuthContext) -> AuthMePublic:
             else None
         ),
         role=context.role,
+        department_role_ceiling=context.department_role_ceiling or context.role,
+        effective_role=context.effective_role,
         expires_at=context.auth_session.expires_at,
     )
 
@@ -59,6 +61,8 @@ async def login(
     public = LoginPublic(
         department=DepartmentPublic.model_validate(result.department),
         role=result.role,
+        department_role_ceiling=result.role,
+        effective_role=None,
         operator_required=True,
         expires_at=result.auth_session.expires_at,
     )

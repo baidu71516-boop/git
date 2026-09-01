@@ -23,7 +23,8 @@ const { Text } = Typography;
 type SidebarNavProps = {
   department: string;
   operator: string | null;
-  role: string;
+  effectiveRole: string | null;
+  showPermissionsNav?: boolean;
   onLogout: () => void;
   logoutLoading?: boolean;
 };
@@ -76,7 +77,13 @@ const navGroups = [
   },
 ] as const;
 
-function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
+function NavigationLinks({
+  showPermissionsNav = false,
+  onNavigate,
+}: {
+  showPermissionsNav?: boolean;
+  onNavigate?: () => void;
+}) {
   const pathname = usePathname();
   return (
     <nav className="sidebar-links" aria-label="主导航">
@@ -103,6 +110,24 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
           })}
         </div>
       ))}
+      {showPermissionsNav ? (
+        <div className="sidebar-group">
+          <Text className="sidebar-group-label">管理</Text>
+          <Link
+            className={`sidebar-link${
+              pathname.startsWith("/admin/permissions") ? " is-active" : ""
+            }`}
+            href="/admin/permissions"
+            aria-current={
+              pathname.startsWith("/admin/permissions") ? "page" : undefined
+            }
+            onClick={onNavigate}
+          >
+            <ProfileOutlined aria-hidden="true" />
+            <span>权限管理</span>
+          </Link>
+        </div>
+      ) : null}
     </nav>
   );
 }
@@ -110,7 +135,8 @@ function NavigationLinks({ onNavigate }: { onNavigate?: () => void }) {
 export function SidebarNav({
   department,
   operator,
-  role,
+  effectiveRole,
+  showPermissionsNav,
   onLogout,
   logoutLoading,
 }: SidebarNavProps) {
@@ -124,12 +150,17 @@ export function SidebarNav({
           <div className="brand-caption">内部工作台</div>
         </div>
       </div>
-      <NavigationLinks onNavigate={() => setOpen(false)} />
+      <NavigationLinks
+        showPermissionsNav={showPermissionsNav}
+        onNavigate={() => setOpen(false)}
+      />
       <div className="sidebar-identity">
         <div className="sidebar-identity-label">当前身份</div>
         <div className="sidebar-identity-value">{department}</div>
         <div className="sidebar-identity-meta">{operator ?? "待选择"}</div>
-        <StatusBadge tone="processing">{role}</StatusBadge>
+        {effectiveRole ? (
+          <StatusBadge tone="processing">{effectiveRole}</StatusBadge>
+        ) : null}
         <Button
           className="sidebar-logout"
           type="text"

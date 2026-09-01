@@ -23,7 +23,7 @@ export function InfluencerPreviewShell({
       description={description}
       department="界面预览"
       operator="预览用户"
-      role="仅展示"
+      effectiveRole="仅展示"
       onLogout={noOperation}
     >
       {children}
