@@ -9,7 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.auth.authorization import (
+    EffectiveAuthorizationContext,
+    ModuleKey,
+    ResolvedDepartmentScope,
+    role_is_within_department_ceiling,
+)
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.errors import AuthError
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.repository import AuthRepository
 from backend_core.auth.security import (
@@ -22,6 +29,8 @@ from backend_core.auth.security import (
 )
 from backend_core.auth.throttle import LoginThrottleProtocol
 
+__all__ = ["AuthContext", "AuthError", "AuthService", "BootstrapService", "LoginResult"]
+
 
 class Clock(Protocol):
     def now(self) -> datetime: ...
@@ -30,14 +39,6 @@ class Clock(Protocol):
 class SystemClock:
     def now(self) -> datetime:
         return datetime.now(UTC)
-
-
-class AuthError(Exception):
-    def __init__(self, status_code: int, code: str, message: str) -> None:
-        self.status_code = status_code
-        self.code = code
-        self.message = message
-        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -53,8 +54,18 @@ class LoginResult:
 class AuthContext:
     department: Department
     operator: Operator | None
+    # Kept as a temporary compatibility alias for the pre-V1 Department role.
+    # New authorization code must use the explicit fields below.
     role: Role
     auth_session: AuthSession
+    department_role_ceiling: Role | None = None
+    effective_role: Role | None = None
+
+    def __post_init__(self) -> None:
+        if self.department_role_ceiling is None:
+            object.__setattr__(self, "department_role_ceiling", self.role)
+        if self.effective_role is None and self.operator is not None:
+            object.__setattr__(self, "effective_role", self.operator.role)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -232,13 +243,103 @@ class AuthService:
         operator: Operator | None = None
         if auth_session.operator_id is not None:
             candidate = await self.repository.get_operator(auth_session.operator_id)
-            if candidate is not None and candidate.status == OperatorStatus.ACTIVE:
-                operator = candidate
+            if (
+                candidate is None
+                or candidate.department_id != department.id
+                or candidate.status != OperatorStatus.ACTIVE
+            ):
+                await self._revoke_bound_session(auth_session, now)
+                raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+            if not role_is_within_department_ceiling(candidate.role, permission.role):
+                await self._revoke_bound_session(auth_session, now)
+                raise AuthError(
+                    403,
+                    "ROLE_CEILING_EXCEEDED",
+                    "Operator role exceeds Department role ceiling",
+                )
+            operator = candidate
         return AuthContext(
             department=department,
             operator=operator,
             role=permission.role,
             auth_session=auth_session,
+            department_role_ceiling=permission.role,
+            effective_role=operator.role if operator is not None else None,
+        )
+
+    async def _revoke_bound_session(self, auth_session: AuthSession, now: datetime) -> None:
+        auth_session.revoked_at = now
+        await self.session.commit()
+
+    async def resolve_effective_authorization(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> EffectiveAuthorizationContext:
+        """Resolve current-state V1 authority without changing existing route wiring."""
+
+        department = await self.repository.get_department(context.auth_session.department_id)
+        if department is None or department.status != DepartmentStatus.ACTIVE:
+            raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+        permission = await self.repository.get_department_permission(department.id)
+        if permission is None:
+            raise AuthError(403, "DEPARTMENT_PERMISSION_MISSING", "Department permission missing")
+        if context.auth_session.operator_id is None:
+            raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+
+        operator = await self.repository.get_operator(context.auth_session.operator_id)
+        now = self.clock.now()
+        if (
+            operator is None
+            or operator.department_id != department.id
+            or operator.status != OperatorStatus.ACTIVE
+        ):
+            await self._revoke_bound_session(context.auth_session, now)
+            raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+        if not role_is_within_department_ceiling(operator.role, permission.role):
+            await self._revoke_bound_session(context.auth_session, now)
+            raise AuthError(
+                403,
+                "ROLE_CEILING_EXCEEDED",
+                "Operator role exceeds Department role ceiling",
+            )
+
+        target_department_id = department_id or department.id
+        if target_department_id != department.id and operator.role is not Role.SUPER_ADMIN:
+            raise AuthError(404, "RESOURCE_NOT_FOUND", "Resource not found")
+        if target_department_id != department.id:
+            target_department = await self.repository.get_department(target_department_id)
+            if target_department is None or target_department.status != DepartmentStatus.ACTIVE:
+                raise AuthError(404, "DEPARTMENT_NOT_FOUND", "Department not found")
+
+        # Super Admin is deliberately implicit-all.  Non-Super-Admin grants are
+        # read on every business request so an Operator-admin change takes
+        # effect without a Session refresh or an authorization snapshot.
+        authorized_modules = (
+            frozenset()
+            if operator.role is Role.SUPER_ADMIN
+            else frozenset(
+                module_key
+                for module_key in await self.repository.list_operator_module_grants(
+                    operator_id=operator.id,
+                    department_id=department.id,
+                )
+                if module_key is not ModuleKey.ADMIN
+            )
+        )
+
+        return EffectiveAuthorizationContext(
+            department=department,
+            operator=operator,
+            department_role_ceiling=permission.role,
+            effective_role=operator.role,
+            department_scope=ResolvedDepartmentScope(
+                department_id=target_department_id,
+                cross_department_override=target_department_id != department.id,
+            ),
+            auth_session=context.auth_session,
+            authorized_modules=authorized_modules,
         )
 
     def validate_csrf(self, context: AuthContext, csrf_token: str | None) -> None:
@@ -276,6 +377,15 @@ class AuthService:
             or operator.status != OperatorStatus.ACTIVE
         ):
             raise AuthError(404, "OPERATOR_NOT_FOUND", "Operator not found")
+        if not role_is_within_department_ceiling(
+            operator.role,
+            context.department_role_ceiling or context.role,
+        ):
+            raise AuthError(
+                403,
+                "ROLE_CEILING_EXCEEDED",
+                "Operator role exceeds Department role ceiling",
+            )
 
         original_role = context.role
         context.auth_session.operator_id = operator.id
@@ -293,6 +403,8 @@ class AuthService:
             operator=operator,
             role=original_role,
             auth_session=context.auth_session,
+            department_role_ceiling=context.department_role_ceiling,
+            effective_role=operator.role,
         )
 
     async def logout(
@@ -315,14 +427,14 @@ class AuthService:
 
     async def reset_department_password(
         self,
-        context: AuthContext,
+        context: AuthContext | EffectiveAuthorizationContext,
         *,
         department_id: UUID,
         new_password: str,
         ip: str,
         user_agent: str,
     ) -> int:
-        if context.role != Role.SUPER_ADMIN:
+        if context.effective_role is not Role.SUPER_ADMIN:
             raise AuthError(403, "PERMISSION_DENIED", "Super admin permission required")
         department = await self.repository.get_department(department_id)
         if department is None:

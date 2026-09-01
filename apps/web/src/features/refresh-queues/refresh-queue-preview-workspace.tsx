@@ -45,7 +45,7 @@ function PreviewShell({ children }: { children: ReactNode }) {
       title="数据更新 · 界面预览"
       department="界面预览"
       operator="预览操作人"
-      role="仅展示"
+      effectiveRole="仅展示"
       onLogout={noOperation}
     >
       {children}

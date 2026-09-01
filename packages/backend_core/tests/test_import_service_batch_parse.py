@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -340,7 +340,19 @@ def test_retry_mapping_guard_rbac_nested_404_and_exclude_removes_staging_rows() 
                 )
             assert_error(mapping_required.value, "MAPPING_REQUIRED", 409)
 
-            viewer = replace(harness.context, role=Role.VIEWER)
+            assert harness.context.operator is not None
+            viewer = AuthContext(
+                department=harness.context.department,
+                operator=Operator(
+                    id=harness.context.operator.id,
+                    department_id=harness.context.department.id,
+                    name=harness.context.operator.name,
+                    role=Role.VIEWER,
+                    status=OperatorStatus.ACTIVE,
+                ),
+                role=Role.OPERATOR,
+                auth_session=harness.context.auth_session,
+            )
             with pytest.raises(ImportDomainError) as viewer_error:
                 await harness.service.retry_import_job_file(
                     viewer,

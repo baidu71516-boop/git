@@ -22,7 +22,7 @@ describe("AppShell", () => {
         title="数据采集"
         department="商务部"
         operator="操作人"
-        role="操作员"
+        effectiveRole="操作员"
         onLogout={vi.fn()}
       >
         <div>页面内容</div>

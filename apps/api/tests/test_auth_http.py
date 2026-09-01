@@ -32,14 +32,21 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
             await session.flush()
             operator = Operator(
                 department_id=department.id,
-                name="Privileged Name Only",
-                role=Role.SUPER_ADMIN,
+                name="Viewer Operator",
+                role=Role.VIEWER,
+                status=OperatorStatus.ACTIVE,
+            )
+            below_ceiling_operator = Operator(
+                department_id=department.id,
+                name="Operator Below Super Admin Ceiling",
+                role=Role.OPERATOR,
                 status=OperatorStatus.ACTIVE,
             )
             session.add_all(
                 [
-                    DepartmentPermission(department_id=department.id, role=Role.VIEWER),
+                    DepartmentPermission(department_id=department.id, role=Role.SUPER_ADMIN),
                     operator,
+                    below_ceiling_operator,
                 ]
             )
             await session.commit()
@@ -84,7 +91,9 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                             },
                         )
                         assert login.status_code == 200
-                        assert login.json()["data"]["role"] == "viewer"
+                        assert login.json()["data"]["role"] == "super_admin"
+                        assert login.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert login.json()["data"]["effective_role"] is None
                         assert "session_token" not in login.text
                         session_cookie = login.headers.get_list("set-cookie")[0].lower()
                         assert "httponly" in session_cookie
@@ -96,6 +105,17 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         before_selection = await client.get("/api/v1/auth/me")
                         assert before_selection.status_code == 200
                         assert before_selection.json()["data"]["operator"] is None
+                        assert (
+                            before_selection.json()["data"]["department_role_ceiling"]
+                            == "super_admin"
+                        )
+                        assert before_selection.json()["data"]["effective_role"] is None
+
+                        business_before_selection = await client.get("/api/v1/influencers")
+                        assert business_before_selection.status_code == 409
+                        assert (
+                            business_before_selection.json()["error"]["code"] == "OPERATOR_REQUIRED"
+                        )
 
                         csrf_rejected = await client.post(
                             "/api/v1/auth/select-operator",
@@ -111,8 +131,30 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         )
                         assert selected.status_code == 200
                         assert selected.json()["data"]["operator"]["id"] == str(operator.id)
-                        # Operator Role is attribution data; authority remains Department Role.
-                        assert selected.json()["data"]["role"] == "viewer"
+                        # The legacy role is a Department ceiling. Current authority is
+                        # only the separately resolved, persisted Operator role.
+                        assert selected.json()["data"]["role"] == "super_admin"
+                        assert selected.json()["data"]["department_role_ceiling"] == "super_admin"
+                        assert selected.json()["data"]["effective_role"] == "viewer"
+
+                        selected_me = await client.get("/api/v1/auth/me")
+                        assert selected_me.status_code == 200
+                        assert (
+                            selected_me.json()["data"]["department_role_ceiling"] == "super_admin"
+                        )
+                        assert selected_me.json()["data"]["effective_role"] == "viewer"
+
+                        selected_operator = await client.post(
+                            "/api/v1/auth/select-operator",
+                            json={"operator_id": str(below_ceiling_operator.id)},
+                            headers={"X-CSRF-Token": csrf_token},
+                        )
+                        assert selected_operator.status_code == 200
+                        assert (
+                            selected_operator.json()["data"]["department_role_ceiling"]
+                            == "super_admin"
+                        )
+                        assert selected_operator.json()["data"]["effective_role"] == "operator"
 
                         denied_admin = await client.post(
                             f"/api/v1/admin/departments/{department.id}/reset-password",
@@ -137,7 +179,7 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
     asyncio.run(scenario())
 
 
-def test_operator_directory_uses_phase3a_department_scope_without_selected_operator() -> None:
+def test_operator_directory_stays_same_department_without_selected_operator() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite://")
         async with engine.begin() as connection:
@@ -238,44 +280,45 @@ def test_operator_directory_uses_phase3a_department_scope_without_selected_opera
                             str(super_operator.id)
                         ]
 
-                        cross_department = await client.get(
+                        ignored_cross_department_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(target_department.id)},
                         )
-                        assert cross_department.status_code == 200
-                        assert cross_department.json()["data"] == [
+                        assert ignored_cross_department_header.status_code == 200
+                        assert ignored_cross_department_header.json()["data"] == [
                             {
-                                "id": str(target_active.id),
-                                "department_id": str(target_department.id),
-                                "name": target_active.name,
+                                "id": str(super_operator.id),
+                                "department_id": str(super_department.id),
+                                "name": super_operator.name,
                                 "role": "operator",
                                 "status": "active",
                             }
                         ]
 
-                        disabled_department_response = await client.get(
+                        ignored_disabled_department_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(disabled_department.id)},
                         )
-                        assert disabled_department_response.status_code == 404
+                        assert ignored_disabled_department_header.status_code == 200
                         assert (
-                            disabled_department_response.json()["error"]["code"]
-                            == "DEPARTMENT_NOT_FOUND"
+                            ignored_disabled_department_header.json()["data"] == own.json()["data"]
                         )
 
-                        invalid = await client.get(
+                        ignored_invalid_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": "not-a-uuid"},
                         )
-                        assert invalid.status_code == 422
-                        duplicated = await client.get(
+                        assert ignored_invalid_header.status_code == 200
+                        assert ignored_invalid_header.json()["data"] == own.json()["data"]
+                        ignored_duplicate_header = await client.get(
                             "/api/v1/operators",
                             headers=[
                                 ("X-Department-ID", str(target_department.id)),
                                 ("X-Department-ID", str(target_department.id)),
                             ],
                         )
-                        assert duplicated.status_code == 422
+                        assert ignored_duplicate_header.status_code == 200
+                        assert ignored_duplicate_header.json()["data"] == own.json()["data"]
 
                         normal_login = await client.post(
                             "/api/v1/auth/login",
@@ -285,27 +328,28 @@ def test_operator_directory_uses_phase3a_department_scope_without_selected_opera
                             },
                         )
                         assert normal_login.status_code == 200
-                        # No selected Operator: Viewer reads are still allowed.
+                        # The bootstrap selection directory remains usable with
+                        # a valid session before an Operator is selected.
                         normal_own = await client.get("/api/v1/operators")
                         assert normal_own.status_code == 200
                         assert [item["id"] for item in normal_own.json()["data"]] == [
                             str(normal_operator.id)
                         ]
-                        concealed = await client.get(
+                        normal_ignored_cross_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(target_department.id)},
                         )
-                        assert concealed.status_code == 404
-                        assert concealed.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+                        assert normal_ignored_cross_header.status_code == 200
+                        assert (
+                            normal_ignored_cross_header.json()["data"] == normal_own.json()["data"]
+                        )
 
                     document = app.openapi()
                     operation = document["paths"]["/api/v1/operators"]["get"]
-                    header = next(
-                        parameter
-                        for parameter in operation["parameters"]
-                        if parameter["in"] == "header" and parameter["name"] == "X-Department-ID"
+                    assert not any(
+                        parameter["in"] == "header" and parameter["name"] == "X-Department-ID"
+                        for parameter in operation.get("parameters", [])
                     )
-                    assert header["required"] is False
                     assert "OperatorPublic" in str(
                         operation["responses"]["200"]["content"]["application/json"]["schema"]
                     )

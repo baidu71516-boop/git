@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.config import get_settings
 from backend_core.influencers.enums import (
     ContactFilter,
@@ -37,12 +37,16 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.http.dependencies import get_database_session, require_auth
+from app.http.dependencies import get_database_session, require_module
 from app.http.errors import ApiError
 from app.http.responses import SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/influencers", tags=["influencers"])
 settings = get_settings()
+InfluencerLibraryReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.INFLUENCER_LIBRARY))),
+]
 
 LIST_QUERY_PARAMETERS = frozenset(
     {
@@ -209,7 +213,7 @@ async def _service_call[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
 async def list_influencers(
     request: Request,
     query: Annotated[InfluencerListQuery, Depends(parse_influencer_list_query)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: InfluencerLibraryReadContext,
     service: Annotated[InfluencerService, Depends(get_influencer_service)],
 ) -> dict[str, Any]:
     page = await _service_call(service.list_influencers(context, query))
@@ -219,7 +223,7 @@ async def list_influencers(
 @router.get("/filter-options", response_model=SuccessEnvelope[InfluencerFilterOptions])
 async def get_filter_options(
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: InfluencerLibraryReadContext,
     service: Annotated[InfluencerService, Depends(get_influencer_service)],
 ) -> dict[str, Any]:
     options = await _service_call(service.get_filter_options(context))
@@ -234,7 +238,7 @@ async def get_filter_options(
 async def list_metric_snapshots(
     influencer_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: InfluencerLibraryReadContext,
     service: Annotated[InfluencerService, Depends(get_influencer_service)],
     pagination: Annotated[InfluencerListQuery, Depends(parse_snapshot_pagination)],
 ) -> dict[str, Any]:
@@ -253,7 +257,7 @@ async def list_metric_snapshots(
 async def get_influencer_detail(
     influencer_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: InfluencerLibraryReadContext,
     service: Annotated[InfluencerService, Depends(get_influencer_service)],
 ) -> dict[str, Any]:
     detail = await _service_call(service.get_influencer_detail(context, influencer_id))

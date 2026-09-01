@@ -5,7 +5,7 @@ from collections.abc import Awaitable
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.campaigns.access import DepartmentScope
 from backend_core.config import get_settings
 from backend_core.growth.enums import CandidatePoolKind, CandidatePoolRunStatus, CandidateResult
@@ -40,8 +40,8 @@ from app.http.dependencies import (
     get_database_session,
     get_targeting_task_dispatcher,
     get_user_agent,
-    require_auth,
-    require_targeting_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.errors import ApiError
 from app.http.phase3a_http import Phase3AHttpWrite
@@ -52,6 +52,14 @@ from app.http.targeting_tasks import TargetingTaskDispatcher
 router = APIRouter(prefix="/api/v1/candidate-pools", tags=["candidate-pools"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
+CandidatePoolsReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.CANDIDATE_POOLS))),
+]
+CandidatePoolsWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.CANDIDATE_POOLS))),
+]
 
 POOL_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
 RUN_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
@@ -178,7 +186,7 @@ def _log_dispatch_failure(*, run_id: UUID) -> None:
 async def list_candidate_pools(
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     cursor: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -204,7 +212,7 @@ async def create_candidate_pool(
     payload: CandidatePoolCreateRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CandidatePoolsWriteContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -236,7 +244,7 @@ async def list_candidate_pool_policies(
     pool_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
 ) -> dict[str, Any]:
     policies = await _service_call(
@@ -256,7 +264,7 @@ async def create_candidate_pool_policy(
     payload: TargetingPolicyCreateInput,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CandidatePoolsWriteContext,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
     # C3A intentionally has no standalone policy append operation. A policy
@@ -286,7 +294,7 @@ async def get_candidate_pool_policy(
     policy_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
 ) -> dict[str, Any]:
     policy = await _service_call(
@@ -310,7 +318,7 @@ async def list_candidate_pool_runs(
     pool_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     cursor: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -337,7 +345,7 @@ async def get_candidate_pool_run(
     run_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
 ) -> dict[str, Any]:
     run = await _service_call(
@@ -362,7 +370,7 @@ async def list_candidate_pool_run_members(
     run_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     cursor: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -399,7 +407,7 @@ async def reserve_candidate_pool_run(
     payload: CandidatePoolRunRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CandidatePoolsWriteContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
     dispatcher: Annotated[TargetingTaskDispatcher, Depends(get_targeting_task_dispatcher)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
@@ -442,7 +450,7 @@ async def get_candidate_pool(
     pool_id: UUID,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CandidatePoolsReadContext,
     service: Annotated[CandidatePoolService, Depends(get_candidate_pool_service)],
 ) -> dict[str, Any]:
     pool = await _service_call(

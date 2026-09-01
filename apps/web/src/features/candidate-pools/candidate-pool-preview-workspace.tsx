@@ -241,7 +241,7 @@ function PreviewFrame() {
         description="仅用于核对已冻结的 Candidate Pool 视觉基线。"
         department="开发预览"
         operator="内存 fixture"
-        role="仅供开发"
+        effectiveRole="仅供开发"
         onLogout={() => undefined}
       >
         <div className="candidate-pool-preview-workspace">

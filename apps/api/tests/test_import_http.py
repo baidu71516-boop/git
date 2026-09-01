@@ -14,8 +14,14 @@ from app.http.dependencies import (
     require_csrf_context,
 )
 from app.main import app
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
-from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.enums import NON_ADMIN_MODULE_KEYS, DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import (
+    AuthSession,
+    Department,
+    DepartmentPermission,
+    Operator,
+    OperatorModulePermission,
+)
 from backend_core.auth.security import hash_token
 from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
@@ -70,7 +76,7 @@ async def seed_context(
     operator = Operator(
         department_id=department.id,
         name=f"{department_name} 操作人",
-        role=Role.OPERATOR,
+        role=role,
         status=OperatorStatus.ACTIVE,
     )
     session.add(operator)
@@ -90,6 +96,15 @@ async def seed_context(
             auth_session,
         ]
     )
+    if role is not Role.SUPER_ADMIN:
+        session.add_all(
+            OperatorModulePermission(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_key=module_key,
+            )
+            for module_key in NON_ADMIN_MODULE_KEYS
+        )
     await session.commit()
     return AuthContext(
         department=department,
@@ -170,6 +185,11 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
                         async with AsyncClient(
                             transport=transport, base_url="http://test"
                         ) as client:
+                            client.cookies.set(
+                                get_settings().csrf_cookie_name,
+                                "csrf-HTTP Operator",
+                            )
+                            client.headers["X-CSRF-Token"] = "csrf-HTTP Operator"
                             created = await client.post(
                                 "/api/v1/collection-jobs",
                                 json={
@@ -334,6 +354,11 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
 
                             app.dependency_overrides[require_auth] = viewer_auth
                             app.dependency_overrides[require_csrf_context] = viewer_auth
+                            client.cookies.set(
+                                get_settings().csrf_cookie_name,
+                                "csrf-HTTP Viewer",
+                            )
+                            client.headers["X-CSRF-Token"] = "csrf-HTTP Viewer"
                             viewer_create = await client.post(
                                 "/api/v1/collection-jobs",
                                 json={
@@ -354,6 +379,11 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
 
                             app.dependency_overrides[require_auth] = no_operator_auth
                             app.dependency_overrides[require_csrf_context] = no_operator_auth
+                            client.cookies.set(
+                                get_settings().csrf_cookie_name,
+                                "csrf-HTTP No Operator",
+                            )
+                            client.headers["X-CSRF-Token"] = "csrf-HTTP No Operator"
                             missing_operator = await client.post(
                                 "/api/v1/collection-jobs",
                                 json={
@@ -372,6 +402,11 @@ def test_import_http_flow_rbac_scope_and_idempotent_dispatch() -> None:
 
                             app.dependency_overrides[require_auth] = admin_auth
                             app.dependency_overrides[require_csrf_context] = admin_auth
+                            client.cookies.set(
+                                get_settings().csrf_cookie_name,
+                                "csrf-HTTP Admin",
+                            )
+                            client.headers["X-CSRF-Token"] = "csrf-HTTP Admin"
                             admin_cross_read = await client.get(f"/api/v1/import-jobs/{job_id}")
                             assert admin_cross_read.status_code == 200
                 finally:

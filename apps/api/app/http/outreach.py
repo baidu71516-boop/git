@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.campaigns.access import DepartmentScope
 from backend_core.outreach.enums import (
     OutreachChannel,
@@ -38,8 +38,8 @@ from app.http.dependencies import (
     get_client_ip,
     get_database_session,
     get_user_agent,
-    require_auth,
-    require_targeting_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.phase3a_http import (
     Phase3AHttpWrite,
@@ -53,6 +53,22 @@ from app.http.responses import SuccessEnvelope, envelope
 # Keep this router independent of the Today projection router. `main.py` owns
 # their inclusion order and places the literal `/outreach-tasks/today` first.
 router = APIRouter(prefix="/api/v1", tags=["outreach"])
+CampaignsReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.CAMPAIGNS))),
+]
+CampaignsWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.CAMPAIGNS))),
+]
+TodayOutreachReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.TODAY_OUTREACH))),
+]
+TodayOutreachWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.TODAY_OUTREACH))),
+]
 
 type PositiveStrictInt = Annotated[StrictInt, Field(ge=1)]
 type ReasonCode = Annotated[
@@ -110,7 +126,7 @@ def get_outreach_service(
 async def get_outreach_target(
     target_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CampaignsReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[OutreachService, Depends(get_outreach_service)],
 ) -> dict[str, Any]:
@@ -132,7 +148,7 @@ async def update_outreach_target(
     payload: OutreachTargetUpdateRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[OutreachService, Depends(get_outreach_service)],
 ) -> dict[str, Any]:
     target = await service.update_target(
@@ -161,7 +177,7 @@ async def create_outreach_task(
     request: Request,
     response: Response,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[OutreachService, Depends(get_outreach_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -189,7 +205,7 @@ async def create_outreach_task(
 async def get_outreach_task(
     task_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: TodayOutreachReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[OutreachService, Depends(get_outreach_service)],
 ) -> dict[str, Any]:
@@ -211,7 +227,7 @@ async def transition_outreach_task(
     payload: OutreachTaskTransitionRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: TodayOutreachWriteContext,
     service: Annotated[OutreachService, Depends(get_outreach_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -238,7 +254,7 @@ async def transition_outreach_task(
 async def list_outreach_task_events(
     task_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: TodayOutreachReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[OutreachService, Depends(get_outreach_service)],
 ) -> dict[str, Any]:

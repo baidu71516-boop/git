@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, overload
 from uuid import UUID, uuid4
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import ANY_OF, EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.imports.enums import ImportRowAction
 from backend_core.imports.repository import ImportJobFileRecord
 from backend_core.imports.schemas import (
@@ -35,14 +35,26 @@ from app.http.dependencies import (
     get_import_service,
     get_import_task_dispatcher,
     get_user_agent,
-    require_auth,
-    require_import_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.import_tasks import ImportTaskDispatcher
 from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/import-jobs", tags=["import-jobs"])
 logger = logging.getLogger(__name__)
+DataCollectionWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.DATA_COLLECTION))),
+]
+ImportHistoryReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.IMPORT_HISTORY))),
+]
+SharedImportReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(ANY_OF(ModuleKey.DATA_COLLECTION, ModuleKey.IMPORT_HISTORY))),
+]
 IMPORT_ROWS_QUERY_PARAMETERS = frozenset({"offset", "limit", "action", "category"})
 IMPORT_JOB_LIST_QUERY_PARAMETERS = frozenset({"offset", "limit"})
 
@@ -223,7 +235,7 @@ async def upload_import_file(
     request: Request,
     collection_job_id: Annotated[UUID, Form()],
     file: Annotated[UploadFile, File()],
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> dict[str, Any]:
@@ -265,7 +277,7 @@ async def upload_import_file(
 async def create_bulk_import_job(
     payload: BulkImportJobCreate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.create_bulk_import_job(
@@ -286,7 +298,7 @@ async def create_bulk_import_job(
 )
 async def list_import_jobs(
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: ImportHistoryReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -322,7 +334,7 @@ async def upload_bulk_import_file(
     request: Request,
     client_file_id: Annotated[str, Form(min_length=1, max_length=160)],
     file: Annotated[UploadFile, File()],
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
     source_acquired_at: Annotated[datetime | None, Form()] = None,
@@ -376,7 +388,7 @@ async def upload_bulk_import_file(
 async def list_bulk_import_files(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: SharedImportReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     records = await service.list_import_job_files(context, import_job_id)
@@ -393,7 +405,7 @@ async def update_bulk_import_file(
     import_job_file_id: UUID,
     payload: SourceAcquiredAtUpdate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     record = await service.update_import_job_file_source_acquired_at(
@@ -424,7 +436,7 @@ async def update_bulk_import_file_mapping(
     import_job_file_id: UUID,
     payload: ImportMappingUpdate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
@@ -470,7 +482,7 @@ async def retry_bulk_import_file(
     import_job_id: UUID,
     import_job_file_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
@@ -508,7 +520,7 @@ async def exclude_bulk_import_file(
     import_job_id: UUID,
     import_job_file_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     record = await service.exclude_import_job_file(
@@ -529,7 +541,7 @@ async def exclude_bulk_import_file(
 async def get_import_job(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: SharedImportReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.get_import_job(context, import_job_id)
@@ -545,7 +557,7 @@ async def get_import_job(
 async def list_import_rows(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: SharedImportReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
@@ -577,7 +589,7 @@ async def update_mapping(
     import_job_id: UUID,
     payload: ImportMappingUpdate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> dict[str, Any]:
@@ -615,7 +627,7 @@ async def update_mapping(
 async def regenerate_preview(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
     payload: ImportPreviewInput | None = None,
@@ -662,7 +674,7 @@ async def regenerate_preview(
 async def retry_import_stage(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
@@ -716,7 +728,7 @@ async def confirm_import(
     import_job_id: UUID,
     payload: ImportConfirmInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
     dispatcher: Annotated[ImportTaskDispatcher, Depends(get_import_task_dispatcher)],
 ) -> JSONResponse:
@@ -756,7 +768,7 @@ async def confirm_import(
 async def cancel_import(
     import_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.cancel(

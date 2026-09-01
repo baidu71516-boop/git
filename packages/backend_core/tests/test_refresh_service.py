@@ -104,7 +104,7 @@ async def _seed_actor(
     operator = Operator(
         department_id=department.id,
         name=f"{name} operator",
-        role=Role.OPERATOR,
+        role=role,
         status=OperatorStatus.ACTIVE,
     )
     permission = DepartmentPermission(department_id=department.id, role=role)
@@ -305,10 +305,17 @@ def test_service_create_read_export_cancel_rbac_and_audit_contract() -> None:
                 assert all(log.operator_id == manager.operator.id for log in logs)
                 assert all("identity_snapshot" not in (log.after or {}) for log in logs)
 
+                assert manager.operator is not None
                 viewer = AuthContext(
                     department=manager.department,
-                    operator=manager.operator,
-                    role=Role.VIEWER,
+                    operator=Operator(
+                        id=manager.operator.id,
+                        department_id=manager.department.id,
+                        name=manager.operator.name,
+                        role=Role.VIEWER,
+                        status=OperatorStatus.ACTIVE,
+                    ),
+                    role=Role.MANAGER,
                     auth_session=manager.auth_session,
                 )
                 with pytest.raises(RefreshQueueError) as viewer_create:

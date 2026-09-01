@@ -27,6 +27,7 @@ from app.http.import_jobs import router as import_jobs_router
 from app.http.import_tasks import ImportTaskDispatcher
 from app.http.influencers import router as influencers_router
 from app.http.middleware import RequestIdMiddleware
+from app.http.operator_admin import router as operator_admin_router
 from app.http.operators import router as operators_router
 from app.http.outreach import router as outreach_router
 from app.http.phase3a_http import apply_phase3a_mutation_openapi_header_requirements
@@ -77,6 +78,7 @@ app.include_router(departments_router)
 app.include_router(auth_router)
 app.include_router(operators_router)
 app.include_router(admin_router)
+app.include_router(operator_admin_router)
 app.include_router(content_activity_router)
 app.include_router(collection_jobs_router)
 app.include_router(candidate_pools_router)

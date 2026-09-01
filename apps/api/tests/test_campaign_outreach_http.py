@@ -11,7 +11,13 @@ from app.http.dependencies import get_auth_service, require_auth
 from app.http.outreach import get_outreach_service
 from app.http.phase3a_scope import resolve_phase3a_department_scope
 from app.main import app
-from backend_core.auth import AuthContext, AuthError
+from backend_core.auth import (
+    AuthContext,
+    AuthError,
+    EffectiveAuthorizationContext,
+    ModuleKey,
+    ResolvedDepartmentScope,
+)
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.campaigns.access import DepartmentScope
@@ -201,6 +207,38 @@ def _task(context: AuthContext) -> OutreachTaskResult:
 
 
 class FakeAuthService:
+    async def resolve_effective_authorization(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> EffectiveAuthorizationContext:
+        if context.operator is None or context.effective_role is None:
+            raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+        target_department_id = department_id or context.department.id
+        if (
+            target_department_id != context.department.id
+            and context.effective_role is not Role.SUPER_ADMIN
+        ):
+            raise AuthError(404, "RESOURCE_NOT_FOUND", "Resource not found")
+        grants = (
+            frozenset()
+            if context.effective_role is Role.SUPER_ADMIN
+            else frozenset(module for module in ModuleKey if module is not ModuleKey.ADMIN)
+        )
+        return EffectiveAuthorizationContext(
+            department=context.department,
+            operator=context.operator,
+            department_role_ceiling=context.department_role_ceiling or context.role,
+            effective_role=context.effective_role,
+            department_scope=ResolvedDepartmentScope(
+                department_id=target_department_id,
+                cross_department_override=target_department_id != context.department.id,
+            ),
+            auth_session=context.auth_session,
+            authorized_modules=grants,
+        )
+
     def validate_csrf(self, _context: AuthContext, csrf_token: str | None) -> None:
         if csrf_token != "campaign-csrf":
             raise AuthError(403, "CSRF_FAILED", "CSRF validation failed")

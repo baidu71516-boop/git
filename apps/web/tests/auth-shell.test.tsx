@@ -127,7 +127,12 @@ function response(data: unknown) {
 
 function renderAuthenticatedShell(
   workspace:
-    "imports" | "import-jobs" | "influencers" | "refresh-queues" | "campaigns",
+    | "imports"
+    | "import-jobs"
+    | "influencers"
+    | "refresh-queues"
+    | "campaigns"
+    | "permissions",
   influencerId?: string,
 ) {
   const queryClient = new QueryClient({
@@ -144,7 +149,190 @@ function renderAuthenticatedShell(
 }
 
 describe("AuthShell", () => {
-  it("keeps Campaign reading available without a selected Operator", async () => {
+  it("uses effective_role, not the Super Admin Department ceiling, for header and permissions navigation", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "权限部",
+              status: "active",
+            },
+            operator: {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "查看人",
+              role: "viewer",
+              status: "active",
+            },
+            role: "super_admin",
+            department_role_ceiling: "super_admin",
+            effective_role: "viewer",
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("permissions");
+
+    expect(
+      await screen.findByText("当前身份无权访问权限管理"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "权限管理" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开用户菜单" }),
+    ).toHaveTextContent("只读成员");
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/admin/operators"),
+      ),
+    ).toBe(false);
+  });
+
+  it("shows the permissions page and navigation only for an effective Super Admin", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        return response({
+          department: { id: "department-1", name: "权限部", status: "active" },
+          operator: {
+            id: "operator-1",
+            department_id: "department-1",
+            name: "管理员",
+            role: "super_admin",
+            status: "active",
+          },
+          role: "super_admin",
+          department_role_ceiling: "super_admin",
+          effective_role: "super_admin",
+          expires_at: "2026-08-20T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/admin/operators")) return response([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderAuthenticatedShell("permissions");
+
+    expect(
+      await screen.findByRole("button", { name: /新建操作人/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "权限管理" })).toHaveAttribute(
+      "href",
+      "/admin/permissions",
+    );
+  });
+
+  it("shows 待选择 without a current Super Admin role when no Operator is selected", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        return response({
+          department: { id: "department-1", name: "权限部", status: "active" },
+          operator: null,
+          role: "super_admin",
+          department_role_ceiling: "super_admin",
+          effective_role: null,
+          expires_at: "2026-08-20T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/operators")) return response([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderAuthenticatedShell("permissions");
+
+    expect((await screen.findAllByText("待选择")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("超级管理员")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "权限管理" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clears stale Super Admin UI after a successful self mutation revokes the session", async () => {
+    const self = {
+      id: "operator-self",
+      name: "当前管理员",
+      role: "super_admin",
+      status: "active",
+      module_grants: [],
+      created_at: "2026-08-20T00:00:00Z",
+      updated_at: "2026-08-20T01:00:00Z",
+    };
+    const backup = { ...self, id: "operator-backup", name: "备用管理员" };
+    let authMeCalls = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        authMeCalls += 1;
+        if (authMeCalls > 1) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              data: null,
+              error: {
+                code: "INVALID_SESSION",
+                message: "session revoked",
+                details: null,
+              },
+              request_id: "test",
+            }),
+            { status: 401, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return response({
+          department: { id: "department-1", name: "权限部", status: "active" },
+          operator: {
+            id: self.id,
+            department_id: "department-1",
+            name: self.name,
+            role: self.role,
+            status: "active",
+          },
+          role: "super_admin",
+          department_role_ceiling: "super_admin",
+          effective_role: "super_admin",
+          expires_at: "2026-08-20T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/admin/operators") && !init?.method)
+        return response([self, backup]);
+      if (url.endsWith(`/admin/operators/${self.id}`) && !init?.method)
+        return response(self);
+      if (
+        url.endsWith(`/admin/operators/${self.id}`) &&
+        init?.method === "PATCH"
+      )
+        return response({ ...self, status: "disabled" });
+      if (url.endsWith("/departments")) return response([]);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    renderAuthenticatedShell("permissions");
+    await waitFor(() =>
+      expect(screen.getAllByRole("button", { name: /编\s*辑/ })).toHaveLength(
+        2,
+      ),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /编\s*辑/ })[0]);
+    await screen.findByDisplayValue(self.name);
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "状态" }));
+    fireEvent.click(await screen.findByRole("option", { name: "禁用" }));
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    expect(await screen.findByText("请使用部门密码登录。")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: "权限管理" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requires a selected Operator before opening a business workspace", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input) => {
@@ -158,25 +346,33 @@ describe("AuthShell", () => {
             },
             operator: null,
             role: "operator",
+            department_role_ceiling: "operator",
+            effective_role: null,
             expires_at: "2026-08-20T00:00:00Z",
           });
         }
-        if (url.endsWith("/campaigns?limit=50")) {
-          return response({ items: [], next_cursor: null });
+        if (url.endsWith("/operators")) {
+          return response([
+            {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "当前操作人",
+              role: "operator",
+              status: "active",
+            },
+          ]);
         }
         throw new Error(`Unexpected request: ${url}`);
       });
 
     renderAuthenticatedShell("campaigns");
 
-    expect(await screen.findByText("暂无拓客活动")).toBeInTheDocument();
-    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "新建活动" })).toBeDisabled();
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) =>
         String(input).endsWith("/operators"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("renders the Department login form for an unauthenticated user", async () => {
@@ -313,41 +509,33 @@ describe("AuthShell", () => {
     ).toBe(true);
   });
 
-  it("lets a Viewer without an Operator read imports while keeping mutations disabled", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input) => {
-        const url = String(input);
-        if (url.endsWith("/auth/me")) {
-          return response({
-            department: {
-              id: "department-1",
-              name: "只读部",
-              status: "active",
-            },
-            operator: null,
-            role: "viewer",
-            expires_at: "2026-08-12T00:00:00Z",
-          });
-        }
-        if (url.endsWith("/collection-jobs")) {
-          return response([]);
-        }
-        throw new Error(`Unexpected request: ${url}`);
-      });
+  it("does not infer a Viewer identity from a Department ceiling", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        return response({
+          department: {
+            id: "department-1",
+            name: "只读部",
+            status: "active",
+          },
+          operator: null,
+          role: "viewer",
+          department_role_ceiling: "viewer",
+          effective_role: null,
+          expires_at: "2026-08-12T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/operators")) {
+        return response([]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
 
     renderAuthenticatedShell("imports");
 
-    expect(
-      await screen.findByText("只读角色不能上传或确认导入。"),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /新建采集任务/ })).toBeDisabled();
-    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
-    expect(
-      fetchMock.mock.calls.some(([input]) =>
-        String(input).endsWith("/operators"),
-      ),
-    ).toBe(false);
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
+    expect(screen.queryByText("只读成员")).not.toBeInTheDocument();
   });
 
   it.each(["viewer", "operator", "manager", "super_admin"] as const)(
@@ -454,45 +642,33 @@ describe("AuthShell", () => {
     ).toBe(false);
   });
 
-  it("lets a Viewer without an Operator read Refresh Queues without write entry points", async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, "fetch")
-      .mockImplementation(async (input) => {
-        const url = String(input);
-        if (url.endsWith("/auth/me")) {
-          return response({
-            department: {
-              id: "department-1",
-              name: "只读部",
-              status: "active",
-            },
-            operator: null,
-            role: "viewer",
-            expires_at: "2026-08-12T00:00:00Z",
-          });
-        }
-        if (url.includes("/refresh-queues?")) {
-          return response({ items: [], total: 0, offset: 0, limit: 50 });
-        }
-        throw new Error(`Unexpected request: ${url}`);
-      });
+  it("does not infer a Viewer identity for Refresh Queues", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/auth/me")) {
+        return response({
+          department: {
+            id: "department-1",
+            name: "只读部",
+            status: "active",
+          },
+          operator: null,
+          role: "viewer",
+          department_role_ceiling: "viewer",
+          effective_role: null,
+          expires_at: "2026-08-12T00:00:00Z",
+        });
+      }
+      if (url.endsWith("/operators")) {
+        return response([]);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
 
     renderAuthenticatedShell("refresh-queues");
 
-    expect(await screen.findByText("暂无数据更新名单。")).toBeInTheDocument();
-    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: /创建更新名单/ }),
-    ).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /数据更新/ })).toHaveAttribute(
-      "href",
-      "/refresh-queues",
-    );
-    expect(
-      fetchMock.mock.calls.some(([input]) =>
-        String(input).endsWith("/operators"),
-      ),
-    ).toBe(false);
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
+    expect(screen.queryByText("只读成员")).not.toBeInTheDocument();
   });
 
   it("keeps an existing Viewer Operator on the influencer workspace", async () => {
@@ -509,6 +685,8 @@ describe("AuthShell", () => {
             status: "active",
           },
           role: "viewer",
+          department_role_ceiling: "super_admin",
+          effective_role: "viewer",
           expires_at: "2026-08-12T00:00:00Z",
         });
       }
@@ -545,7 +723,7 @@ describe("AuthShell", () => {
     ).toBeInTheDocument();
     const userMenu = screen.getByRole("button", { name: "打开用户菜单" });
     expect(userMenu).toHaveTextContent("查看人");
-    expect(userMenu).not.toHaveTextContent("只读成员");
+    expect(userMenu).toHaveTextContent("只读成员");
     expect(userMenu).not.toHaveTextContent("只读部");
     expect(screen.queryByText("Campaign")).not.toBeInTheDocument();
     expect(screen.queryByText("Inbox")).not.toBeInTheDocument();
@@ -565,6 +743,8 @@ describe("AuthShell", () => {
             },
             operator: null,
             role: "viewer",
+            department_role_ceiling: "viewer",
+            effective_role: null,
             expires_at: "2026-08-12T00:00:00Z",
           });
         }
@@ -626,6 +806,8 @@ describe("AuthShell", () => {
               status: "active",
             },
             role: "operator",
+            department_role_ceiling: "super_admin",
+            effective_role: "operator",
             expires_at: "2026-08-12T00:00:00Z",
           });
         }

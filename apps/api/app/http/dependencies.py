@@ -1,13 +1,20 @@
 """HTTP dependency injection for shared backend_core services."""
 
 import hmac
-from collections.abc import AsyncIterator
-from typing import Annotated, cast
+from collections.abc import AsyncIterator, Callable
+from typing import Annotated, Any, cast
 
-from backend_core.auth import AuthContext, AuthError, AuthService, Role
+from backend_core.auth import (
+    AuthContext,
+    AuthError,
+    AuthService,
+    EffectiveAuthorizationContext,
+    ModuleRequirement,
+    require_module_mutation,
+    require_module_read,
+)
 from backend_core.auth.throttle import RedisLoginThrottle
 from backend_core.config import get_settings
-from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.service import ImportService
 from backend_core.imports.storage import StorageAdapter
@@ -128,45 +135,66 @@ async def require_csrf_context(
     return context
 
 
-async def require_super_admin(
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
-) -> AuthContext:
-    if context.operator is None:
-        raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
-    if context.role != Role.SUPER_ADMIN:
-        raise AuthError(403, "PERMISSION_DENIED", "Super admin permission required")
-    return context
+async def require_effective_authorization(
+    context: Annotated[AuthContext, Depends(require_auth)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
+) -> EffectiveAuthorizationContext:
+    """Resolve fresh selected-Operator authority for one Human business request."""
+
+    return await service.resolve_effective_authorization(context)
 
 
-async def require_import_mutation(
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
-) -> AuthContext:
-    if context.operator is None:
-        raise ImportDomainError("OPERATOR_REQUIRED", "Select an operator first", status_code=409)
-    if context.role == Role.VIEWER:
-        raise ImportDomainError("PERMISSION_DENIED", "Viewer role is read-only", status_code=403)
-    return context
+def _mark_module_guard[
+    GuardT: Callable[..., Any],
+](
+    guard: GuardT,
+    *,
+    requirement: ModuleRequirement,
+    write: bool,
+) -> GuardT:
+    """Expose one inspectable route declaration without widening runtime input."""
+
+    setattr(guard, "permissions_v1_requirement", requirement)  # noqa: B010
+    setattr(guard, "permissions_v1_write", write)  # noqa: B010
+    return guard
 
 
-async def require_refresh_mutation(
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
-) -> AuthContext:
-    """Require the shared mutation prerequisites for Refresh Queue actions."""
+def require_module(requirement: ModuleRequirement) -> Callable[..., Any]:
+    """Build the centralized read guard for one frozen Human route requirement."""
 
-    if context.operator is None:
-        raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
-    if context.role == Role.VIEWER:
-        raise AuthError(403, "PERMISSION_DENIED", "Viewer role is read-only")
-    return context
+    async def guard(
+        authorization: Annotated[
+            EffectiveAuthorizationContext,
+            Depends(require_effective_authorization),
+        ],
+    ) -> EffectiveAuthorizationContext:
+        return require_module_read(authorization, requirement)
+
+    return _mark_module_guard(guard, requirement=requirement, write=False)
 
 
-async def require_targeting_mutation(
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
-) -> AuthContext:
-    """Require the shared mutation prerequisites for Candidate Pool runs."""
+def require_module_write(requirement: ModuleRequirement) -> Callable[..., Any]:
+    """Build the centralized CSRF-protected write guard for one Human route."""
 
-    if context.operator is None:
-        raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
-    if context.role == Role.VIEWER:
-        raise AuthError(403, "PERMISSION_DENIED", "Viewer role is read-only")
-    return context
+    async def guard(
+        request: Request,
+        context: Annotated[AuthContext, Depends(require_auth)],
+        service: Annotated[AuthService, Depends(get_auth_service)],
+        authorization: Annotated[
+            EffectiveAuthorizationContext,
+            Depends(require_effective_authorization),
+        ],
+        csrf_header: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
+    ) -> EffectiveAuthorizationContext:
+        authorized = require_module_mutation(authorization, requirement)
+        csrf_cookie = request.cookies.get(settings.csrf_cookie_name)
+        if (
+            csrf_header is None
+            or csrf_cookie is None
+            or not hmac.compare_digest(csrf_header, csrf_cookie)
+        ):
+            raise AuthError(403, "CSRF_FAILED", "CSRF validation failed")
+        service.validate_csrf(context, csrf_header)
+        return authorized
+
+    return _mark_module_guard(guard, requirement=requirement, write=True)

@@ -3,19 +3,24 @@
 from typing import Annotated, Any
 from uuid import UUID
 
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.auth.schemas import PasswordResetPublic, ResetPasswordInput
-from backend_core.auth.service import AuthContext, AuthService
+from backend_core.auth.service import AuthService
 from fastapi import APIRouter, Depends, Request
 
 from app.http.dependencies import (
     get_auth_service,
     get_client_ip,
     get_user_agent,
-    require_super_admin,
+    require_module_write,
 )
 from app.http.responses import envelope
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+AdminWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.ADMIN))),
+]
 
 
 @router.post("/departments/{department_id}/reset-password")
@@ -23,7 +28,7 @@ async def reset_department_password(
     department_id: UUID,
     payload: ResetPasswordInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_super_admin)],
+    context: AdminWriteContext,
     service: Annotated[AuthService, Depends(get_auth_service)],
 ) -> dict[str, Any]:
     revoked_sessions = await service.reset_department_password(

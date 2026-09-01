@@ -18,8 +18,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.repository import AuthRepository
-from backend_core.auth.service import AuthContext
 from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.config.settings import Settings, get_settings

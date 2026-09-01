@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.campaigns.access import DepartmentScope
 from backend_core.influencers.enums import ContactFilter
 from backend_core.outreach.enums import OutreachChannel, OutreachPriority
@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.http.dependencies import get_database_session, require_auth
+from app.http.dependencies import get_database_session, require_module
 from app.http.phase3a_http import error_responses, reject_closed_query_parameters
 from app.http.phase3a_scope import resolve_phase3a_department_scope
 from app.http.responses import SuccessEnvelope, envelope
@@ -44,7 +44,7 @@ TODAY_QUERY_PARAMETERS = frozenset(
 class TodayHttpRequest:
     """Parsed closed query and already-authorized Department scope."""
 
-    context: AuthContext
+    context: EffectiveAuthorizationContext
     scope: DepartmentScope
     query: TodayQuery
 
@@ -152,7 +152,10 @@ async def parse_today_query(
 async def resolve_today_http_request(
     request: Request,
     query: Annotated[TodayQuery, Depends(parse_today_query)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: Annotated[
+        EffectiveAuthorizationContext,
+        Depends(require_module(EXACT(ModuleKey.TODAY_OUTREACH))),
+    ],
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
 ) -> TodayHttpRequest:
     return TodayHttpRequest(context=context, scope=scope, query=query)

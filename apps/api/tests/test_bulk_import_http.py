@@ -2,7 +2,7 @@ import asyncio
 import io
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -19,8 +19,14 @@ from app.http.dependencies import (
 )
 from app.main import app
 from backend_core.audit.models import AuditLog
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
-from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.enums import NON_ADMIN_MODULE_KEYS, DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import (
+    AuthSession,
+    Department,
+    DepartmentPermission,
+    Operator,
+    OperatorModulePermission,
+)
 from backend_core.auth.security import hash_token
 from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
@@ -74,26 +80,33 @@ async def seed_context(
     *,
     department_name: str,
     role: Role,
+    operator_selected: bool = True,
+    operator_role: Role | None = None,
+    existing_department: Department | None = None,
 ) -> AuthContext:
-    department = Department(
-        name=department_name,
-        password_hash="not-used",
-        status=DepartmentStatus.ACTIVE,
-        session_days=30,
-    )
-    session.add(department)
-    await session.flush()
+    department = existing_department
+    if department is None:
+        department = Department(
+            name=department_name,
+            password_hash="not-used",
+            status=DepartmentStatus.ACTIVE,
+            session_days=30,
+        )
+        session.add(department)
+        await session.flush()
+        session.add(DepartmentPermission(department_id=department.id, role=role))
+    selected_role = operator_role or role
     operator = Operator(
         department_id=department.id,
         name=f"{department_name} 操作人",
-        role=Role.OPERATOR,
+        role=selected_role,
         status=OperatorStatus.ACTIVE,
     )
     session.add(operator)
     await session.flush()
     auth_session = AuthSession(
         department_id=department.id,
-        operator_id=operator.id,
+        operator_id=operator.id if operator_selected else None,
         token_hash=hash_token(f"session-{department_name}"),
         csrf_token_hash=hash_token(f"csrf-{department_name}"),
         ip="127.0.0.1",
@@ -102,16 +115,26 @@ async def seed_context(
     )
     session.add_all(
         [
-            DepartmentPermission(department_id=department.id, role=role),
             auth_session,
         ]
     )
+    if selected_role is not Role.SUPER_ADMIN:
+        session.add_all(
+            OperatorModulePermission(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_key=module_key,
+            )
+            for module_key in NON_ADMIN_MODULE_KEYS
+        )
     await session.commit()
     return AuthContext(
         department=department,
-        operator=operator,
+        operator=operator if operator_selected else None,
         role=role,
         auth_session=auth_session,
+        department_role_ceiling=role,
+        effective_role=selected_role if operator_selected else None,
     )
 
 
@@ -123,6 +146,7 @@ class BulkHttpHarness:
     contexts: dict[str, AuthContext]
     current: dict[str, AuthContext]
     dispatcher: "NoopDispatcher"
+    csrf_tokens: dict[str, str]
 
 
 class NoopDispatcher:
@@ -178,7 +202,8 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
             operator_context = await seed_context(
                 session,
                 department_name="Bulk HTTP Operator",
-                role=Role.OPERATOR,
+                role=Role.SUPER_ADMIN,
+                operator_role=Role.OPERATOR,
             )
             cross_department_context = await seed_context(
                 session,
@@ -189,6 +214,28 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
                 session,
                 department_name="Bulk HTTP Admin",
                 role=Role.SUPER_ADMIN,
+            )
+            manager_context = await seed_context(
+                session,
+                department_name="Bulk HTTP Manager",
+                role=Role.SUPER_ADMIN,
+                operator_role=Role.MANAGER,
+                existing_department=operator_context.department,
+            )
+            viewer_context = await seed_context(
+                session,
+                department_name="Bulk HTTP Viewer",
+                role=Role.SUPER_ADMIN,
+                operator_role=Role.VIEWER,
+                existing_department=operator_context.department,
+            )
+            no_operator_context = await seed_context(
+                session,
+                department_name="Bulk HTTP No Operator",
+                role=Role.SUPER_ADMIN,
+                operator_selected=False,
+                operator_role=Role.MANAGER,
+                existing_department=operator_context.department,
             )
             current = {"auth": operator_context}
 
@@ -226,21 +273,31 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
                 async with app.router.lifespan_context(app):
                     transport = ASGITransport(app=app)
                     async with AsyncClient(transport=transport, base_url="http://test") as client:
-                        yield BulkHttpHarness(
+                        harness = BulkHttpHarness(
                             client=client,
                             session=session,
                             storage=storage,
                             contexts={
                                 "operator": operator_context,
-                                "manager": replace(operator_context, role=Role.MANAGER),
-                                "viewer": replace(operator_context, role=Role.VIEWER),
-                                "no_operator": replace(operator_context, operator=None),
+                                "manager": manager_context,
+                                "viewer": viewer_context,
+                                "no_operator": no_operator_context,
                                 "cross_department": cross_department_context,
                                 "super_admin": super_admin_context,
                             },
                             current=current,
                             dispatcher=dispatcher,
+                            csrf_tokens={
+                                "operator": "csrf-Bulk HTTP Operator",
+                                "manager": "csrf-Bulk HTTP Manager",
+                                "viewer": "csrf-Bulk HTTP Viewer",
+                                "no_operator": "csrf-Bulk HTTP No Operator",
+                                "cross_department": "csrf-Bulk HTTP Other",
+                                "super_admin": "csrf-Bulk HTTP Admin",
+                            },
                         )
+                        set_context(harness, "operator")
+                        yield harness
             finally:
                 app.dependency_overrides.clear()
     await fake_redis.aclose()
@@ -249,6 +306,9 @@ async def bulk_http_harness() -> AsyncIterator[BulkHttpHarness]:
 
 def set_context(harness: BulkHttpHarness, name: str) -> None:
     harness.current["auth"] = harness.contexts[name]
+    csrf_token = harness.csrf_tokens[name]
+    harness.client.cookies.set(get_settings().csrf_cookie_name, csrf_token)
+    harness.client.headers["X-CSRF-Token"] = csrf_token
 
 
 async def complete_task(session: AsyncSession, task_id: str) -> None:
@@ -940,7 +1000,11 @@ def test_bulk_import_http_rbac_operator_and_department_scope() -> None:
             no_operator_read = await harness.client.get(
                 f"/api/v1/import-jobs/{import_job_id}/files"
             )
-            assert no_operator_read.status_code == 200
+            assert_error_envelope(
+                no_operator_read,
+                status_code=409,
+                code="OPERATOR_REQUIRED",
+            )
 
             set_context(harness, "cross_department")
             cross_read = await harness.client.get(f"/api/v1/import-jobs/{import_job_id}/files")
@@ -2231,7 +2295,7 @@ def test_collection_screening_openapi_is_strict_typed_and_versioned() -> None:
         document,
         rules_schema["properties"]["platforms"]["items"],
     )
-    assert set(platform_schema["enum"]) == {"xiaohongshu"}
+    assert set(platform_schema["enum"]) == {"douyin", "xiaohongshu"}
     tag_schema = _resolve_openapi_schema(
         document,
         rules_schema["properties"]["source_tags_exact_any"]["items"],

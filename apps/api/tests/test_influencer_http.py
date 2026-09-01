@@ -11,8 +11,14 @@ from uuid import UUID, uuid4
 from app.http.dependencies import get_database_session, get_redis
 from app.http.influencers import get_influencer_service
 from app.main import app
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
-from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.enums import NON_ADMIN_MODULE_KEYS, DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import (
+    AuthSession,
+    Department,
+    DepartmentPermission,
+    Operator,
+    OperatorModulePermission,
+)
 from backend_core.auth.security import hash_token
 from backend_core.config import get_settings
 from backend_core.content_activity.enums import (
@@ -83,7 +89,7 @@ async def _seed_auth_session(
     operator = Operator(
         department_id=department.id,
         name=f"Selected identity {role.value}",
-        role=Role.VIEWER if role != Role.VIEWER else Role.SUPER_ADMIN,
+        role=role,
         status=OperatorStatus.ACTIVE,
     )
     session.add(operator)
@@ -105,6 +111,15 @@ async def _seed_auth_session(
             auth_session,
         ]
     )
+    if role is not Role.SUPER_ADMIN:
+        session.add_all(
+            OperatorModulePermission(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_key=module_key,
+            )
+            for module_key in NON_ADMIN_MODULE_KEYS
+        )
     await session.flush()
     return token
 
@@ -378,7 +393,7 @@ async def api_environment() -> AsyncIterator[ApiEnvironment]:
             role: await _seed_auth_session(
                 session,
                 role=role,
-                operator_selected=role != Role.VIEWER,
+                operator_selected=True,
             )
             for role in Role
         }

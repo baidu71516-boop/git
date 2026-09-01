@@ -5,11 +5,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, date, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from app.http.dependencies import get_database_session, require_auth
+from app.http.dependencies import get_auth_service, get_database_session, require_auth
 from app.http.today import get_today_service
 from app.main import app
+from backend_core.auth import (
+    AuthError,
+    EffectiveAuthorizationContext,
+    ModuleKey,
+    ResolvedDepartmentScope,
+)
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.auth.service import AuthContext
@@ -74,8 +80,34 @@ async def _fake_database_session() -> AsyncIterator[object]:
     yield object()
 
 
+class FakeAuthService:
+    async def resolve_effective_authorization(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> EffectiveAuthorizationContext:
+        if context.operator is None or context.effective_role is None:
+            raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+        if department_id is not None and department_id != context.department.id:
+            raise AuthError(404, "RESOURCE_NOT_FOUND", "Resource not found")
+        return EffectiveAuthorizationContext(
+            department=context.department,
+            operator=context.operator,
+            department_role_ceiling=context.department_role_ceiling or context.role,
+            effective_role=context.effective_role,
+            department_scope=ResolvedDepartmentScope(
+                department_id=context.department.id,
+                cross_department_override=False,
+            ),
+            auth_session=context.auth_session,
+            authorized_modules=frozenset({ModuleKey.TODAY_OUTREACH}),
+        )
+
+
 def _install_overrides(context: AuthContext, service: FakeTodayService) -> None:
     app.dependency_overrides[require_auth] = lambda: context
+    app.dependency_overrides[get_auth_service] = FakeAuthService
     app.dependency_overrides[get_database_session] = _fake_database_session
     app.dependency_overrides[get_today_service] = lambda: service
 
