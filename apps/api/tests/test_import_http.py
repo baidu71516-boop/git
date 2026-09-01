@@ -22,7 +22,7 @@ from backend_core.auth.models import (
     Operator,
     OperatorModulePermission,
 )
-from backend_core.auth.security import hash_token
+from backend_core.auth.security import hash_password, hash_token
 from backend_core.auth.service import AuthContext
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
@@ -78,12 +78,19 @@ async def seed_context(
         name=f"{department_name} 操作人",
         role=role,
         status=OperatorStatus.ACTIVE,
+        password_hash=(
+            hash_password(f"{department_name}-operator-test-password")
+            if operator_selected
+            else None
+        ),
+        credential_version=1 if operator_selected else 0,
     )
     session.add(operator)
     await session.flush()
     auth_session = AuthSession(
         department_id=department.id,
         operator_id=operator.id if operator_selected else None,
+        operator_credential_version=1 if operator_selected else None,
         token_hash=hash_token(f"session-{department_name}"),
         csrf_token_hash=hash_token(f"csrf-{department_name}"),
         ip="127.0.0.1",

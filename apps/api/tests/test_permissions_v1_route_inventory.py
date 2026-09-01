@@ -73,6 +73,7 @@ def _frozen_task_4a_map() -> dict[Operation, GuardExpectation | None]:
         ),
         ("POST", "/api/v1/admin/departments/{department_id}/reset-password"),
         ("POST", "/api/v1/admin/operators"),
+        ("POST", "/api/v1/admin/operators/{operator_id}/reset-password"),
         ("PATCH", "/api/v1/admin/operators/{operator_id}"),
         ("POST", "/api/v1/admin/content-activity/xiaohongshu/identities/resolve"),
         ("POST", "/api/v1/admin/content-activity/xiaohongshu/refreshes"),
@@ -329,14 +330,14 @@ def test_mounted_api_matches_the_frozen_permissions_v1_task_4a_map() -> None:
     expected = _frozen_task_4a_map()
     actual = _mounted_operations()
 
-    assert len(expected) == 75
+    assert len(expected) == 76
     assert set(actual) == set(expected)
     exempt = {operation for operation, guard in expected.items() if guard is None}
     guarded = {operation: guard for operation, guard in expected.items() if guard is not None}
     assert len(exempt) == 9
-    assert len(guarded) == 66
+    assert len(guarded) == 67
     assert Counter(guard.owner for guard in guarded.values()) == {
-        "admin": 8,
+        "admin": 9,
         "data_collection": 4,
         "candidate_pools": 10,
         "campaigns": 14,

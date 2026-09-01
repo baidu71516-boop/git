@@ -2,12 +2,16 @@
 
 from datetime import UTC, datetime
 
-from backend_core.auth.service import LoginResult
+from backend_core.auth.service import LoginResult, OperatorAuthenticationResult
 from backend_core.config import Settings
 from fastapi import Response
 
 
-def set_auth_cookies(response: Response, result: LoginResult, settings: Settings) -> None:
+def set_auth_cookies(
+    response: Response,
+    result: LoginResult | OperatorAuthenticationResult,
+    settings: Settings,
+) -> None:
     max_age = max(
         0,
         int((result.auth_session.expires_at.astimezone(UTC) - datetime.now(UTC)).total_seconds()),

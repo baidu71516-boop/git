@@ -77,6 +77,9 @@ describe("PermissionsWorkspace", () => {
     fireEvent.change(screen.getByLabelText("姓名"), {
       target: { value: "新操作人" },
     });
+    fireEvent.change(screen.getByLabelText("个人密码"), {
+      target: { value: "operator-credential-123" },
+    });
     fireEvent.click(screen.getByLabelText("今日触达"));
     fireEvent.click(screen.getByLabelText("候选池"));
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
@@ -92,6 +95,7 @@ describe("PermissionsWorkspace", () => {
           return (
             JSON.stringify({
               name: "新操作人",
+              password: "operator-credential-123",
               role: "operator",
               module_grants: ["today_outreach", "candidate_pools"],
             }) === init.body

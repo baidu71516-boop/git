@@ -19,7 +19,7 @@ from backend_core.auth.models import (
     Operator,
     OperatorModulePermission,
 )
-from backend_core.auth.security import hash_token
+from backend_core.auth.security import hash_password, hash_token
 from backend_core.config import get_settings
 from backend_core.content_activity.enums import (
     ContentActivityCoverageStatus,
@@ -91,6 +91,12 @@ async def _seed_auth_session(
         name=f"Selected identity {role.value}",
         role=role,
         status=OperatorStatus.ACTIVE,
+        password_hash=(
+            hash_password(f"influencer-{role.value}-operator-test-password")
+            if operator_selected
+            else None
+        ),
+        credential_version=1 if operator_selected else 0,
     )
     session.add(operator)
     await session.flush()
@@ -98,6 +104,7 @@ async def _seed_auth_session(
     auth_session = AuthSession(
         department_id=department.id,
         operator_id=operator.id if operator_selected else None,
+        operator_credential_version=1 if operator_selected else None,
         token_hash=hash_token(token),
         csrf_token_hash=hash_token(f"csrf-{role.value}"),
         ip="192.0.2.20",

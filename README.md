@@ -176,7 +176,7 @@ PostgreSQL 并发测试和真实灰豚附件测试是显式门控测试，分别
 ### 首个管理员
 
 数据库迁移完成后，通过容器内的一次性 CLI 创建首个管理部门和 Super Admin。
-命令不会提供默认账户或默认密码；未使用 `--password-stdin` 时会安全地交互读取并确认密码。
+命令不会提供默认账户或默认密码；它会安全地分别读取并确认 Department 密码和独立的 Operator 密码。使用 `--password-stdin` 时按两行依次读取这两个密码。
 
 ```bash
 docker-compose exec api bootstrap-admin \
@@ -184,8 +184,28 @@ docker-compose exec api bootstrap-admin \
   --operator-name "首位管理员"
 ```
 
-创建成功后不可再次运行 bootstrap。部门密码使用 Argon2id，Session Cookie 为 HttpOnly，
+创建成功后不可再次运行 bootstrap。两个密码都使用 Argon2id，Session Cookie 为 HttpOnly，
 生产环境通过 `APP_ENV=production` 启用 Secure，并要求运行环境注入 `APP_MASTER_KEY`。
+
+从 `0010_permissions_v1_persistence` 升级的现有 Operator 不会获得默认或共享密码，必须在新 API/Web 切流前通过服务器侧精确 ID 命令初始化；命令安全提示输入密码、拒绝重复初始化，并撤销该 Operator 的既有绑定 Session。必须从已记录 digest 的**新 API 制品**启动一次性容器运行命令，不得 `exec` 仍在运行的旧 API 容器：
+
+```bash
+docker compose run --rm --no-deps api setup-operator-credential \
+  --department-id "<exact-department-uuid>" \
+  --operator-id "<exact-operator-uuid>" \
+  --require-super-admin
+```
+
+`0010 -> 0011` 生产门禁必须严格按以下顺序执行：
+
+1. 记录生产 Department UUID、拟初始化的 Super Admin Operator UUID、当前 Git SHA 和新 API/Web image digest；完成可恢复性验证过的数据库备份。在隔离、一次性的 PostgreSQL 16 生产快照恢复环境中，必须用该**新 API image**从 `0010` 升级到 `0011`，对相同的精确 UUID 运行带 `--require-super-admin` 的初始化并完成 Operator 登录及管理员写入 smoke，然后销毁演练环境；仅运行 `--help` 不算可用管理员路径证明，演练密码也不得复用于生产。
+2. 迁移前只读取 `0010` 已存在字段：Alembic 必须精确为 `0010_permissions_v1_persistence`；精确 UUID 联查必须只返回一行，Department/Operator 均为 `active`，Operator 与 DepartmentPermission 均为 `super_admin`。缺失、重复、禁用、角色不符或 UUID 不确定时停止，不得猜测或改用其他 Operator。
+3. 进入维护模式，先从负载均衡摘除，再彻底 drain/停止所有旧 API 进程并阻断其直连入口；停止会持有长事务的 worker/scheduler。确认旧 `/api/v1/auth/select-operator` 已无法访问且 PostgreSQL 无未结束长事务后，才允许迁移。`0011` 的 `ALTER TABLE` 需要 `ACCESS EXCLUSIVE` lock；使用经审批的有限 `lock_timeout`，不能立即获得锁时安全失败并继续维护模式，不得无限等待。
+4. 仅用记录 digest 的新制品升级到 `0011_operator_auth_p0`。仍保持完全关闭，复核 Alembic head、精确 UUID、active/Super Admin 状态以及目标 `password_hash IS NULL AND credential_version = 0`。
+5. 从同一新 API image 的一次性容器运行上面的精确 ID 初始化；`--require-super-admin` 会在持有 Department serialization lock 时再次校验 Department active、DepartmentPermission Super Admin、Operator active 且为 Super Admin。随后只读证明目标为 active、Super Admin、`password_hash IS NOT NULL`、`credential_version = 1`；失败时不得开放流量。迁移到首个凭据完成之间允许没有可登录管理员的唯一前提是系统始终完全处于维护模式，且新制品初始化路径已在步骤 1 验证。
+6. 先仅在内网/loopback 启动新 API，完成 Department 登录、精确 Operator 密码认证、旧 Session 拒绝和管理员写入 smoke；再启动同 digest 对应 Web，最后才恢复外部流量。任何旧 API 进程均不得与 `0011` 数据库同时对外服务。
+
+无论是否已初始化 Operator 凭据，**应用单独回滚到包含免密码 Operator 选择的旧版本始终禁止**。初始化前只有在完全维护模式且 guard 确认没有凭据时才可考虑 schema downgrade；初始化后 `0011` downgrade 必须拒绝。任一失败均保持维护模式并前向修复。完整数据库备份恢复只是最后手段；恢复后也必须先部署已修复的新认证制品并完成上述 smoke，才能重新开放流量。
 
 ### 后端边界
 

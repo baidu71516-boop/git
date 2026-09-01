@@ -14,6 +14,7 @@ from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
 from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import (
+    DepartmentStatus,
     ModuleKey,
     OperatorStatus,
     Role,
@@ -27,7 +28,9 @@ from backend_core.auth.schemas import (
     OperatorAdminCreateInput,
     OperatorAdminPublic,
     OperatorAdminUpdateInput,
+    OperatorPasswordResetPublic,
 )
+from backend_core.auth.security import hash_password, verify_password
 
 
 class Clock(Protocol):
@@ -96,12 +99,17 @@ class OperatorAdminService:
         ip: str,
         user_agent: str,
     ) -> OperatorAdminPublic:
-        actor = await self._require_super_admin(context)
         try:
+            actor = await self._require_super_admin(context, for_mutation=True)
             ceiling = await self._department_ceiling(actor.department_id)
             role = self._role(payload.role)
             self._validate_role_within_ceiling(role, ceiling)
             grants = self._module_grants(payload.module_grants, role=role)
+            password = payload.password.get_secret_value()
+            await self._validate_independent_password(
+                department_id=actor.department_id,
+                password=password,
+            )
             if await self.repository.get_operator_by_name_in_department(
                 department_id=actor.department_id,
                 name=payload.name,
@@ -112,6 +120,8 @@ class OperatorAdminService:
                 name=payload.name,
                 role=role,
                 status=OperatorStatus.ACTIVE,
+                password_hash=hash_password(password),
+                credential_version=1,
             )
             self.session.add(operator)
             await self.session.flush()
@@ -142,6 +152,67 @@ class OperatorAdminService:
             await self.session.rollback()
             raise
 
+    async def reset_operator_password(
+        self,
+        context: AuthContext,
+        *,
+        operator_id: UUID,
+        password: str,
+        ip: str,
+        user_agent: str,
+    ) -> OperatorPasswordResetPublic:
+        """Replace one exact Operator credential and revoke every bound session."""
+
+        try:
+            actor = await self._require_super_admin(context, for_mutation=True)
+            operator = await self._scoped_operator(
+                actor.department_id,
+                operator_id,
+                for_update=True,
+            )
+            await self._validate_independent_password(
+                department_id=actor.department_id,
+                password=password,
+            )
+            if operator.password_hash is not None and verify_password(
+                operator.password_hash,
+                password,
+            ):
+                raise AuthError(
+                    409,
+                    "OPERATOR_PASSWORD_UNCHANGED",
+                    "New Operator password must differ from the current password",
+                )
+
+            now = _as_utc(self.clock.now(), name="clock")
+            operator.password_hash = hash_password(password)
+            operator.credential_version = max(operator.credential_version, 0) + 1
+            operator.updated_at = now
+            revoked_sessions = await self.repository.revoke_operator_sessions(
+                operator_id=operator.id,
+                department_id=actor.department_id,
+                now=now,
+            )
+            self.audit.add(
+                action=AuditAction.OPERATOR_PASSWORD_RESET,
+                result=AuditResult.SUCCESS,
+                department_id=actor.department_id,
+                operator_id=actor.operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="operator",
+                entity_id=operator.id,
+                after={"revoked_sessions": revoked_sessions},
+            )
+            await self.session.commit()
+            return OperatorPasswordResetPublic(
+                operator_id=operator.id,
+                revoked_sessions=revoked_sessions,
+            )
+        except BaseException:
+            await self.session.rollback()
+            raise
+
     async def update_operator(
         self,
         context: AuthContext,
@@ -151,10 +222,10 @@ class OperatorAdminService:
         ip: str,
         user_agent: str,
     ) -> OperatorAdminPublic:
-        actor = await self._require_super_admin(context)
         if not ({"name", "role", "status", "module_grants"} & payload.model_fields_set):
             raise AuthError(422, "OPERATOR_UPDATE_EMPTY", "At least one operator field is required")
         try:
+            actor = await self._require_super_admin(context, for_mutation=True)
             # Every mutation locks this Department's active Super Admin set in a
             # deterministic order before locking its target. That makes the
             # last-active-Super-Admin invariant safe under concurrent updates.
@@ -260,29 +331,86 @@ class OperatorAdminService:
             await self.session.rollback()
             raise
 
-    async def _require_super_admin(self, context: AuthContext) -> _Actor:
+    async def _require_super_admin(
+        self,
+        context: AuthContext,
+        *,
+        for_mutation: bool = False,
+    ) -> _Actor:
         if context.operator is None or context.effective_role is None:
             raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
         if context.auth_session.operator_id != context.operator.id:
             raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+
+        if for_mutation:
+            locked_departments = await self.repository.lock_departments_for_update(
+                (context.department.id,)
+            )
+            current_department = locked_departments.get(context.department.id)
+        else:
+            current_department = await self.repository.get_department(context.department.id)
+        if current_department is None or current_department.status is not DepartmentStatus.ACTIVE:
+            raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+
+        current_session = await self.repository.get_auth_session(
+            context.auth_session.id,
+            for_update=for_mutation,
+        )
         current_operator = await self.repository.get_operator_in_department(
             operator_id=context.operator.id,
             department_id=context.department.id,
+            for_update=for_mutation,
         )
-        if current_operator is None or current_operator.status is not OperatorStatus.ACTIVE:
-            raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+        now = _as_utc(self.clock.now(), name="clock")
         if (
-            context.effective_role is not Role.SUPER_ADMIN
+            current_session is None
+            or current_session.department_id != current_department.id
+            or current_session.operator_id != context.operator.id
+            or current_session.revoked_at is not None
+            or _as_utc(current_session.expires_at, name="session expires_at") <= now
+            or current_operator is None
+            or current_operator.status is not OperatorStatus.ACTIVE
+            or current_operator.password_hash is None
+            or current_operator.credential_version < 1
+            or current_session.operator_credential_version != current_operator.credential_version
+        ):
+            raise AuthError(401, "INVALID_SESSION", "Session is invalid")
+        permission = await self.repository.get_department_permission(current_department.id)
+        if (
+            permission is None
+            or permission.role is not Role.SUPER_ADMIN
             or current_operator.role is not Role.SUPER_ADMIN
         ):
             raise AuthError(403, "PERMISSION_DENIED", "Super admin permission required")
-        return _Actor(department_id=context.department.id, operator_id=current_operator.id)
+        return _Actor(department_id=current_department.id, operator_id=current_operator.id)
 
     async def _department_ceiling(self, department_id: UUID) -> Role:
         permission = await self.repository.get_department_permission(department_id)
         if permission is None:
             raise AuthError(403, "DEPARTMENT_PERMISSION_MISSING", "Department permission missing")
         return permission.role
+
+    async def _validate_independent_password(
+        self,
+        *,
+        department_id: UUID,
+        password: str,
+    ) -> None:
+        if len(password) < 12 or len(password) > 128:
+            raise AuthError(
+                422,
+                "PASSWORD_POLICY_FAILED",
+                "Password must contain 12 to 128 characters",
+            )
+        department = await self.repository.get_department(department_id)
+        if department is None:
+            raise AuthError(404, "DEPARTMENT_NOT_FOUND", "Department not found")
+        if verify_password(department.password_hash, password):
+            raise AuthError(
+                422,
+                "PASSWORD_REUSE_FORBIDDEN",
+                "Department and Operator passwords must differ",
+            )
 
     async def _scoped_operator(
         self,
@@ -367,11 +495,14 @@ class OperatorAdminService:
         remains_active_super_admin = (
             requested_role is Role.SUPER_ADMIN and requested_status is OperatorStatus.ACTIVE
         )
-        currently_active_super_admin = (
-            operator.role is Role.SUPER_ADMIN and operator.status is OperatorStatus.ACTIVE
+        currently_usable_super_admin = (
+            operator.role is Role.SUPER_ADMIN
+            and operator.status is OperatorStatus.ACTIVE
+            and operator.password_hash is not None
+            and operator.credential_version >= 1
         )
         if (
-            currently_active_super_admin
+            currently_usable_super_admin
             and not remains_active_super_admin
             and len(active_super_admins) == 1
         ):

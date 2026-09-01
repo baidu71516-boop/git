@@ -85,14 +85,19 @@ async def select_operator(
     request: Request,
     context: Annotated[AuthContext, Depends(require_csrf_context)],
     service: Annotated[AuthService, Depends(get_auth_service)],
-) -> dict[str, Any]:
-    updated = await service.select_operator(
+) -> JSONResponse:
+    result = await service.select_operator(
         context,
         payload.operator_id,
+        payload.operator_password.get_secret_value(),
         ip=get_client_ip(request),
         user_agent=get_user_agent(request),
     )
-    return envelope(request, data=context_public(updated))
+    response = JSONResponse(
+        content=jsonable_encoder(envelope(request, data=context_public(result.context)))
+    )
+    set_auth_cookies(response, result, settings)
+    return response
 
 
 @router.post("/logout")

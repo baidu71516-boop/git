@@ -105,10 +105,10 @@ const ADAPTED_REAL_V3_MIXED_OUTPUT_FIXTURE = {
     {
       failureKind: "timeout",
       jsonFullName:
-        "AuthShell lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
+        "AuthShell requires Operator authentication before super_admin can load Import Job history",
       path: "apps/web/tests/auth-shell.test.tsx",
       streamedHierarchy:
-        "AuthShell > lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
+        "AuthShell > requires Operator authentication before super_admin can load Import Job history",
     },
     {
       failureKind: "timeout",
@@ -121,10 +121,10 @@ const ADAPTED_REAL_V3_MIXED_OUTPUT_FIXTURE = {
     {
       failureKind: "assertion",
       jsonFullName:
-        "AuthShell keeps Campaign reading available without a selected Operator",
+        "AuthShell requires Operator authentication before loading the influencer library",
       path: "apps/web/tests/auth-shell.test.tsx",
       streamedHierarchy:
-        "AuthShell > keeps Campaign reading available without a selected Operator",
+        "AuthShell > requires Operator authentication before loading the influencer library",
     },
     {
       failureKind: "assertion",

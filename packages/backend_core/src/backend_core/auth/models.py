@@ -103,6 +103,15 @@ class Operator(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         default=OperatorStatus.ACTIVE,
     )
+    # NULL is an intentional legacy state: the Operator must complete the
+    # out-of-band credential setup flow and can never authenticate passwordlessly.
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
 
     department: Mapped[Department] = relationship(back_populates="operators")
 
@@ -172,6 +181,12 @@ class AuthSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     operator_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("operators.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A non-NULL Operator binding is valid only when this snapshot matches the
+    # current Operator credential version. Existing bindings migrate as NULL.
+    operator_credential_version: Mapped[int | None] = mapped_column(
+        Integer,
         nullable=True,
     )
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)

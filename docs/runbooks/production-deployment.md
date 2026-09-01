@@ -13,6 +13,66 @@ be reached over HTTPS. Keep the production database password and stable
 `APP_MASTER_KEY` in the host's untracked runtime `.env`/secret mechanism; never
 place either in Git, logs, commands copied into shell history, or documentation.
 
+## Mandatory Operator Auth P0 `0010 -> 0011` gate
+
+The generic Compose startup commands in the next section must not be used to
+perform the Operator Auth P0 rollout. The following order is authoritative and
+must complete before public traffic is restored:
+
+1. Record the exact production Department UUID, intended first Super Admin
+   Operator UUID, current Git SHA, and new API/Web image digests. Against the
+   `0010_permissions_v1_persistence` schema, an exact-UUID preflight must return
+   exactly one row and prove that the Department and Operator are active, the
+   Operator belongs to that Department, and both the Operator role and
+   Department permission ceiling are `super_admin`. Stop on any mismatch; never
+   guess or substitute another Operator.
+2. Create and validate a recoverable production backup. Restore that backup to
+   an isolated, disposable PostgreSQL 16 rehearsal environment and use the
+   recorded **new** API artifact to run `0010 -> 0011`, initialize the same exact
+   Operator, authenticate it, and complete an administrator write smoke. Destroy
+   the rehearsal environment afterward and do not reuse its password.
+3. Enter maintenance mode. Remove every old API instance from the load balancer,
+   drain and stop it, block all direct API access, and stop workers or schedulers
+   that can retain database transactions. Prove the vulnerable old
+   `/api/v1/auth/select-operator` is unreachable and that PostgreSQL has no
+   remaining long-running application transaction.
+4. Configure an approved bounded PostgreSQL `lock_timeout` for the migration
+   connection, then apply `0011_operator_auth_p0` from the recorded new artifact.
+   Keep all external traffic closed. Both upgrade and downgrade perform DDL that
+   can contend or deadlock with live session/operator transactions; full API
+   quiescence is mandatory. A lock timeout or deadlock must fail the operation
+   closed while maintenance mode remains active—never retry against live traffic
+   or wait without a bound.
+5. Recheck the Alembic head and exact UUID/state. The intended legacy target must
+   still be active and `super_admin`, with `password_hash IS NULL` and
+   `credential_version = 0`. From a one-off container using the same **new** API
+   image, initialize 首位管理员 with an independent password:
+
+   ```bash
+   docker compose run --rm --no-deps api setup-operator-credential \
+     --department-id "<exact-department-uuid>" \
+     --operator-id "<exact-operator-uuid>" \
+     --require-super-admin
+   ```
+
+6. Read back and prove that 首位管理员 remains active and `super_admin`, now with
+   a non-null hash and `credential_version = 1`. Initialize every other required
+   legacy Operator by its own exact Department/Operator UUID and independent
+   password before allowing that Operator to work; never create a shared default.
+7. Start the new API only on the internal loopback path. Smoke Department login,
+   truthful unbound `/auth/me`, exact Operator-password authentication, old
+   Session rejection, and an authenticated administrator write. Start the Web
+   artifact with the recorded matching digest only after the API smoke passes.
+8. Reopen public traffic only after every preceding check passes. No old API
+   process may serve against the `0011` database.
+
+Application-only rollback to any version that permits passwordless Operator
+selection is forbidden before and after credential initialization. Before any
+credential exists, schema downgrade may be considered only in full maintenance
+mode after its guard succeeds. After initialization, downgrade must refuse;
+remain in maintenance mode and forward-fix, or use a separately approved full
+backup restore followed by deployment and smoke of the patched artifacts.
+
 ## Docker and host Nginx
 
 From the repository checkout on the host, with its untracked production `.env`
@@ -87,8 +147,12 @@ The authenticated application and login page must display `鄂ICP备2026044999�
 linked to `https://beian.miit.gov.cn/`. Add a 公安联网备案 record only after a real
 number is issued.
 
-Rollback pointers: restore the prior Git revision and re-run the same loopback
-Compose command; restore the prior enabled host Nginx config only after
-`nginx -t`; restore data only from a verified, retained custom-format dump using
-the approved recovery procedure. Do not treat this runbook as authorization to
-deploy from a development Mac.
+Rollback pointers: restore the prior Git revision only when that revision does
+not remove a deployed security fix. For Operator Auth P0 (`0011`) and later,
+application-only rollback to any revision with passwordless Operator selection
+is forbidden before and after credential initialization. Keep maintenance mode
+and forward-fix instead. Restore the prior enabled host Nginx config only after
+`nginx -t`. A verified, retained custom-format database dump is the last resort,
+and traffic may reopen only after the patched auth artifact and its exact-ID
+admin smoke pass against the restored database. Do not treat this runbook as
+authorization to deploy from a development Mac.

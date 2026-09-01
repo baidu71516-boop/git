@@ -11,7 +11,7 @@ from backend_core.auth.errors import AuthError
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.operator_admin_service import OperatorAdminService
 from backend_core.auth.schemas import OperatorAdminCreateInput, OperatorAdminUpdateInput
-from backend_core.auth.security import hash_password
+from backend_core.auth.security import hash_password, verify_password
 from backend_core.auth.service import AuthContext
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +53,8 @@ async def _seed_department(
         name=f"{name} Actor",
         role=actor_role,
         status=OperatorStatus.ACTIVE,
+        password_hash=hash_password(f"{name}-actor-password"),
+        credential_version=1,
     )
     second = (
         Operator(
@@ -60,6 +62,8 @@ async def _seed_department(
             name=f"{name} Second SA",
             role=Role.SUPER_ADMIN,
             status=OperatorStatus.ACTIVE,
+            password_hash=hash_password(f"{name}-second-password"),
+            credential_version=1,
         )
         if add_second_super_admin
         else None
@@ -69,6 +73,7 @@ async def _seed_department(
     auth_session = AuthSession(
         department_id=department.id,
         operator_id=actor.id,
+        operator_credential_version=actor.credential_version,
         token_hash=f"token-{name}",
         csrf_token_hash=f"csrf-{name}",
         ip="127.0.0.1",
@@ -110,6 +115,7 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 context,
                 OperatorAdminCreateInput(
                     name="Normal",
+                    password="normal-created-password",
                     role="operator",
                     module_grants=["data_updates", "campaigns", "campaigns"],
                 ),
@@ -117,11 +123,22 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 user_agent="operator-admin-test",
             )
             assert normal.module_grants == (ModuleKey.CAMPAIGNS, ModuleKey.DATA_UPDATES)
+            stored_normal = await service.repository.get_operator_in_department(
+                operator_id=normal.id,
+                department_id=context.department.id,
+            )
+            assert stored_normal is not None
+            assert stored_normal.password_hash is not None
+            assert stored_normal.password_hash != "normal-created-password"
+            assert verify_password(stored_normal.password_hash, "normal-created-password")
+            assert stored_normal.credential_version == 1
+            assert "password" not in normal.model_dump()
 
             super_admin = await service.create_operator(
                 context,
                 OperatorAdminCreateInput(
                     name="Direct SA",
+                    password="direct-super-admin-password",
                     role="super_admin",
                     module_grants=[],
                 ),
@@ -138,10 +155,26 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 == ()
             )
 
+            with pytest.raises(AuthError) as reuse:
+                await service.create_operator(
+                    context,
+                    OperatorAdminCreateInput(
+                        name="Department Password Reuse",
+                        password="operator-admin-test-password",
+                        role="operator",
+                        module_grants=[],
+                    ),
+                    ip="127.0.0.1",
+                    user_agent="operator-admin-test",
+                )
+            assert reuse.value.code == "PASSWORD_REUSE_FORBIDDEN"
+            await _refresh_context(session, context)
+
             for payload, code in (
                 (
                     OperatorAdminCreateInput(
                         name="Bad role",
+                        password="rejected-payload-password",
                         role="made_up",
                         module_grants=[],
                     ),
@@ -150,6 +183,7 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 (
                     OperatorAdminCreateInput(
                         name="Bad module",
+                        password="rejected-payload-password",
                         role="operator",
                         module_grants=["made_up"],
                     ),
@@ -158,6 +192,7 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 (
                     OperatorAdminCreateInput(
                         name="Admin grant",
+                        password="rejected-payload-password",
                         role="operator",
                         module_grants=["admin"],
                     ),
@@ -166,6 +201,7 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 (
                     OperatorAdminCreateInput(
                         name="SA grant",
+                        password="rejected-payload-password",
                         role="super_admin",
                         module_grants=["campaigns"],
                     ),
@@ -182,6 +218,17 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                 assert caught.value.code == code
                 await _refresh_context(session, context)
 
+            audit_payloads = repr(
+                [
+                    (audit.before, audit.after)
+                    for audit in await session.scalars(
+                        select(AuditLog).where(AuditLog.department_id == context.department.id)
+                    )
+                ]
+            )
+            assert "normal-created-password" not in audit_payloads
+            assert "direct-super-admin-password" not in audit_payloads
+
         async with database_session() as session:
             context, _actor, _second = await _seed_department(
                 session,
@@ -194,13 +241,14 @@ def test_operator_admin_create_and_grant_invariants() -> None:
                     context,
                     OperatorAdminCreateInput(
                         name="Forbidden SA",
+                        password="forbidden-super-admin-password",
                         role="super_admin",
                         module_grants=[],
                     ),
                     ip="127.0.0.1",
                     user_agent="operator-admin-test",
                 )
-            assert caught.value.code == "ROLE_CEILING_EXCEEDED"
+            assert caught.value.code == "PERMISSION_DENIED"
 
     asyncio.run(scenario())
 
@@ -220,12 +268,15 @@ def test_operator_admin_update_revocation_concurrency_and_audit() -> None:
                 name="Target",
                 role=Role.OPERATOR,
                 status=OperatorStatus.ACTIVE,
+                password_hash=hash_password("update-target-password"),
+                credential_version=1,
             )
             session.add(target)
             await session.flush()
             target_session = AuthSession(
                 department_id=context.department.id,
                 operator_id=target.id,
+                operator_credential_version=target.credential_version,
                 token_hash="target-token",
                 csrf_token_hash="target-csrf",
                 ip="127.0.0.1",
@@ -236,6 +287,7 @@ def test_operator_admin_update_revocation_concurrency_and_audit() -> None:
             target_session_2 = AuthSession(
                 department_id=context.department.id,
                 operator_id=target.id,
+                operator_credential_version=target.credential_version,
                 token_hash="target-token-2",
                 csrf_token_hash="target-csrf-2",
                 ip="127.0.0.1",
@@ -324,6 +376,7 @@ def test_operator_admin_update_revocation_concurrency_and_audit() -> None:
                 context,
                 OperatorAdminCreateInput(
                     name="Third Super Admin",
+                    password="third-super-admin-password",
                     role="super_admin",
                     module_grants=[],
                 ),
@@ -385,20 +438,37 @@ def test_operator_admin_update_revocation_concurrency_and_audit() -> None:
                 department_id=context.department.id,
             )
             assert third_operator is not None
+            # A migrated, credentialless Super Admin is not an authenticatable
+            # fallback and must not permit removal of the last usable admin.
+            session.add(
+                Operator(
+                    department_id=context.department.id,
+                    name="Legacy Credentialless Super Admin",
+                    role=Role.SUPER_ADMIN,
+                    status=OperatorStatus.ACTIVE,
+                    password_hash=None,
+                    credential_version=0,
+                )
+            )
+            await session.commit()
+            second_auth_session = AuthSession(
+                department_id=context.department.id,
+                operator_id=third_operator.id,
+                operator_credential_version=third_operator.credential_version,
+                token_hash="second-context-token",
+                csrf_token_hash="second-context-csrf",
+                ip="127.0.0.1",
+                user_agent="operator-admin-test",
+                expires_at=datetime(2031, 1, 1, tzinfo=UTC),
+                revoked_at=None,
+            )
+            session.add(second_auth_session)
+            await session.commit()
             second_context = AuthContext(
                 department=context.department,
                 operator=third_operator,
                 role=Role.SUPER_ADMIN,
-                auth_session=AuthSession(
-                    department_id=context.department.id,
-                    operator_id=third_operator.id,
-                    token_hash="second-context-token",
-                    csrf_token_hash="second-context-csrf",
-                    ip="127.0.0.1",
-                    user_agent="operator-admin-test",
-                    expires_at=datetime(2031, 1, 1, tzinfo=UTC),
-                    revoked_at=None,
-                ),
+                auth_session=second_auth_session,
                 department_role_ceiling=Role.SUPER_ADMIN,
                 effective_role=Role.SUPER_ADMIN,
             )
@@ -420,6 +490,7 @@ def test_operator_admin_update_revocation_concurrency_and_audit() -> None:
                 assert last_admin.value.code == "LAST_ACTIVE_SUPER_ADMIN"
                 await session.refresh(third_operator)
                 await session.refresh(context.department)
+                await session.refresh(second_auth_session)
             assert int(await session.scalar(select(func.count()).select_from(AuditLog)) or 0) == (
                 before_rejection_audits
             )
@@ -451,6 +522,114 @@ def test_operator_admin_self_disable_revokes_caller_session() -> None:
             assert result.status is OperatorStatus.DISABLED
             await session.refresh(context.auth_session)
             assert context.auth_session.revoked_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_operator_password_reset_rotates_version_revokes_sessions_and_preserves_profile() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            context, _actor, _second = await _seed_department(
+                session,
+                name="Password Reset",
+                ceiling=Role.SUPER_ADMIN,
+            )
+            service = OperatorAdminService(session, clock=FixedClock())
+            created = await service.create_operator(
+                context,
+                OperatorAdminCreateInput(
+                    name="Reset Target",
+                    password="initial-target-password",
+                    role="operator",
+                    module_grants=["campaigns", "data_updates"],
+                ),
+                ip="127.0.0.1",
+                user_agent="operator-admin-test",
+            )
+            target = await service.repository.get_operator_in_department(
+                operator_id=created.id,
+                department_id=context.department.id,
+            )
+            assert target is not None
+            before = {
+                "department_id": target.department_id,
+                "name": target.name,
+                "role": target.role,
+                "status": target.status,
+                "created_at": target.created_at,
+            }
+            original_hash = target.password_hash
+            original_version = target.credential_version
+            active_sessions = [
+                AuthSession(
+                    department_id=context.department.id,
+                    operator_id=target.id,
+                    operator_credential_version=target.credential_version,
+                    token_hash=f"reset-target-token-{index}",
+                    csrf_token_hash=f"reset-target-csrf-{index}",
+                    ip="127.0.0.1",
+                    user_agent="reset-target",
+                    expires_at=datetime(2031, 1, 1, tzinfo=UTC),
+                    revoked_at=None,
+                )
+                for index in range(2)
+            ]
+            already_revoked = AuthSession(
+                department_id=context.department.id,
+                operator_id=target.id,
+                operator_credential_version=target.credential_version,
+                token_hash="reset-target-token-revoked",
+                csrf_token_hash="reset-target-csrf-revoked",
+                ip="127.0.0.1",
+                user_agent="reset-target",
+                expires_at=datetime(2031, 1, 1, tzinfo=UTC),
+                revoked_at=datetime(2029, 1, 1, tzinfo=UTC),
+            )
+            session.add_all((*active_sessions, already_revoked))
+            await session.commit()
+
+            result = await service.reset_operator_password(
+                context,
+                operator_id=target.id,
+                password="replacement-target-password",
+                ip="127.0.0.1",
+                user_agent="operator-admin-test",
+            )
+            assert result.operator_id == target.id
+            assert result.revoked_sessions == 2
+            assert set(result.model_dump()) == {"operator_id", "revoked_sessions"}
+            await session.refresh(target)
+            assert target.password_hash is not None
+            assert target.password_hash != original_hash
+            assert target.password_hash != "replacement-target-password"
+            assert verify_password(target.password_hash, "replacement-target-password")
+            assert target.credential_version == original_version + 1
+            assert target.department_id == before["department_id"]
+            assert target.name == before["name"]
+            assert target.role is before["role"]
+            assert target.status is before["status"]
+            assert target.created_at == before["created_at"]
+            assert await service.repository.list_operator_module_grants(
+                operator_id=target.id,
+                department_id=context.department.id,
+            ) == (ModuleKey.CAMPAIGNS, ModuleKey.DATA_UPDATES)
+            for auth_session in active_sessions:
+                await session.refresh(auth_session)
+                assert auth_session.revoked_at is not None
+            await session.refresh(already_revoked)
+            assert _aware(already_revoked.revoked_at) == datetime(2029, 1, 1, tzinfo=UTC)
+
+            reset_audit = await session.scalar(
+                select(AuditLog).where(AuditLog.action == AuditAction.OPERATOR_PASSWORD_RESET)
+            )
+            assert reset_audit is not None
+            assert reset_audit.operator_id == context.operator.id
+            assert reset_audit.entity_id == target.id
+            assert reset_audit.before is None
+            assert reset_audit.after == {"revoked_sessions": 2}
+            assert "replacement-target-password" not in repr(
+                (reset_audit.before, reset_audit.after)
+            )
 
     asyncio.run(scenario())
 
@@ -489,6 +668,7 @@ def test_operator_admin_rolls_back_mutation_when_audit_insert_fails() -> None:
                         context,
                         OperatorAdminCreateInput(
                             name="Must Roll Back",
+                            password="must-roll-back-password",
                             role="operator",
                             module_grants=["campaigns"],
                         ),
@@ -513,12 +693,15 @@ def test_operator_admin_rolls_back_mutation_when_audit_insert_fails() -> None:
                 name="Audit Rollback Target",
                 role=Role.OPERATOR,
                 status=OperatorStatus.ACTIVE,
+                password_hash=hash_password("audit-rollback-target-password"),
+                credential_version=1,
             )
             session.add(target)
             await session.flush()
             target_session = AuthSession(
                 department_id=department_id,
                 operator_id=target.id,
+                operator_credential_version=target.credential_version,
                 token_hash="audit-target-token",
                 csrf_token_hash="audit-target-csrf",
                 ip="127.0.0.1",
@@ -556,6 +739,28 @@ def test_operator_admin_rolls_back_mutation_when_audit_insert_fails() -> None:
                 )
                 == ()
             )
+            assert int(await session.scalar(select(func.count()).select_from(AuditLog)) or 0) == 0
+
+            await _refresh_context(session, context)
+            original_password_hash = target.password_hash
+            original_credential_version = target.credential_version
+            event.listen(engine.sync_engine, "before_cursor_execute", fail_audit_insert)
+            try:
+                with pytest.raises(InjectedAuditFailure):
+                    await service.reset_operator_password(
+                        context,
+                        operator_id=target.id,
+                        password="audit-reset-replacement-password",
+                        ip="127.0.0.1",
+                        user_agent="operator-admin-test",
+                    )
+            finally:
+                event.remove(engine.sync_engine, "before_cursor_execute", fail_audit_insert)
+            await session.refresh(target)
+            await session.refresh(target_session)
+            assert target.password_hash == original_password_hash
+            assert target.credential_version == original_credential_version
+            assert target_session.revoked_at is None
             assert int(await session.scalar(select(func.count()).select_from(AuditLog)) or 0) == 0
 
     asyncio.run(scenario())

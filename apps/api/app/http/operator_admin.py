@@ -9,6 +9,8 @@ from backend_core.auth.schemas import (
     OperatorAdminCreateInput,
     OperatorAdminPublic,
     OperatorAdminUpdateInput,
+    OperatorPasswordResetInput,
+    OperatorPasswordResetPublic,
 )
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +74,27 @@ async def create_operator(
         user_agent=get_user_agent(request),
     )
     return envelope(request, data=operator)
+
+
+@router.post(
+    "/{operator_id}/reset-password",
+    response_model=SuccessEnvelope[OperatorPasswordResetPublic],
+)
+async def reset_operator_password(
+    operator_id: UUID,
+    payload: OperatorPasswordResetInput,
+    request: Request,
+    context: AdminWriteContext,
+    service: Annotated[OperatorAdminService, Depends(get_operator_admin_service)],
+) -> dict[str, Any]:
+    result = await service.reset_operator_password(
+        context,
+        operator_id=operator_id,
+        password=payload.password.get_secret_value(),
+        ip=get_client_ip(request),
+        user_agent=get_user_agent(request),
+    )
+    return envelope(request, data=result)
 
 
 @router.patch("/{operator_id}", response_model=SuccessEnvelope[OperatorAdminPublic])

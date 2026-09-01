@@ -46,6 +46,7 @@ type OperatorAdmin = {
 
 type OperatorValues = {
   name: string;
+  password?: string;
   role: Role;
   status?: OperatorStatus;
   module_grants: ModuleKey[];
@@ -167,6 +168,7 @@ export function PermissionsWorkspace({
       );
       if (!response.data) throw new Error("操作人详情为空");
       setEditing(response.data);
+      form.resetFields();
       form.setFieldsValue({
         name: response.data.name,
         role: response.data.role,
@@ -180,6 +182,7 @@ export function PermissionsWorkspace({
 
   function openCreate() {
     setEditing(null);
+    form.resetFields();
     form.setFieldsValue({
       name: "",
       role: "operator",
@@ -209,16 +212,19 @@ export function PermissionsWorkspace({
           method: "POST",
           body: JSON.stringify({
             name: values.name,
+            password: values.password,
             role: values.role,
             module_grants: persistedGrants(values),
           }),
         });
       }
+      form.resetFields();
       setCreateOpen(false);
       setEditing(null);
       await loadOperators();
       await onAuthRefresh();
     } catch (caught) {
+      if (!editing) form.setFieldValue("password", "");
       const message = errorMessage(caught);
       setError(message);
       if (
@@ -299,6 +305,7 @@ export function PermissionsWorkspace({
         title={editing ? "编辑操作人" : "新建操作人"}
         open={modalOpen}
         onCancel={() => {
+          form.resetFields();
           setCreateOpen(false);
           setEditing(null);
         }}
@@ -314,6 +321,19 @@ export function PermissionsWorkspace({
           >
             <Input />
           </Form.Item>
+          {!editing ? (
+            <Form.Item
+              label="个人密码"
+              name="password"
+              rules={[
+                { required: true, message: "请输入个人密码" },
+                { min: 12, message: "个人密码至少需要 12 个字符" },
+                { max: 128, message: "个人密码不能超过 128 个字符" },
+              ]}
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+          ) : null}
           <Form.Item label="角色" name="role" rules={[{ required: true }]}>
             <Select
               options={Object.entries(roleLabels).map(([value, label]) => ({

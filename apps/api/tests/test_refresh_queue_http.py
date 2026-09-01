@@ -21,7 +21,7 @@ from backend_core.auth.models import (
     Operator,
     OperatorModulePermission,
 )
-from backend_core.auth.security import hash_token
+from backend_core.auth.security import hash_password, hash_token
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
@@ -75,6 +75,10 @@ async def _seed_credential(
         name=f"Refresh {name} operator",
         role=role,
         status=OperatorStatus.ACTIVE,
+        password_hash=(
+            hash_password(f"refresh-{name}-operator-test-password") if operator_selected else None
+        ),
+        credential_version=1 if operator_selected else 0,
     )
     session.add(operator)
     await session.flush()
@@ -86,6 +90,7 @@ async def _seed_credential(
             AuthSession(
                 department_id=department.id,
                 operator_id=operator.id if operator_selected else None,
+                operator_credential_version=1 if operator_selected else None,
                 token_hash=hash_token(token),
                 csrf_token_hash=hash_token(csrf),
                 ip="192.0.2.80",

@@ -110,6 +110,7 @@ afterEach(async () => {
     }
   } finally {
     vi.restoreAllMocks();
+    document.cookie = "outreach_csrf=; Max-Age=0; path=/";
   }
 });
 
@@ -122,6 +123,18 @@ function response(data: unknown) {
       request_id: "test",
     }),
     { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+function errorResponse(code: string, status = 401) {
+  return new Response(
+    JSON.stringify({
+      success: false,
+      data: null,
+      error: { code, message: "unsafe backend detail", details: null },
+      request_id: "test",
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
   );
 }
 
@@ -375,6 +388,238 @@ describe("AuthShell", () => {
     ).toBe(true);
   });
 
+  it("submits the exact Operator id and personal password with CSRF before continuing", async () => {
+    document.cookie = "outreach_csrf=operator-csrf; path=/";
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "权限部",
+              status: "active",
+            },
+            operator: null,
+            role: "super_admin",
+            department_role_ceiling: "super_admin",
+            effective_role: null,
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/operators")) {
+          return response([
+            {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "当前操作人",
+              role: "viewer",
+              status: "active",
+            },
+          ]);
+        }
+        if (url.endsWith("/auth/select-operator") && init?.method === "POST") {
+          return response({
+            department: {
+              id: "department-1",
+              name: "权限部",
+              status: "active",
+            },
+            operator: {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "当前操作人",
+              role: "viewer",
+              status: "active",
+            },
+            role: "super_admin",
+            department_role_ceiling: "super_admin",
+            effective_role: "viewer",
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    renderAuthenticatedShell("permissions");
+    await screen.findByText("选择当前操作人");
+    fireEvent.mouseDown(screen.getByRole("combobox", { name: "操作人" }));
+    fireEvent.click(
+      await screen.findByText("当前操作人 · 只读成员", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("个人密码"), {
+      target: { value: "operator-personal-secret" },
+    });
+    fireEvent.submit(
+      screen.getByRole("button", { name: /认证并继续/ }).closest("form")!,
+    );
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/auth/select-operator") &&
+            init?.method === "POST",
+        ),
+      ).toBe(true),
+    );
+    const selectCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/auth/select-operator"),
+    );
+    expect(selectCall?.[1]?.body).toBe(
+      JSON.stringify({
+        operator_id: "operator-1",
+        operator_password: "operator-personal-secret",
+      }),
+    );
+    expect(new Headers(selectCall?.[1]?.headers).get("X-CSRF-Token")).toBe(
+      "operator-csrf",
+    );
+    expect(
+      await screen.findByText("当前身份无权访问权限管理"),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText("选择当前操作人")).not.toBeVisible(),
+    );
+  });
+
+  it.each([
+    [
+      "CREDENTIAL_SETUP_REQUIRED",
+      "该操作人尚未设置个人密码，请联系管理员完成凭据初始化。",
+      409,
+    ],
+    ["INVALID_OPERATOR_CREDENTIALS", "操作人或个人密码错误。", 401],
+    ["LOGIN_LOCKED", "尝试次数过多，请稍后重试。", 423],
+    ["OPERATOR_AUTH_LOCKED", "尝试次数过多，请稍后重试。", 423],
+    ["CSRF_FAILED", "安全校验失败，请刷新页面后重试。", 403],
+  ])(
+    "maps %s safely and clears the rejected personal password",
+    async (code, message, status) => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "安全部",
+              status: "active",
+            },
+            operator: null,
+            role: "operator",
+            department_role_ceiling: "operator",
+            effective_role: null,
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/operators")) {
+          return response([
+            {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "待认证操作人",
+              role: "operator",
+              status: "active",
+            },
+          ]);
+        }
+        if (url.endsWith("/auth/select-operator") && init?.method === "POST") {
+          return errorResponse(String(code), Number(status));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+      renderAuthenticatedShell("imports");
+      await screen.findByText("选择当前操作人");
+      fireEvent.mouseDown(screen.getByRole("combobox", { name: "操作人" }));
+      fireEvent.click(
+        await screen.findByText("待认证操作人 · 操作员", {
+          selector: ".ant-select-item-option-content",
+        }),
+      );
+      const password = screen.getByLabelText("个人密码");
+      fireEvent.change(password, { target: { value: "rejected-secret" } });
+      fireEvent.submit(
+        screen.getByRole("button", { name: /认证并继续/ }).closest("form")!,
+      );
+
+      expect(
+        (await screen.findAllByText(String(message))).length,
+      ).toBeGreaterThan(0);
+      expect(password).toHaveValue("");
+      expect(
+        screen.queryByText("unsafe backend detail"),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["INVALID_SESSION", "当前会话已失效，请重新登录。"],
+    ["SESSION_EXPIRED", "当前会话已过期，请重新登录。"],
+    ["AUTH_REQUIRED", "当前会话已失效，请重新登录。"],
+  ])(
+    "returns to Department login after Operator auth fails with %s",
+    async (sessionErrorCode, sessionErrorMessage) => {
+      vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me")) {
+          return response({
+            department: {
+              id: "department-1",
+              name: "安全部",
+              status: "active",
+            },
+            operator: null,
+            role: "operator",
+            department_role_ceiling: "operator",
+            effective_role: null,
+            expires_at: "2026-08-20T00:00:00Z",
+          });
+        }
+        if (url.endsWith("/operators")) {
+          return response([
+            {
+              id: "operator-1",
+              department_id: "department-1",
+              name: "待认证操作人",
+              role: "operator",
+              status: "active",
+            },
+          ]);
+        }
+        if (url.endsWith("/auth/select-operator") && init?.method === "POST") {
+          return errorResponse(String(sessionErrorCode), 401);
+        }
+        if (url.endsWith("/departments")) {
+          return response([
+            { id: "department-1", name: "安全部", status: "active" },
+          ]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+      renderAuthenticatedShell("imports");
+      await screen.findByText("选择当前操作人");
+      fireEvent.mouseDown(screen.getByRole("combobox", { name: "操作人" }));
+      fireEvent.click(
+        await screen.findByText("待认证操作人 · 操作员", {
+          selector: ".ant-select-item-option-content",
+        }),
+      );
+      fireEvent.change(screen.getByLabelText("个人密码"), {
+        target: { value: "expired-secret" },
+      });
+      fireEvent.submit(
+        screen.getByRole("button", { name: /认证并继续/ }).closest("form")!,
+      );
+
+      expect(await screen.findByText(sessionErrorMessage)).toBeInTheDocument();
+      expect(screen.getByText("请使用部门密码登录。")).toBeInTheDocument();
+    },
+  );
+
   it("renders the Department login form for an unauthenticated user", async () => {
     vi.spyOn(globalThis, "fetch")
       .mockResolvedValueOnce(
@@ -418,7 +663,7 @@ describe("AuthShell", () => {
     expect(screen.queryByText("INTERNAL")).not.toBeInTheDocument();
   });
 
-  it("lets a Viewer without an Operator read the influencer library", async () => {
+  it("requires Operator authentication before loading the influencer library", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input) => {
@@ -432,35 +677,34 @@ describe("AuthShell", () => {
             },
             operator: null,
             role: "viewer",
+            department_role_ceiling: "viewer",
+            effective_role: null,
             expires_at: "2026-08-12T00:00:00Z",
           });
         }
-        if (url.includes("/influencers/filter-options")) {
-          return response({ owners: [], tags: [], crm_stages: [] });
-        }
-        if (url.includes("/influencers")) {
-          return response({ items: [], page: 1, page_size: 50, total: 0 });
+        if (url.endsWith("/operators")) {
+          return response([]);
         }
         throw new Error(`Unexpected request: ${url}`);
       });
 
     renderAuthenticatedShell("influencers");
 
-    await waitFor(() => {
-      expect(
-        screen.getAllByRole("heading", { name: "达人库", level: 2 }),
-      ).toHaveLength(2);
-    });
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
     expect(
       within(screen.getByRole("complementary")).getByText("待选择"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "鄂ICP备2026044999号" }),
     ).toBeInTheDocument();
-    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) =>
         String(input).endsWith("/operators"),
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/influencers"),
       ),
     ).toBe(false);
   });
@@ -539,7 +783,7 @@ describe("AuthShell", () => {
   });
 
   it.each(["viewer", "operator", "manager", "super_admin"] as const)(
-    "lets an authenticated %s without an Operator read Import Job history in Backend scope",
+    "requires Operator authentication before %s can load Import Job history",
     async (role) => {
       const fetchMock = vi
         .spyOn(globalThis, "fetch")
@@ -554,11 +798,13 @@ describe("AuthShell", () => {
               },
               operator: null,
               role,
+              department_role_ceiling: role,
+              effective_role: null,
               expires_at: "2026-08-12T00:00:00Z",
             });
           }
-          if (url.endsWith("/import-jobs?offset=0&limit=50")) {
-            return response({ items: [], total: 0, offset: 0, limit: 50 });
+          if (url.endsWith("/operators")) {
+            return response([]);
           }
           throw new Error(
             `Unexpected request: ${url} ${init?.method ?? "GET"}`,
@@ -567,9 +813,10 @@ describe("AuthShell", () => {
 
       renderAuthenticatedShell("import-jobs");
 
-      expect(await screen.findByText("暂无导入记录")).toBeInTheDocument();
-      expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
-      expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+      expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
+      expect(
+        screen.getByRole("combobox", { name: "操作人" }),
+      ).toBeInTheDocument();
       expect(screen.getByRole("link", { name: /导入记录/ })).toHaveAttribute(
         "href",
         "/import-jobs",
@@ -578,7 +825,7 @@ describe("AuthShell", () => {
         fetchMock.mock.calls.some(([input]) =>
           String(input).endsWith("/operators"),
         ),
-      ).toBe(false);
+      ).toBe(true);
       expect(
         fetchMock.mock.calls.some(([input]) =>
           String(input).endsWith("/departments"),
@@ -729,7 +976,7 @@ describe("AuthShell", () => {
     expect(screen.queryByText("Inbox")).not.toBeInTheDocument();
   });
 
-  it("lets a Viewer without an Operator open influencer detail", async () => {
+  it("requires Operator authentication before loading influencer detail", async () => {
     const fetchMock = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async (input) => {
@@ -748,40 +995,26 @@ describe("AuthShell", () => {
             expires_at: "2026-08-12T00:00:00Z",
           });
         }
-        if (url.endsWith("/influencers/influencer-1")) {
-          return response({
-            id: "influencer-1",
-            display_name: "详情达人",
-            status: "active",
-            crm_stage: "待开发",
-            owner: null,
-            created_at: "2026-08-11T00:00:00Z",
-            updated_at: "2026-08-11T00:00:00Z",
-            platform_accounts: [],
-            contacts: [],
-            source_states: [],
-            source_identities: [],
-            current_metrics: [],
-          });
-        }
-        if (url.includes("/metric-snapshots")) {
-          return response({ items: [], page: 1, page_size: 50, total: 0 });
+        if (url.endsWith("/operators")) {
+          return response([]);
         }
         throw new Error(`Unexpected request: ${url}`);
       });
 
     renderAuthenticatedShell("influencers", "influencer-1");
 
-    expect(
-      await screen.findByRole("heading", { name: "详情达人", level: 2 }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("选择当前操作人")).toBeInTheDocument();
     expect(
       within(screen.getByRole("complementary")).getByText("待选择"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("选择当前操作人")).not.toBeInTheDocument();
     expect(
       fetchMock.mock.calls.some(([input]) =>
         String(input).endsWith("/operators"),
+      ),
+    ).toBe(true);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/influencers/influencer-1"),
       ),
     ).toBe(false);
   });

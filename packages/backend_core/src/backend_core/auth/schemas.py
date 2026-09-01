@@ -15,7 +15,10 @@ class LoginInput(BaseModel):
 
 
 class SelectOperatorInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     operator_id: UUID
+    operator_password: SecretStr = Field(min_length=1, max_length=256)
 
 
 class ResetPasswordInput(BaseModel):
@@ -69,8 +72,22 @@ class OperatorAdminCreateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: StrictStr = Field(min_length=1, max_length=120)
+    password: SecretStr = Field(min_length=12, max_length=128)
     role: StrictStr = Field(min_length=1, max_length=32)
     module_grants: list[StrictStr]
+
+
+class OperatorPasswordResetInput(BaseModel):
+    """Closed, dedicated credential-reset contract; never mixed into profile edits."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    password: SecretStr = Field(min_length=12, max_length=128)
+
+
+class OperatorPasswordResetPublic(BaseModel):
+    operator_id: UUID
+    revoked_sessions: int
 
 
 class OperatorAdminUpdateInput(BaseModel):

@@ -68,6 +68,11 @@ type LoginValues = {
   remember_me: boolean;
 };
 
+type OperatorAuthValues = {
+  operator_id: string;
+  operator_password: string;
+};
+
 const roleLabels: Record<Role, string> = {
   super_admin: "超级管理员",
   manager: "管理员",
@@ -85,10 +90,22 @@ type AuthWorkspace =
   | "candidate-pools"
   | "permissions";
 
-function workspaceRequiresOperator(workspace: AuthWorkspace): boolean {
-  // Import history and the influencer shell are bootstrap/read surfaces. Every
-  // business workspace waits for the authoritative selected-role response.
-  return workspace !== "import-jobs" && workspace !== "influencers";
+function operatorAuthErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiClientError)) {
+    return "操作人认证失败，请稍后重试。";
+  }
+  const messages: Record<string, string> = {
+    CREDENTIAL_SETUP_REQUIRED:
+      "该操作人尚未设置个人密码，请联系管理员完成凭据初始化。",
+    INVALID_OPERATOR_CREDENTIALS: "操作人或个人密码错误。",
+    LOGIN_LOCKED: "尝试次数过多，请稍后重试。",
+    OPERATOR_AUTH_LOCKED: "尝试次数过多，请稍后重试。",
+    INVALID_SESSION: "当前会话已失效，请重新登录。",
+    SESSION_EXPIRED: "当前会话已过期，请重新登录。",
+    AUTH_REQUIRED: "当前会话已失效，请重新登录。",
+    CSRF_FAILED: "安全校验失败，请刷新页面后重试。",
+  };
+  return messages[error.code ?? ""] ?? "操作人认证失败，请稍后重试。";
 }
 
 export function AuthShell({
@@ -112,7 +129,8 @@ export function AuthShell({
   const [operators, setOperators] = useState<Operator[]>([]);
   const [auth, setAuth] = useState<AuthMe | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const requiresOperator = auth ? workspaceRequiresOperator(workspace) : false;
+  const [operatorForm] = Form.useForm<OperatorAuthValues>();
+  const requiresOperator = auth !== null && auth.operator === null;
 
   const loadDepartments = useCallback(async () => {
     const response = await apiRequest<Department[]>("/departments");
@@ -129,11 +147,7 @@ export function AuthShell({
       try {
         const response = await apiRequest<AuthMe>("/auth/me");
         setAuth(response.data);
-        if (
-          response.data &&
-          workspaceRequiresOperator(workspace) &&
-          !response.data.operator
-        ) {
+        if (response.data && !response.data.operator) {
           await loadOperators();
         }
         if (
@@ -164,11 +178,7 @@ export function AuthShell({
       });
       const meResponse = await apiRequest<AuthMe>("/auth/me");
       setAuth(meResponse.data);
-      if (
-        meResponse.data &&
-        workspaceRequiresOperator(workspace) &&
-        !meResponse.data.operator
-      ) {
+      if (meResponse.data && !meResponse.data.operator) {
         await loadOperators();
       }
       if (
@@ -184,17 +194,37 @@ export function AuthShell({
     }
   }
 
-  async function handleOperatorSelect(operatorId: string) {
+  async function handleOperatorSelect(values: OperatorAuthValues) {
     setSubmitting(true);
     setError(null);
     try {
       const response = await apiRequest<AuthMe>("/auth/select-operator", {
         method: "POST",
-        body: JSON.stringify({ operator_id: operatorId }),
+        body: JSON.stringify({
+          operator_id: values.operator_id,
+          operator_password: values.operator_password,
+        }),
       });
       setAuth(response.data);
+      operatorForm.resetFields();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "选择操作人失败");
+      operatorForm.setFieldValue("operator_password", "");
+      setError(operatorAuthErrorMessage(caught));
+      if (
+        caught instanceof ApiClientError &&
+        ["INVALID_SESSION", "SESSION_EXPIRED", "AUTH_REQUIRED"].includes(
+          caught.code ?? "",
+        )
+      ) {
+        setAuth(null);
+        setOperators([]);
+        try {
+          await loadDepartments();
+        } catch {
+          // The stable session error remains actionable even if this refresh
+          // also fails; the user can retry from a fresh page load.
+        }
+      }
     } finally {
       setSubmitting(false);
     }
@@ -342,7 +372,7 @@ export function AuthShell({
       logoutLoading={submitting}
     >
       {error ? <Alert type="error" showIcon message={error} /> : null}
-      {workspace === "permissions" ? (
+      {requiresOperator ? null : workspace === "permissions" ? (
         auth.effective_role === "super_admin" ? (
           <PermissionsWorkspace onAuthRefresh={refreshAuth} />
         ) : (
@@ -433,7 +463,9 @@ export function AuthShell({
         footer={null}
         closable={false}
       >
-        <Paragraph type="secondary">请选择本次操作的实际执行人。</Paragraph>
+        <Paragraph type="secondary">
+          请选择本次操作的实际执行人，并输入该操作人的个人密码。
+        </Paragraph>
         {error ? (
           <Alert
             type="error"
@@ -442,19 +474,41 @@ export function AuthShell({
             className="modal-error"
           />
         ) : null}
-        <Select
-          className="full-width"
-          size="large"
-          placeholder="选择操作人"
-          loading={submitting}
-          onChange={(operatorId: string) =>
-            void handleOperatorSelect(operatorId)
-          }
-          options={operators.map((operator) => ({
-            label: `${operator.name} · ${roleLabels[operator.role]}`,
-            value: operator.id,
-          }))}
-        />
+        <Form<OperatorAuthValues>
+          form={operatorForm}
+          layout="vertical"
+          onFinish={(values) => void handleOperatorSelect(values)}
+        >
+          <Form.Item
+            label="操作人"
+            name="operator_id"
+            rules={[{ required: true, message: "请选择操作人" }]}
+          >
+            <Select
+              size="large"
+              placeholder="选择操作人"
+              loading={submitting}
+              options={operators.map((operator) => ({
+                label: `${operator.name} · ${roleLabels[operator.role]}`,
+                value: operator.id,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item
+            label="个人密码"
+            name="operator_password"
+            rules={[{ required: true, message: "请输入个人密码" }]}
+          >
+            <Input.Password
+              prefix={<LockOutlined />}
+              autoComplete="current-password"
+              disabled={submitting}
+            />
+          </Form.Item>
+          <Button type="primary" htmlType="submit" block loading={submitting}>
+            认证并继续
+          </Button>
+        </Form>
       </Modal>
     </AppShell>
   );

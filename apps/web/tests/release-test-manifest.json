@@ -18,20 +18,33 @@
     {
       "path": "apps/web/tests/auth-shell.test.tsx",
       "tests": [
-        "AuthShell > keeps Campaign reading available without a selected Operator",
+        "AuthShell > clears stale Super Admin UI after a successful self mutation revokes the session",
+        "AuthShell > does not infer a Viewer identity for Refresh Queues",
+        "AuthShell > does not infer a Viewer identity from a Department ceiling",
         "AuthShell > keeps Operator selection mandatory for Refresh Queue mutations",
         "AuthShell > keeps Operator selection mandatory for the import workspace",
         "AuthShell > keeps an existing Viewer Operator on the influencer workspace",
-        "AuthShell > lets a Viewer without an Operator open influencer detail",
-        "AuthShell > lets a Viewer without an Operator read Refresh Queues without write entry points",
-        "AuthShell > lets a Viewer without an Operator read imports while keeping mutations disabled",
-        "AuthShell > lets a Viewer without an Operator read the influencer library",
-        "AuthShell > lets an authenticated manager without an Operator read Import Job history in Backend scope",
-        "AuthShell > lets an authenticated operator without an Operator read Import Job history in Backend scope",
-        "AuthShell > lets an authenticated super_admin without an Operator read Import Job history in Backend scope",
-        "AuthShell > lets an authenticated viewer without an Operator read Import Job history in Backend scope",
         "AuthShell > logs out from the App Shell and returns to department login",
-        "AuthShell > renders the Department login form for an unauthenticated user"
+        "AuthShell > maps CREDENTIAL_SETUP_REQUIRED safely and clears the rejected personal password",
+        "AuthShell > maps CSRF_FAILED safely and clears the rejected personal password",
+        "AuthShell > maps INVALID_OPERATOR_CREDENTIALS safely and clears the rejected personal password",
+        "AuthShell > maps LOGIN_LOCKED safely and clears the rejected personal password",
+        "AuthShell > maps OPERATOR_AUTH_LOCKED safely and clears the rejected personal password",
+        "AuthShell > renders the Department login form for an unauthenticated user",
+        "AuthShell > requires Operator authentication before loading influencer detail",
+        "AuthShell > requires Operator authentication before loading the influencer library",
+        "AuthShell > requires Operator authentication before manager can load Import Job history",
+        "AuthShell > requires Operator authentication before operator can load Import Job history",
+        "AuthShell > requires Operator authentication before super_admin can load Import Job history",
+        "AuthShell > requires Operator authentication before viewer can load Import Job history",
+        "AuthShell > requires a selected Operator before opening a business workspace",
+        "AuthShell > returns to Department login after Operator auth fails with AUTH_REQUIRED",
+        "AuthShell > returns to Department login after Operator auth fails with INVALID_SESSION",
+        "AuthShell > returns to Department login after Operator auth fails with SESSION_EXPIRED",
+        "AuthShell > shows the permissions page and navigation only for an effective Super Admin",
+        "AuthShell > shows 待选择 without a current Super Admin role when no Operator is selected",
+        "AuthShell > submits the exact Operator id and personal password with CSRF before continuing",
+        "AuthShell > uses effective_role, not the Super Admin Department ceiling, for header and permissions navigation"
       ]
     },
     {
@@ -458,6 +471,15 @@
       "tests": [
         "influencer parallel route structure > renders the list and drawer slots together",
         "influencer parallel route structure > uses explicit null fallbacks for inactive and unmatched drawer routes"
+      ]
+    },
+    {
+      "path": "apps/web/tests/permissions-workspace.test.tsx",
+      "tests": [
+        "PermissionsWorkspace > creates with the complete selected grant set and refetches server data",
+        "PermissionsWorkspace > loads disabled same-department operators from the admin API",
+        "PermissionsWorkspace > renders Super Admin matrix as implicit, fixed access and Viewer wording as read-only",
+        "PermissionsWorkspace > sends full state with expected_updated_at and refetches after VERSION_CONFLICT"
       ]
     },
     {
