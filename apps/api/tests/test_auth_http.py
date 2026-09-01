@@ -32,8 +32,8 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
             await session.flush()
             operator = Operator(
                 department_id=department.id,
-                name="Privileged Name Only",
-                role=Role.SUPER_ADMIN,
+                name="Viewer Operator",
+                role=Role.VIEWER,
                 status=OperatorStatus.ACTIVE,
             )
             session.add_all(
@@ -111,7 +111,8 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         )
                         assert selected.status_code == 200
                         assert selected.json()["data"]["operator"]["id"] == str(operator.id)
-                        # Operator Role is attribution data; authority remains Department Role.
+                        # Public `role` remains the legacy Department-role field until Web and
+                        # API response composition change together in a later Task.
                         assert selected.json()["data"]["role"] == "viewer"
 
                         denied_admin = await client.post(

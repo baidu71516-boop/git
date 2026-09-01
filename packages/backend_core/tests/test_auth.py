@@ -4,7 +4,8 @@ from uuid import UUID, uuid4
 
 from backend_core.audit.enums import AuditAction
 from backend_core.audit.models import AuditLog
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.authorization import ModuleKey, viewer_mutation_allowed
+from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role, role_at_or_below
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.security import hash_password, hash_token
 from backend_core.auth.service import AuthContext, AuthError, AuthService, BootstrapService
@@ -61,6 +62,7 @@ async def add_department(
     name: str = "Sales",
     password: str = "correct-horse-battery",
     department_role: Role = Role.OPERATOR,
+    operator_role: Role = Role.SUPER_ADMIN,
     status: DepartmentStatus = DepartmentStatus.ACTIVE,
 ) -> tuple[Department, Operator]:
     department = Department(
@@ -74,7 +76,7 @@ async def add_department(
     operator = Operator(
         department_id=department.id,
         name=f"{name} Manager",
-        role=Role.SUPER_ADMIN,
+        role=operator_role,
         status=OperatorStatus.ACTIVE,
     )
     session.add_all(
@@ -265,13 +267,13 @@ def test_session_expiry_logout_and_missing_authentication() -> None:
     asyncio.run(scenario())
 
 
-def test_operator_selection_is_attribution_not_privilege_escalation() -> None:
+def test_operator_selection_uses_valid_effective_role_without_changing_legacy_ceiling() -> None:
     async def scenario() -> None:
         async with database_session() as session:
             clock = MutableClock()
             department, privileged_operator = await add_department(
                 session,
-                department_role=Role.VIEWER,
+                department_role=Role.SUPER_ADMIN,
             )
             other_department, other_operator = await add_department(session, name="Other")
             service = AuthService(session, MemoryThrottle(clock), clock=clock)
@@ -290,7 +292,9 @@ def test_operator_selection_is_attribution_not_privilege_escalation() -> None:
                 user_agent="pytest",
             )
             assert privileged_operator.role == Role.SUPER_ADMIN
-            assert selected.role == Role.VIEWER
+            assert selected.role == Role.SUPER_ADMIN
+            assert selected.department_role_ceiling == Role.SUPER_ADMIN
+            assert selected.effective_role == Role.SUPER_ADMIN
             assert selected.auth_session.operator_id == privileged_operator.id
 
             try:
@@ -311,6 +315,233 @@ def test_operator_selection_is_attribution_not_privilege_escalation() -> None:
             )
             assert selected_audit is not None
             assert selected_audit.operator_id == privileged_operator.id
+
+    asyncio.run(scenario())
+
+
+def test_permissions_v1_role_order_module_keys_and_viewer_mutation_predicate() -> None:
+    assert role_at_or_below(Role.VIEWER, Role.VIEWER)
+    assert role_at_or_below(Role.VIEWER, Role.OPERATOR)
+    assert role_at_or_below(Role.OPERATOR, Role.MANAGER)
+    assert role_at_or_below(Role.MANAGER, Role.SUPER_ADMIN)
+    assert not role_at_or_below(Role.OPERATOR, Role.VIEWER)
+    assert not role_at_or_below(Role.MANAGER, Role.OPERATOR)
+    assert not role_at_or_below(Role.SUPER_ADMIN, Role.MANAGER)
+    assert {module_key.value for module_key in ModuleKey} == {
+        "today_outreach",
+        "campaigns",
+        "candidate_pools",
+        "influencer_library",
+        "data_collection",
+        "import_history",
+        "data_updates",
+        "admin",
+    }
+    try:
+        ModuleKey("arbitrary_permission")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("ModuleKey accepted an arbitrary permission string")
+    assert not viewer_mutation_allowed(Role.VIEWER)
+    assert viewer_mutation_allowed(Role.OPERATOR)
+    assert viewer_mutation_allowed(Role.MANAGER)
+    assert viewer_mutation_allowed(Role.SUPER_ADMIN)
+
+
+def test_valid_operator_roles_resolve_as_effective_role() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            clock = MutableClock()
+            department, manager = await add_department(
+                session,
+                department_role=Role.MANAGER,
+                operator_role=Role.MANAGER,
+            )
+            operator = Operator(
+                department_id=department.id,
+                name="Below ceiling",
+                role=Role.OPERATOR,
+                status=OperatorStatus.ACTIVE,
+            )
+            session.add(operator)
+            await session.commit()
+            service = AuthService(session, MemoryThrottle(clock), clock=clock)
+            login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.51",
+                user_agent="pytest",
+            )
+            unbound = await service.authenticate(login.session_token)
+
+            equal = await service.select_operator(
+                unbound,
+                manager.id,
+                ip="192.0.2.51",
+                user_agent="pytest",
+            )
+            assert equal.department_role_ceiling == Role.MANAGER
+            assert equal.effective_role == Role.MANAGER
+
+            below = await service.select_operator(
+                equal,
+                operator.id,
+                ip="192.0.2.51",
+                user_agent="pytest",
+            )
+            assert below.department_role_ceiling == Role.MANAGER
+            assert below.effective_role == Role.OPERATOR
+            effective = await service.resolve_effective_authorization(below)
+            assert effective.effective_role == Role.OPERATOR
+            assert effective.department_scope.department_id == department.id
+            assert not effective.department_scope.cross_department_override
+
+    asyncio.run(scenario())
+
+
+def test_above_ceiling_selection_does_not_bind_session() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            clock = MutableClock()
+            department, above_ceiling = await add_department(
+                session,
+                department_role=Role.MANAGER,
+                operator_role=Role.SUPER_ADMIN,
+            )
+            service = AuthService(session, MemoryThrottle(clock), clock=clock)
+            login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.52",
+                user_agent="pytest",
+            )
+            context = await service.authenticate(login.session_token)
+            try:
+                await service.select_operator(
+                    context,
+                    above_ceiling.id,
+                    ip="192.0.2.52",
+                    user_agent="pytest",
+                )
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "ROLE_CEILING_EXCEEDED")
+            else:
+                raise AssertionError("above-ceiling operator was selected")
+            await session.refresh(login.auth_session)
+            assert login.auth_session.operator_id is None
+            assert login.auth_session.revoked_at is None
+
+    asyncio.run(scenario())
+
+
+def test_bound_operator_ceiling_or_status_change_revokes_session_fail_closed() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            clock = MutableClock()
+            department, operator = await add_department(
+                session,
+                department_role=Role.MANAGER,
+                operator_role=Role.OPERATOR,
+            )
+            service = AuthService(session, MemoryThrottle(clock), clock=clock)
+            login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.53",
+                user_agent="pytest",
+            )
+            context = await service.authenticate(login.session_token)
+            await service.select_operator(
+                context,
+                operator.id,
+                ip="192.0.2.53",
+                user_agent="pytest",
+            )
+            operator.role = Role.SUPER_ADMIN
+            await session.commit()
+
+            try:
+                await service.authenticate(login.session_token)
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "ROLE_CEILING_EXCEEDED")
+            else:
+                raise AssertionError("above-ceiling bound session remained valid")
+            await session.refresh(login.auth_session)
+            assert login.auth_session.revoked_at is not None
+
+            try:
+                await service.authenticate(login.session_token)
+            except AuthError as exc:
+                assert_auth_error(exc, 401, "INVALID_SESSION")
+            else:
+                raise AssertionError("revoked session remained valid")
+
+            second_login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.54",
+                user_agent="pytest",
+            )
+            operator.role = Role.OPERATOR
+            await session.commit()
+            second_context = await service.authenticate(second_login.session_token)
+            await service.select_operator(
+                second_context,
+                operator.id,
+                ip="192.0.2.54",
+                user_agent="pytest",
+            )
+            operator.status = OperatorStatus.DISABLED
+            await session.commit()
+            try:
+                await service.authenticate(second_login.session_token)
+            except AuthError as exc:
+                assert_auth_error(exc, 401, "INVALID_SESSION")
+            else:
+                raise AssertionError("disabled bound operator formed a business actor")
+            await session.refresh(second_login.auth_session)
+            assert second_login.auth_session.revoked_at is not None
+
+    asyncio.run(scenario())
+
+
+def test_operator_role_change_is_resolved_on_the_next_request() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            clock = MutableClock()
+            department, operator = await add_department(
+                session,
+                department_role=Role.MANAGER,
+                operator_role=Role.OPERATOR,
+            )
+            service = AuthService(session, MemoryThrottle(clock), clock=clock)
+            login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.55",
+                user_agent="pytest",
+            )
+            context = await service.authenticate(login.session_token)
+            await service.select_operator(
+                context,
+                operator.id,
+                ip="192.0.2.55",
+                user_agent="pytest",
+            )
+            operator.role = Role.MANAGER
+            await session.commit()
+
+            refreshed = await service.authenticate(login.session_token)
+            assert refreshed.department_role_ceiling == Role.MANAGER
+            assert refreshed.effective_role == Role.MANAGER
+            effective = await service.resolve_effective_authorization(refreshed)
+            assert effective.effective_role == Role.MANAGER
 
     asyncio.run(scenario())
 

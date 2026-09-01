@@ -32,3 +32,9 @@ def role_allows(current: Role, required: Role) -> bool:
     """Return whether a department-level role satisfies a minimum role."""
 
     return ROLE_RANK[current] >= ROLE_RANK[required]
+
+
+def role_at_or_below(role: Role, ceiling: Role) -> bool:
+    """Return whether a stored Operator role is valid under a Department ceiling."""
+
+    return ROLE_RANK[role] <= ROLE_RANK[ceiling]
