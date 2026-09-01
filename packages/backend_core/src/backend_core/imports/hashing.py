@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -27,7 +28,7 @@ def canonical_value(value: Any) -> Any:
         return value.isoformat()
     if isinstance(value, (UUID, Enum)):
         return str(value.value if isinstance(value, Enum) else value)
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): canonical_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [canonical_value(item) for item in value]

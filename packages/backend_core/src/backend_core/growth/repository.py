@@ -28,7 +28,13 @@ from backend_core.content_activity.huitun_douyin import (
     HUITUN_DOUYIN_IDENTITY_SOURCE,
 )
 from backend_core.content_activity.models import ContentActivityObservation, ProviderAccountIdentity
-from backend_core.growth.enums import CandidatePoolKind, CandidateResult, Phase3AOperationScope
+from backend_core.growth.enums import (
+    BuyerLeadTier,
+    CandidatePoolKind,
+    CandidatePoolStatus,
+    CandidateResult,
+    Phase3AOperationScope,
+)
 from backend_core.growth.models import (
     CandidatePool,
     CandidatePoolMember,
@@ -37,6 +43,7 @@ from backend_core.growth.models import (
     TargetingPolicy,
 )
 from backend_core.growth.targeting import (
+    BuyerLeadTierDecision,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
@@ -352,10 +359,10 @@ class CandidatePoolRepository:
         cursor: UUID | None,
         limit: int,
         result: CandidateResult | None = None,
+        buyer_lead_tier: BuyerLeadTier | None = None,
     ) -> CandidateRunMemberPage:
-        # NOT_MATCH is counted on the run but never materialized as a public
-        # row. Keep the invariant in the read path as well for legacy/corrupt
-        # rows that may predate the materializer guard.
+        # Seller retains its historical MATCH/UNKNOWN member contract. Buyer
+        # Lead Tier runs materialize NOT_MATCH too so SAME/RELATED never vanish.
         statement = (
             select(CandidatePoolMember, Influencer, InfluencerPlatformAccount)
             .select_from(CandidatePoolMember)
@@ -383,11 +390,18 @@ class CandidatePoolRepository:
             )
             .where(
                 CandidatePoolMember.run_id == run_id,
-                CandidatePoolMember.result.in_((CandidateResult.MATCH, CandidateResult.UNKNOWN)),
+                or_(
+                    CandidatePool.kind == CandidatePoolKind.POTENTIAL_BUYER,
+                    CandidatePoolMember.result.in_(
+                        (CandidateResult.MATCH, CandidateResult.UNKNOWN)
+                    ),
+                ),
             )
         )
         if result is not None:
             statement = statement.where(CandidatePoolMember.result == result)
+        if buyer_lead_tier is not None:
+            statement = statement.where(CandidatePoolMember.buyer_lead_tier == buyer_lead_tier)
         if cursor is not None:
             statement = statement.where(CandidatePoolMember.id > cursor)
         statement = statement.order_by(CandidatePoolMember.id).limit(limit + 1)
@@ -410,10 +424,80 @@ class CandidatePoolRepository:
         collection_job_id: UUID,
         *,
         department_id: UUID,
+        for_update: bool = False,
     ) -> CollectionJob | None:
         statement = select(CollectionJob).where(
             CollectionJob.id == collection_job_id,
             CollectionJob.department_id == department_id,
+        )
+        if for_update:
+            # The CollectionJob is the natural bootstrap concurrency boundary:
+            # only one semantically identical Buyer Pool may be created from it.
+            statement = statement.execution_options(populate_existing=True).with_for_update()
+        return (await self.session.execute(statement)).scalar_one_or_none()
+
+    async def has_committed_buyer_source_candidates(
+        self,
+        *,
+        collection_job_id: UUID,
+    ) -> bool:
+        """Require the same exact source provenance used by Buyer materialization."""
+
+        statement = select(
+            exists(
+                select(1)
+                .select_from(InfluencerPlatformAccount)
+                .join(Influencer, Influencer.id == InfluencerPlatformAccount.influencer_id)
+                .where(
+                    InfluencerPlatformAccount.is_active.is_(True),
+                    *visible_influencer_criteria(),
+                    _committed_provenance_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        collection_job_id,
+                    ),
+                )
+            )
+        )
+        return bool((await self.session.execute(statement)).scalar())
+
+    async def get_active_buyer_pool_for_bootstrap(
+        self,
+        *,
+        department_id: UUID,
+        collection_job_id: UUID,
+        policy_hash: str,
+    ) -> CandidatePool | None:
+        """Find a semantically identical current Buyer Pool under the Job lock."""
+
+        statement = (
+            select(CandidatePool)
+            .join(TargetingPolicy, TargetingPolicy.id == CandidatePool.current_policy_id)
+            .where(
+                CandidatePool.department_id == department_id,
+                CandidatePool.kind == CandidatePoolKind.POTENTIAL_BUYER,
+                CandidatePool.source_collection_job_id == collection_job_id,
+                CandidatePool.status == CandidatePoolStatus.ACTIVE,
+                TargetingPolicy.canonical_hash == policy_hash,
+            )
+            .order_by(CandidatePool.created_at, CandidatePool.id)
+            .limit(1)
+        )
+        return (await self.session.execute(statement)).scalar_one_or_none()
+
+    async def get_first_run_for_policy(
+        self,
+        *,
+        pool_id: UUID,
+        policy_id: UUID,
+    ) -> CandidatePoolRun | None:
+        statement = (
+            select(CandidatePoolRun)
+            .where(
+                CandidatePoolRun.pool_id == pool_id,
+                CandidatePoolRun.policy_id == policy_id,
+            )
+            .order_by(CandidatePoolRun.created_at, CandidatePoolRun.id)
+            .limit(1)
         )
         return (await self.session.execute(statement)).scalar_one_or_none()
 
@@ -927,8 +1011,7 @@ class CandidatePoolRepository:
         huitun_identity_valid_at_as_of = and_(
             identity_valid_at_as_of,
             ProviderAccountIdentity.platform == Platform.DOUYIN,
-            ProviderAccountIdentity.namespace
-            == ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
+            ProviderAccountIdentity.namespace == ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
             ProviderAccountIdentity.identity_source == HUITUN_DOUYIN_IDENTITY_SOURCE,
             ProviderAccountIdentity.resolver_contract_version
             == HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
@@ -1278,15 +1361,17 @@ class CandidatePoolRepository:
         self,
         *,
         run: CandidatePoolRun,
-        evaluations: Iterable[tuple[CandidateFactBundle, TargetingEvaluation]],
+        evaluations: Iterable[
+            tuple[CandidateFactBundle, TargetingEvaluation, BuyerLeadTierDecision | None]
+        ],
     ) -> tuple[int, int, int]:
-        """Stage only MATCH/UNKNOWN rows; the caller owns the surrounding transaction."""
+        """Persist Seller MATCH/UNKNOWN and all Buyer tier rows in one transaction."""
 
         match_count = 0
         unknown_count = 0
         not_match_count = 0
         members: list[CandidatePoolMember] = []
-        for facts, evaluation in evaluations:
+        for facts, evaluation, buyer_decision in evaluations:
             if evaluation.result.value == CandidateResult.MATCH.value:
                 match_count += 1
                 result = CandidateResult.MATCH
@@ -1295,13 +1380,19 @@ class CandidatePoolRepository:
                 result = CandidateResult.UNKNOWN
             else:
                 not_match_count += 1
-                continue
+                if buyer_decision is None:
+                    continue
+                result = CandidateResult.NOT_MATCH
             members.append(
                 CandidatePoolMember(
                     run_id=run.id,
                     influencer_id=facts.influencer_id,
                     platform_account_id=facts.platform_account_id,
                     result=result,
+                    buyer_lead_tier=(buyer_decision.tier if buyer_decision is not None else None),
+                    buyer_relation_summary=(
+                        buyer_decision.relation_summary if buyer_decision is not None else None
+                    ),
                     reason_codes=[reason_code.value for reason_code in evaluation.reason_codes],
                     redacted_evidence=evaluation.redacted_evidence,
                     evidence_hash=evaluation.evidence_hash,

@@ -167,6 +167,8 @@ export type CandidateMember = {
   influencer_id: string;
   platform_account_id: string;
   result: "MATCH" | "UNKNOWN" | string;
+  buyer_lead_tier?: BuyerLeadTier | null;
+  buyer_relation_summary?: BuyerRelationSummary | null;
   reason_codes: string[];
   redacted_evidence: Record<string, unknown>;
   evidence_hash: string;
@@ -185,6 +187,24 @@ export type CandidateMember = {
     account_handle: string | null;
     is_active: boolean;
   };
+};
+
+export type BuyerLeadTier =
+  "HIGH" | "CHANGED" | "RELATED" | "SAME_CATEGORY" | "UNKNOWN";
+
+export type BuyerRelationPair = {
+  client_category_id: string;
+  creator_category_id: string;
+  relation: string;
+};
+
+export type BuyerRelationSummary = {
+  schema_version?: number;
+  status?: string;
+  reason_code?: string;
+  client_categories?: string[];
+  creator_categories?: string[];
+  pairs?: BuyerRelationPair[];
 };
 
 export type CandidateMemberPage = {

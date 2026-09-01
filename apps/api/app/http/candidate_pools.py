@@ -8,7 +8,12 @@ from uuid import UUID
 from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.campaigns.access import DepartmentScope
 from backend_core.config import get_settings
-from backend_core.growth.enums import CandidatePoolKind, CandidatePoolRunStatus, CandidateResult
+from backend_core.growth.enums import (
+    BuyerLeadTier,
+    CandidatePoolKind,
+    CandidatePoolRunStatus,
+    CandidateResult,
+)
 from backend_core.growth.schemas import (
     CandidatePoolCreateInput,
     CandidatePoolPage,
@@ -63,8 +68,10 @@ CandidatePoolsWriteContext = Annotated[
 
 POOL_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
 RUN_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
-RUN_MEMBER_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit", "result"})
-type CandidateRunMemberResult = Literal[CandidateResult.MATCH, CandidateResult.UNKNOWN]
+RUN_MEMBER_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit", "result", "buyer_lead_tier"})
+type CandidateRunMemberResult = Literal[
+    CandidateResult.MATCH, CandidateResult.NOT_MATCH, CandidateResult.UNKNOWN
+]
 
 
 class CandidatePoolCreateRequest(Phase3AHttpWrite):
@@ -375,6 +382,7 @@ async def list_candidate_pool_run_members(
     cursor: Annotated[UUID | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     result: Annotated[CandidateRunMemberResult | None, Query()] = None,
+    buyer_lead_tier: Annotated[BuyerLeadTier | None, Query()] = None,
 ) -> dict[str, Any]:
     page = await _service_call(
         service.list_run_members(
@@ -384,6 +392,7 @@ async def list_candidate_pool_run_members(
             cursor=cursor,
             limit=limit,
             result=result,
+            buyer_lead_tier=buyer_lead_tier,
             department_id=scope.department_id,
         )
     )

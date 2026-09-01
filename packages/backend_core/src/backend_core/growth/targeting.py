@@ -30,6 +30,7 @@ from backend_core.content_activity.enums import (
     ContentActivityObservationStatus,
     ContentActivityResult,
 )
+from backend_core.growth.enums import BuyerLeadTier
 from backend_core.imports.hashing import canonical_value, hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
 from backend_core.influencers.freshness import (
@@ -51,6 +52,16 @@ class TargetingEvaluationResult(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class BuyerCategoryRelation(StrEnum):
+    """Buyer-only category detail kept separate from legacy tri-state targeting."""
+
+    EXACT = "EXACT"
+    PARENT_CHILD = "PARENT_CHILD"
+    COMPATIBLE = "COMPATIBLE"
+    INCOMPATIBLE = "INCOMPATIBLE"
+    NO_RULE = "NO_RULE"
+
+
 class TargetingReasonCode(StrEnum):
     """Closed reasons emitted by the deterministic targeting evaluators."""
 
@@ -59,6 +70,9 @@ class TargetingReasonCode(StrEnum):
     CATEGORY_ALIGNED = "CATEGORY_ALIGNED"
     CATEGORY_MISMATCH = "CATEGORY_MISMATCH"
     CLASSIFICATION_STALE = "CLASSIFICATION_STALE"
+    CLIENT_CATEGORY_UNMAPPED = "CLIENT_CATEGORY_UNMAPPED"
+    # Kept solely so historical persisted CandidatePoolMember evidence remains
+    # readable. New Buyer V1 evaluations emit CLIENT_CATEGORY_UNMAPPED.
     COLLECTION_CATEGORY_UNMAPPED = "COLLECTION_CATEGORY_UNMAPPED"
     COLLECTION_CONTEXT_MISSING = "COLLECTION_CONTEXT_MISSING"
     CONTACT_AVAILABLE = "CONTACT_AVAILABLE"
@@ -385,7 +399,10 @@ class TaxonomyDefinition(FrozenTargetingContract):
     """Human-owned policy snapshot; it deliberately has no persistence table."""
 
     schema_version: Literal[1] = 1
+    taxonomy_id: str | None = Field(default=None, min_length=1, max_length=120)
     taxonomy_version: str = Field(min_length=1, max_length=80)
+    artifact_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    review_status: str | None = Field(default=None, min_length=1, max_length=40)
     reviewed: StrictBool = False
     categories: tuple[str, ...] = ()
     aliases: tuple[TaxonomyAlias, ...] = ()
@@ -399,6 +416,16 @@ class TaxonomyDefinition(FrozenTargetingContract):
         normalized = value.strip()
         if not normalized:
             raise ValueError("taxonomy_version must not be blank")
+        return normalized
+
+    @field_validator("taxonomy_id", "review_status")
+    @classmethod
+    def normalize_optional_identity(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("taxonomy identity values must not be blank")
         return normalized
 
     @field_validator("categories", mode="before")
@@ -465,6 +492,20 @@ class TaxonomyDefinition(FrozenTargetingContract):
         if pair in {relation.pair for relation in self.incompatible}:
             return "INCOMPATIBLE"
         return None
+
+    def buyer_relation_detail(self, left: str, right: str) -> BuyerCategoryRelation:
+        """Return Buyer V1's auditable relation without changing generic semantics."""
+
+        if left == right:
+            return BuyerCategoryRelation.EXACT
+        pair = tuple(sorted((left, right)))
+        if pair in {relation.pair for relation in self.parent_child}:
+            return BuyerCategoryRelation.PARENT_CHILD
+        if pair in {relation.pair for relation in self.compatible}:
+            return BuyerCategoryRelation.COMPATIBLE
+        if pair in {relation.pair for relation in self.incompatible}:
+            return BuyerCategoryRelation.INCOMPATIBLE
+        return BuyerCategoryRelation.NO_RULE
 
 
 class BuyerTargetingPolicy(FrozenTargetingContract):
@@ -611,6 +652,13 @@ class TargetingEvaluation(FrozenTargetingContract):
     @property
     def evidence_hash(self) -> str:
         return hash_document(self.redacted_evidence)
+
+
+class BuyerLeadTierDecision(FrozenTargetingContract):
+    """Immutable Buyer-sales projection derived from a trusted policy and facts."""
+
+    tier: BuyerLeadTier
+    relation_summary: dict[str, Any]
 
 
 _EMAIL_VALUE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
@@ -1215,9 +1263,7 @@ def _huitun_douyin_inactivity_evaluation(
                 "precision": "EXACT",
                 "as_of": evaluation_time,
                 "last_publication_at": publication,
-                "inactive_days": int(
-                    (evaluation_time - publication).total_seconds() // 86_400
-                ),
+                "inactive_days": int((evaluation_time - publication).total_seconds() // 86_400),
                 **common_observed,
             },
         )
@@ -1539,7 +1585,7 @@ def _normalize_collection_categories(
             continue
         category = taxonomy.normalize(label)
         if category is None:
-            return None, "COLLECTION_CATEGORY_UNMAPPED"
+            return None, "CLIENT_CATEGORY_UNMAPPED"
         normalized.append(category)
     return tuple(sorted(set(normalized))), None
 
@@ -1610,6 +1656,12 @@ def evaluate_buyer(
     taxonomy = policy.taxonomy
     if not taxonomy.reviewed:
         return _buyer_unknown(policy, facts, TargetingReasonCode.NO_COMPARISON_RULE)
+    # The boolean is historical presentation metadata, not a runtime trust
+    # authority. Only the approved, server-owned V1 artifact may evaluate.
+    from backend_core.growth.buyer_taxonomy_v1 import is_trusted_buyer_taxonomy_v1
+
+    if not is_trusted_buyer_taxonomy_v1(taxonomy):
+        return _buyer_unknown(policy, facts, TargetingReasonCode.NO_COMPARISON_RULE)
     if facts.source_collection_job_id is None or not facts.source_collection_import_job_ids:
         return _buyer_unknown(policy, facts, TargetingReasonCode.COLLECTION_CONTEXT_MISSING)
     if not facts.creator_classification_import_job_ids:
@@ -1664,6 +1716,115 @@ def evaluate_buyer(
     return _buyer_unknown(policy, facts, TargetingReasonCode.NO_COMPARISON_RULE)
 
 
+def _buyer_unknown_tier(
+    policy: BuyerTargetingPolicy,
+    *,
+    reason_code: TargetingReasonCode,
+) -> BuyerLeadTierDecision:
+    """Keep unavailable Buyer facts visibly distinct from known no-rule differences."""
+
+    taxonomy = policy.taxonomy
+    return BuyerLeadTierDecision(
+        tier=BuyerLeadTier.UNKNOWN,
+        relation_summary={
+            "schema_version": 1,
+            "status": "UNRELIABLE",
+            "reason_code": reason_code.value,
+            "taxonomy": {
+                "taxonomy_id": taxonomy.taxonomy_id,
+                "taxonomy_version": taxonomy.taxonomy_version,
+                "artifact_hash": taxonomy.artifact_hash,
+            },
+            "client_categories": [],
+            "creator_categories": [],
+            "pairs": [],
+        },
+    )
+
+
+def evaluate_buyer_lead_tier(
+    policy: BuyerTargetingPolicy,
+    facts: CandidateFactBundle,
+) -> BuyerLeadTierDecision:
+    """Project trusted Buyer classification evidence into the sales lead tier.
+
+    This deliberately leaves ``evaluate_buyer`` and its frozen MATCH/NOT_MATCH/
+    UNKNOWN contract untouched.  In particular, a known pair without a
+    comparison rule is a reliable ``CHANGED`` lead, not a data-unknown result.
+    """
+
+    legacy = evaluate_buyer(policy, facts)
+    reason_code = legacy.reason_codes[0]
+    if (
+        legacy.result is TargetingEvaluationResult.UNKNOWN
+        and reason_code is not TargetingReasonCode.NO_COMPARISON_RULE
+    ):
+        return _buyer_unknown_tier(policy, reason_code=reason_code)
+
+    # NO_COMPARISON_RULE is overloaded in legacy output.  Re-establish the
+    # trusted runtime boundary before treating it as a known category change.
+    from backend_core.growth.buyer_taxonomy_v1 import is_trusted_buyer_taxonomy_v1
+
+    taxonomy = policy.taxonomy
+    if not taxonomy.reviewed or not is_trusted_buyer_taxonomy_v1(taxonomy):
+        return _buyer_unknown_tier(policy, reason_code=TargetingReasonCode.NO_COMPARISON_RULE)
+    collection_categories, collection_error = _normalize_collection_categories(taxonomy, facts)
+    if collection_error is not None:
+        return _buyer_unknown_tier(policy, reason_code=TargetingReasonCode(collection_error))
+    creator_categories, creator_error = _normalize_creator_categories(taxonomy, facts)
+    if creator_error is not None:
+        return _buyer_unknown_tier(policy, reason_code=TargetingReasonCode(creator_error))
+    assert collection_categories is not None
+    assert creator_categories is not None
+
+    pairs = tuple(
+        {
+            "client_category_id": client_category,
+            "creator_category_id": creator_category,
+            "relation": taxonomy.buyer_relation_detail(client_category, creator_category).value,
+        }
+        for client_category in collection_categories
+        for creator_category in creator_categories
+    )
+    relations = {BuyerCategoryRelation(pair["relation"]) for pair in pairs}
+    same_sets = collection_categories == creator_categories
+    has_difference = any(relation is not BuyerCategoryRelation.EXACT for relation in relations)
+
+    if same_sets and not has_difference:
+        tier = BuyerLeadTier.SAME_CATEGORY
+    elif relations <= {
+        BuyerCategoryRelation.EXACT,
+        BuyerCategoryRelation.PARENT_CHILD,
+        BuyerCategoryRelation.COMPATIBLE,
+    } and (
+        BuyerCategoryRelation.PARENT_CHILD in relations
+        or BuyerCategoryRelation.COMPATIBLE in relations
+    ):
+        tier = BuyerLeadTier.RELATED
+    elif relations == {BuyerCategoryRelation.INCOMPATIBLE}:
+        tier = BuyerLeadTier.HIGH
+    else:
+        # Known different categories that are mixed or unruled are an
+        # intentionally lower-priority change lead, never a false HIGH.
+        tier = BuyerLeadTier.CHANGED
+
+    return BuyerLeadTierDecision(
+        tier=tier,
+        relation_summary={
+            "schema_version": 1,
+            "status": "RELIABLE",
+            "taxonomy": {
+                "taxonomy_id": taxonomy.taxonomy_id,
+                "taxonomy_version": taxonomy.taxonomy_version,
+                "artifact_hash": taxonomy.artifact_hash,
+            },
+            "client_categories": list(collection_categories),
+            "creator_categories": list(creator_categories),
+            "pairs": list(pairs),
+        },
+    )
+
+
 def evaluate_targeting(
     policy: SellerTargetingPolicy | BuyerTargetingPolicy,
     facts: CandidateFactBundle,
@@ -1686,6 +1847,8 @@ def evaluate_targeting(
 __all__ = [
     "AccountSignalFact",
     "AccountSignalValueState",
+    "BuyerCategoryRelation",
+    "BuyerLeadTierDecision",
     "BuyerTargetingPolicy",
     "ContentActivityConstraint",
     "ContentActivityFact",
@@ -1706,6 +1869,7 @@ __all__ = [
     "TaxonomyDefinition",
     "TaxonomyRelation",
     "evaluate_buyer",
+    "evaluate_buyer_lead_tier",
     "evaluate_seller",
     "evaluate_targeting",
     "parse_targeting_policy",

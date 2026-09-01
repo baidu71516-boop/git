@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiClientError } from "@/lib/api/client";
 
 import {
+  bootstrapBuyerScreening,
   confirmBulkImport,
   createBulkImportJob,
   createCollectionJob,
@@ -212,6 +213,13 @@ export function useUpdateCollectionJobScreeningRulesMutation() {
         queryKey: bulkImportQueryKeys.job(input.importJobId),
       });
     },
+  });
+}
+
+export function useBootstrapBuyerScreeningMutation() {
+  return useMutation({
+    mutationFn: bootstrapBuyerScreening,
+    retry: false,
   });
 }
 

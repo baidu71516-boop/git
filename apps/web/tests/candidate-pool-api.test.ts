@@ -59,6 +59,35 @@ describe("Candidate Pool API", () => {
     );
   });
 
+  it("uses the existing Buyer tier query parameter without changing Seller member requests", async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(response({ items: [], next_cursor: null }));
+    await fetchCandidateMembers(
+      "buyer-pool",
+      "buyer-run",
+      null,
+      undefined,
+      50,
+      "RELATED",
+    );
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
+      "/api/v1/candidate-pools/buyer-pool/runs/buyer-run/members?limit=50&buyer_lead_tier=RELATED",
+    );
+    expect(
+      candidateMemberPagePath(
+        "buyer-pool",
+        "buyer-run",
+        null,
+        undefined,
+        20,
+        "HIGH",
+      ),
+    ).toBe(
+      "/candidate-pools/buyer-pool/runs/buyer-run/members?limit=20&buyer_lead_tier=HIGH",
+    );
+  });
+
   it("posts the exact empty run body with CSRF and the supplied attempt key", async () => {
     document.cookie = "outreach_csrf=candidate-csrf; path=/";
     const fetchMock = vi

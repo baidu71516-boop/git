@@ -5,6 +5,7 @@ import { createElement, type ReactNode } from "react";
 import { ApiClientError } from "@/lib/api/client";
 
 import {
+  bootstrapBuyerScreening,
   bulkImportApiPaths,
   confirmBulkImport,
   createBulkImportJob,
@@ -124,6 +125,9 @@ describe("Bulk import API contract", () => {
     expect(bulkImportApiPaths.collectionJob("collection/id")).toBe(
       "/collection-jobs/collection%2Fid",
     );
+    expect(bulkImportApiPaths.buyerScreening("collection/id")).toBe(
+      "/collection-jobs/collection%2Fid/buyer-screening",
+    );
     expect(bulkImportApiPaths.importJob("job/id")).toBe(
       "/import-jobs/job%2Fid",
     );
@@ -212,6 +216,31 @@ describe("Bulk import API contract", () => {
     expect(apiRequestMock).toHaveBeenCalledWith(
       "/collection-jobs/collection%2Fid/screening-rules",
       { method: "PUT", body: JSON.stringify(payload) },
+    );
+  });
+
+  it("starts Buyer screening with an empty server-owned request body", async () => {
+    apiRequestMock.mockResolvedValue(
+      success({
+        pool: { id: "buyer-pool" },
+        policy: { id: "buyer-policy", version: 1 },
+        run: { id: "buyer-run", status: "PENDING" },
+        reused_existing_pool: false,
+      }),
+    );
+
+    await bootstrapBuyerScreening({
+      collectionJobId: "collection/id",
+      idempotencyKey: "buyer-bootstrap-key",
+    });
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/collection-jobs/collection%2Fid/buyer-screening",
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": "buyer-bootstrap-key" },
+        body: JSON.stringify({}),
+      },
     );
   });
 

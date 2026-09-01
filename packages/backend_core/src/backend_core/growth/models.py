@@ -23,6 +23,7 @@ from backend_core.db.base import Base
 from backend_core.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from backend_core.db.types import JSON_DOCUMENT
 from backend_core.growth.enums import (
+    BuyerLeadTier,
     CampaignReviewMode,
     CampaignStatus,
     CandidatePoolKind,
@@ -298,6 +299,7 @@ class CandidatePoolMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             ondelete="RESTRICT",
         ),
         Index("ix_candidate_pool_members_run_result", "run_id", "result", "id"),
+        Index("ix_candidate_pool_members_run_buyer_tier", "run_id", "buyer_lead_tier", "id"),
     )
 
     run_id: Mapped[UUID] = mapped_column(nullable=False)
@@ -305,6 +307,12 @@ class CandidatePoolMember(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     platform_account_id: Mapped[UUID] = mapped_column(nullable=False)
     result: Mapped[CandidateResult] = mapped_column(
         Enum(CandidateResult, name="candidate_result", values_callable=enum_values), nullable=False
+    )
+    buyer_lead_tier: Mapped[BuyerLeadTier | None] = mapped_column(
+        Enum(BuyerLeadTier, name="buyer_lead_tier", values_callable=enum_values), nullable=True
+    )
+    buyer_relation_summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON_DOCUMENT, nullable=True
     )
     reason_codes: Mapped[list[str]] = mapped_column(JSON_DOCUMENT, nullable=False)
     redacted_evidence: Mapped[dict[str, Any]] = mapped_column(JSON_DOCUMENT, nullable=False)

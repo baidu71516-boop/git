@@ -35,6 +35,15 @@ import {
   CANDIDATE_MEMBER_PAGE_SIZES,
 } from "./api";
 import {
+  buyerCurrentCategories,
+  buyerLeadTierOrder,
+  buyerLeadTierPresentation,
+  buyerOriginalCategories,
+  buyerRelationLabel,
+  buyerRelationPairs,
+  buyerRunHasTierData,
+} from "./buyer-lead-presenters";
+import {
   candidateSelectionIdentitiesEqual,
   candidateSelectionActions,
   candidateSelectionCount,
@@ -66,6 +75,7 @@ import {
   useCandidatePolicies,
   useCandidateRun,
   useCreateCandidateRunMutation,
+  useBuyerLeadTierSummary,
 } from "./queries";
 import { SellerRuleBuilder } from "./seller-rule-builder";
 import { isAuthorableSellerTargetingPolicy } from "./types";
@@ -75,6 +85,7 @@ import type {
   CandidateMember,
   CandidateMemberPageSize,
   CandidatePoolRole,
+  BuyerLeadTier,
   SellerTargetingPolicy,
   TargetingPolicy,
 } from "./types";
@@ -86,9 +97,11 @@ const attemptKey = () =>
 type CandidateMemberNavigationScope = {
   candidatePoolId: string;
   runId: string;
-  filter: "all" | "MATCH" | "UNKNOWN";
+  filter: CandidateMemberFilter;
   pageSize: CandidateMemberPageSize;
 };
+
+type CandidateMemberFilter = "all" | "MATCH" | "UNKNOWN" | BuyerLeadTier;
 
 function candidateMemberNavigationScopesEqual(
   left: CandidateMemberNavigationScope,
@@ -263,6 +276,72 @@ function safeList(value: unknown): string {
     : "—";
 }
 
+function buyerCategoryLabel(categories: string[]): string {
+  return categories.length > 0 ? categories.join("、") : "—";
+}
+
+function buyerSourceSummary(member: CandidateMember): string {
+  const evidence = member.redacted_evidence;
+  const collection =
+    evidence.collection_context &&
+    typeof evidence.collection_context === "object" &&
+    !Array.isArray(evidence.collection_context)
+      ? (evidence.collection_context as Record<string, unknown>)
+      : {};
+  const source = safeString(
+    collection.source ?? collection.source_name ?? evidence.source,
+  );
+  const sourceLabels: Record<string, string> = {
+    GREY_DOLPHIN: "灰豚采集",
+    HUITUN: "灰豚采集",
+    DOUYIN: "抖音采集",
+  };
+  return source ? (sourceLabels[source] ?? source) : "—";
+}
+
+function BuyerRelationEvidence({ member }: { member: CandidateMember }) {
+  const original = buyerOriginalCategories(member);
+  const current = buyerCurrentCategories(member);
+  const pairs = buyerRelationPairs(member);
+  return (
+    <Space
+      orientation="vertical"
+      size="middle"
+      className="buyer-relation-evidence"
+    >
+      <div className="candidate-evidence-row">
+        <Text type="secondary">原采集类目</Text>
+        <span>{buyerCategoryLabel(original)}</span>
+      </div>
+      <div className="candidate-evidence-row">
+        <Text type="secondary">当前达人类目</Text>
+        <span>{buyerCategoryLabel(current)}</span>
+      </div>
+      <div>
+        <Text type="secondary">类目关系</Text>
+        {pairs.length > 0 ? (
+          <ul className="buyer-relation-pairs">
+            {pairs.map((pair, index) => (
+              <li
+                key={`${pair.client_category_id}-${pair.creator_category_id}-${index}`}
+              >
+                {pair.client_category_id} → {pair.creator_category_id}：
+                {buyerRelationLabel(pair.relation)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div>暂无可展示的类目关系</div>
+        )}
+      </div>
+      <div className="candidate-evidence-row">
+        <Text type="secondary">来源</Text>
+        <span>{buyerSourceSummary(member)}</span>
+      </div>
+    </Space>
+  );
+}
+
 function criterionConfiguredValue(
   value: unknown,
   criterion: string | null,
@@ -394,50 +473,7 @@ function EvidenceContent({
       />
     );
   }
-  const collection =
-    evidence.collection_context &&
-    typeof evidence.collection_context === "object" &&
-    !Array.isArray(evidence.collection_context)
-      ? (evidence.collection_context as Record<string, unknown>)
-      : {};
-  const creator =
-    evidence.creator_classification &&
-    typeof evidence.creator_classification === "object" &&
-    !Array.isArray(evidence.creator_classification)
-      ? (evidence.creator_classification as Record<string, unknown>)
-      : {};
-  return (
-    <div>
-      <div className="candidate-evidence-row">
-        <Text type="secondary">分类版本</Text>
-        <span>{safeString(evidence.taxonomy_version) ?? "—"}</span>
-      </div>
-      <div className="candidate-evidence-row">
-        <Text type="secondary">采集上下文</Text>
-        <span>
-          {[
-            safeString(collection.industry),
-            safeString(collection.subdirection),
-            safeList(collection.normalized_categories),
-          ]
-            .filter((value) => value && value !== "—")
-            .join(" · ") || "—"}
-        </span>
-      </div>
-      <div className="candidate-evidence-row">
-        <Text type="secondary">账号分类</Text>
-        <span>{safeList(creator.normalized_categories ?? creator.tags)}</span>
-      </div>
-      <div className="candidate-evidence-row">
-        <Text type="secondary">判断原因</Text>
-        <span>
-          {typeof evidence.reason === "string"
-            ? candidateReasonLabel(evidence.reason)
-            : member.reason_codes.map(candidateReasonLabel).join("、")}
-        </span>
-      </div>
-    </div>
-  );
+  return <BuyerRelationEvidence member={member} />;
 }
 
 function CampaignSelector({
@@ -649,14 +685,20 @@ export function CandidateRunDetailView({
   const runQuery = useCandidateRun(poolId, runId, activePolling);
   const policies = useCandidatePolicies(poolId, Boolean(runQuery.data));
   const rerunMutation = useCreateCandidateRunMutation();
-  const [filter, setFilter] = useState<"all" | "MATCH" | "UNKNOWN">("all");
+  const policy = policies.data?.find(
+    (item) => item.id === runQuery.data?.policy_id,
+  );
+  const isBuyerRun =
+    policy?.definition.schema_version === 1 &&
+    policy.definition.policy_type === "BUYER_V1";
+  const [filter, setFilter] = useState<CandidateMemberFilter>("all");
   const [pageSize, setPageSize] = useState<CandidateMemberPageSize>(
     CANDIDATE_MEMBER_PAGE_LIMIT,
   );
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
   const [pageNavigationScope, setPageNavigationScope] = useState({
     candidatePoolId: poolId,
-    filter: "all" as "all" | "MATCH" | "UNKNOWN",
+    filter: "all" as CandidateMemberFilter,
     pageSize: CANDIDATE_MEMBER_PAGE_LIMIT as CandidateMemberPageSize,
     runId,
   });
@@ -701,9 +743,17 @@ export function CandidateRunDetailView({
   const membersQuery = useCandidateMembers(
     poolId,
     runId,
-    filter === "all" ? undefined : filter,
+    !isBuyerRun && filter !== "all"
+      ? (filter as "MATCH" | "UNKNOWN")
+      : undefined,
     runQuery.data?.status === "COMPLETED",
     pageSize,
+    isBuyerRun && filter !== "all" ? (filter as BuyerLeadTier) : undefined,
+  );
+  const buyerSummaryQuery = useBuyerLeadTierSummary(
+    poolId,
+    runId,
+    isBuyerRun && runQuery.data?.status === "COMPLETED",
   );
   const [evidence, setEvidence] = useState<CandidateMember | null>(
     previewMode ? null : (previewEvidence ?? null),
@@ -768,18 +818,44 @@ export function CandidateRunDetailView({
   }, [messageApi, previewMode, previewSelectionAttempted]);
   const readError = Boolean(runQuery.isError && runQuery.data);
   const run = runQuery.data;
-  const policy = policies.data?.find((item) => item.id === run?.policy_id);
   const memberPages = useMemo(
     () => membersQuery.data?.pages ?? [],
     [membersQuery.data],
   );
+  const buyerSummaryRows = useMemo(
+    () =>
+      buyerSummaryQuery.data
+        ? buyerLeadTierOrder.flatMap((tier) => buyerSummaryQuery.data[tier])
+        : [],
+    [buyerSummaryQuery.data],
+  );
+  const buyerHasTierData = buyerRunHasTierData(buyerSummaryQuery.data);
+  const usingBuyerSummary =
+    isBuyerRun &&
+    filter === "all" &&
+    buyerSummaryQuery.isSuccess &&
+    buyerHasTierData;
+  const memberListLoading =
+    (!usingBuyerSummary && membersQuery.isPending) ||
+    (isBuyerRun && filter === "all" && buyerSummaryQuery.isPending);
+  const memberListError =
+    (!usingBuyerSummary && membersQuery.isError) ||
+    (isBuyerRun && filter === "all" && buyerSummaryQuery.isError);
+  const displayMemberPages = useMemo(() => {
+    if (!usingBuyerSummary) return memberPages;
+    const pages = [];
+    for (let index = 0; index < buyerSummaryRows.length; index += pageSize) {
+      pages.push({ items: buyerSummaryRows.slice(index, index + pageSize) });
+    }
+    return pages;
+  }, [buyerSummaryRows, memberPages, pageSize, usingBuyerSummary]);
   const visiblePageIndex = candidateMemberNavigationScopesEqual(
     pageNavigationScope,
     activeNavigationScope,
   )
     ? currentPageIndex
     : 0;
-  const members = memberPages[visiblePageIndex]?.items ?? [];
+  const members = displayMemberPages[visiblePageIndex]?.items ?? [];
   const pageSelection = candidateSelectionPageState(selection, members);
   const selectedCount = candidateSelectionCount(selection);
   const selectedLabel = selectedCandidateLabel(selection, selectedCount);
@@ -790,7 +866,7 @@ export function CandidateRunDetailView({
     modalScope.candidatePoolId === poolId &&
     modalScope.runId === runId &&
     modalScope.generation === selectionGeneration;
-  const canWrite = role !== "viewer" && hasSelectedOperator;
+  const canWrite = role !== "viewer" && hasSelectedOperator && !isBuyerRun;
   const pool = poolQuery.data;
   const currentSellerPolicy =
     policy !== undefined &&
@@ -851,7 +927,7 @@ export function CandidateRunDetailView({
     setCurrentPageIndex(nextPageIndex);
     return navigationRequestRef.current;
   }
-  function changeFilter(next: "all" | "MATCH" | "UNKNOWN") {
+  function changeFilter(next: CandidateMemberFilter) {
     setFilter(next);
     updateMemberPageNavigation(
       { candidatePoolId: poolId, filter: next, pageSize, runId },
@@ -904,10 +980,11 @@ export function CandidateRunDetailView({
   async function nextMemberPage() {
     const requestScope = activeNavigationScope;
     const nextPageIndex = visiblePageIndex + 1;
-    if (visiblePageIndex < memberPages.length - 1) {
+    if (visiblePageIndex < displayMemberPages.length - 1) {
       updateMemberPageNavigation(requestScope, nextPageIndex);
       return;
     }
+    if (usingBuyerSummary) return;
     if (!membersQuery.hasNextPage || membersQuery.isFetchingNextPage) return;
     const requestId = updateMemberPageNavigation(
       requestScope,
@@ -992,82 +1069,147 @@ export function CandidateRunDetailView({
   if (!run) return null;
   const status = candidateRunStatus(run.status);
   const terminal = run.status === "COMPLETED" || run.status === "FAILED";
-  const columns = [
-    ...(canWrite
-      ? [
-          {
-            title: (
-              <Checkbox
-                aria-label="选择本页候选达人"
-                checked={pageSelection.checked}
-                disabled={!pageSelection.eligibleCount}
-                indeterminate={pageSelection.indeterminate}
-                onChange={(event) => {
-                  if (event.target.checked) selectCurrentPage();
-                  else deselectCurrentPage();
-                }}
-              />
-            ),
-            key: "select",
-            render: (_: unknown, member: CandidateMember) => (
-              <Checkbox
-                aria-label={memberSelectionLabel(member)}
-                checked={isCandidateMemberSelected(selection, member)}
-                disabled={!isCandidateMemberSelectable(selection, member)}
-                onChange={(event) => toggle(member, event.target.checked)}
-              />
-            ),
+  const columns = isBuyerRun
+    ? [
+        {
+          title: "达人/客户",
+          key: "influencer",
+          render: (_: unknown, member: CandidateMember) => (
+            <Identity member={member} />
+          ),
+        },
+        {
+          title: "平台账号",
+          key: "account",
+          render: (_: unknown, member: CandidateMember) => (
+            <Account member={member} />
+          ),
+        },
+        {
+          title: "原采集类目",
+          key: "original-category",
+          render: (_: unknown, member: CandidateMember) =>
+            buyerCategoryLabel(buyerOriginalCategories(member)),
+        },
+        {
+          title: "当前达人类目",
+          key: "current-category",
+          render: (_: unknown, member: CandidateMember) =>
+            buyerCategoryLabel(buyerCurrentCategories(member)),
+        },
+        {
+          title: "潜客等级",
+          key: "buyer-tier",
+          render: (_: unknown, member: CandidateMember) => {
+            const presentation = buyerLeadTierPresentation(
+              member.buyer_lead_tier,
+            );
+            return (
+              <StatusBadge tone={presentation.tone}>
+                {presentation.label}
+              </StatusBadge>
+            );
           },
-        ]
-      : []),
-    {
-      title: "候选达人",
-      key: "influencer",
-      render: (_: unknown, member: CandidateMember) => (
-        <Identity member={member} />
-      ),
-    },
-    {
-      title: "平台账号",
-      key: "account",
-      render: (_: unknown, member: CandidateMember) => (
-        <Account member={member} />
-      ),
-    },
-    {
-      title: "结果",
-      key: "result",
-      render: (_: unknown, member: CandidateMember) => {
-        const presentation = candidateResultPresentation(member.result);
-        return (
-          <StatusBadge tone={presentation.tone}>
-            {presentation.label}
-          </StatusBadge>
-        );
-      },
-    },
-    {
-      title: "判断原因",
-      key: "reason",
-      render: (_: unknown, member: CandidateMember) =>
-        member.reason_codes.map(candidateReasonLabel).join("、"),
-    },
-    {
-      title: "判断依据",
-      key: "evidence",
-      render: (_: unknown, member: CandidateMember) => (
-        <Button type="link" onClick={() => setEvidence(member)}>
-          查看依据
-        </Button>
-      ),
-    },
-  ];
+        },
+        {
+          title: "判断依据",
+          key: "buyer-reason",
+          render: (_: unknown, member: CandidateMember) => (
+            <Space orientation="vertical" size={2}>
+              <span>
+                {buyerLeadTierPresentation(member.buyer_lead_tier).reason}
+              </span>
+              <Button type="link" onClick={() => setEvidence(member)}>
+                查看类目关系
+              </Button>
+            </Space>
+          ),
+        },
+        {
+          title: "来源",
+          key: "buyer-source",
+          render: (_: unknown, member: CandidateMember) =>
+            buyerSourceSummary(member),
+        },
+      ]
+    : [
+        ...(canWrite
+          ? [
+              {
+                title: (
+                  <Checkbox
+                    aria-label="选择本页候选达人"
+                    checked={pageSelection.checked}
+                    disabled={!pageSelection.eligibleCount}
+                    indeterminate={pageSelection.indeterminate}
+                    onChange={(event) => {
+                      if (event.target.checked) selectCurrentPage();
+                      else deselectCurrentPage();
+                    }}
+                  />
+                ),
+                key: "select",
+                render: (_: unknown, member: CandidateMember) => (
+                  <Checkbox
+                    aria-label={memberSelectionLabel(member)}
+                    checked={isCandidateMemberSelected(selection, member)}
+                    disabled={!isCandidateMemberSelectable(selection, member)}
+                    onChange={(event) => toggle(member, event.target.checked)}
+                  />
+                ),
+              },
+            ]
+          : []),
+        {
+          title: "候选达人",
+          key: "influencer",
+          render: (_: unknown, member: CandidateMember) => (
+            <Identity member={member} />
+          ),
+        },
+        {
+          title: "平台账号",
+          key: "account",
+          render: (_: unknown, member: CandidateMember) => (
+            <Account member={member} />
+          ),
+        },
+        {
+          title: "结果",
+          key: "result",
+          render: (_: unknown, member: CandidateMember) => {
+            const presentation = candidateResultPresentation(member.result);
+            return (
+              <StatusBadge tone={presentation.tone}>
+                {presentation.label}
+              </StatusBadge>
+            );
+          },
+        },
+        {
+          title: "判断原因",
+          key: "reason",
+          render: (_: unknown, member: CandidateMember) =>
+            member.reason_codes.map(candidateReasonLabel).join("、"),
+        },
+        {
+          title: "判断依据",
+          key: "evidence",
+          render: (_: unknown, member: CandidateMember) => (
+            <Button type="link" onClick={() => setEvidence(member)}>
+              查看依据
+            </Button>
+          ),
+        },
+      ];
   const emptyLabel =
-    filter === "MATCH"
-      ? "暂无符合条件的候选达人"
-      : filter === "UNKNOWN"
-        ? "暂无信息不足的候选达人"
-        : "暂无候选结果";
+    isBuyerRun && filter !== "all"
+      ? `暂无${buyerLeadTierPresentation(filter as BuyerLeadTier).label}`
+      : filter === "MATCH"
+        ? "暂无符合条件的候选达人"
+        : filter === "UNKNOWN"
+          ? "暂无信息不足的候选达人"
+          : "暂无候选结果";
   return (
     <section
       className="candidate-run-detail-workspace campaign-workspace"
@@ -1125,12 +1267,53 @@ export function CandidateRunDetailView({
             className="candidate-summary-band campaign-detail-card"
             variant="borderless"
           >
-            <Space size="large">
-              <span>符合条件 {run.match_count}</span>
-              <span>信息不足 {run.unknown_count}</span>
-              <span>不符合条件 {run.not_match_count}</span>
-            </Space>
+            {isBuyerRun ? (
+              buyerSummaryQuery.isPending ? (
+                <Skeleton active paragraph={false} />
+              ) : (
+                <Space size="middle" wrap>
+                  {buyerLeadTierOrder.map((tier) => {
+                    const presentation = buyerLeadTierPresentation(tier);
+                    const count = buyerSummaryQuery.data?.[tier].length ?? 0;
+                    return (
+                      <Button
+                        key={tier}
+                        type={filter === tier ? "primary" : "text"}
+                        onClick={() => changeFilter(tier)}
+                      >
+                        {presentation.label} {count}
+                      </Button>
+                    );
+                  })}
+                </Space>
+              )
+            ) : (
+              <Space size="large">
+                <span>符合条件 {run.match_count}</span>
+                <span>信息不足 {run.unknown_count}</span>
+                <span>不符合条件 {run.not_match_count}</span>
+              </Space>
+            )}
           </Card>
+          {isBuyerRun ? (
+            <Alert
+              type="info"
+              showIcon
+              title="潜客等级仅用于销售线索排序，不代表已发生账号购买或交易。"
+            />
+          ) : null}
+          {isBuyerRun &&
+          buyerSummaryQuery.isSuccess &&
+          !buyerHasTierData &&
+          memberPages.some((page) =>
+            page.items.some((member) => !member.buyer_lead_tier),
+          ) ? (
+            <Alert
+              type="info"
+              showIcon
+              title="该历史运行创建于潜客分层上线前，部分同类/相关线索未保存。"
+            />
+          ) : null}
           <Card
             className="candidate-results-card campaign-detail-card"
             variant="borderless"
@@ -1138,14 +1321,22 @@ export function CandidateRunDetailView({
             <div className="candidate-results-toolbar">
               <Tabs
                 activeKey={filter}
-                onChange={(key) =>
-                  changeFilter(key as "all" | "MATCH" | "UNKNOWN")
+                onChange={(key) => changeFilter(key as CandidateMemberFilter)}
+                items={
+                  isBuyerRun
+                    ? [
+                        { key: "all", label: "全部" },
+                        ...buyerLeadTierOrder.map((tier) => ({
+                          key: tier,
+                          label: buyerLeadTierPresentation(tier).label,
+                        })),
+                      ]
+                    : [
+                        { key: "all", label: "全部" },
+                        { key: "MATCH", label: "符合条件" },
+                        { key: "UNKNOWN", label: "信息不足" },
+                      ]
                 }
-                items={[
-                  { key: "all", label: "全部" },
-                  { key: "MATCH", label: "符合条件" },
-                  { key: "UNKNOWN", label: "信息不足" },
-                ]}
               />
               <div className="candidate-results-toolbar-controls">
                 {canWrite ? (
@@ -1223,9 +1414,9 @@ export function CandidateRunDetailView({
                 </span>
               </div>
             </div>
-            {membersQuery.isPending ? (
+            {memberListLoading ? (
               <Skeleton active paragraph={{ rows: 7 }} />
-            ) : membersQuery.isError ? (
+            ) : memberListError ? (
               <Alert
                 type="error"
                 showIcon
@@ -1242,7 +1433,9 @@ export function CandidateRunDetailView({
                 <AppEmpty description={emptyLabel} />
                 {filter === "all" ? (
                   <Text type="secondary">
-                    本次生成没有发现符合条件或信息不足的达人。
+                    {isBuyerRun
+                      ? "本次生成没有可展示的潜客线索。"
+                      : "本次生成没有发现符合条件或信息不足的达人。"}
                   </Text>
                 ) : null}
               </div>
@@ -1270,7 +1463,7 @@ export function CandidateRunDetailView({
                       disabled={
                         previewMode ||
                         (!membersQuery.hasNextPage &&
-                          visiblePageIndex >= memberPages.length - 1)
+                          visiblePageIndex >= displayMemberPages.length - 1)
                       }
                       loading={
                         previewMode ? false : membersQuery.isFetchingNextPage
@@ -1338,26 +1531,33 @@ export function CandidateRunDetailView({
               <Account member={evidence} />
             </p>
             <p>
-              结果：{" "}
-              <StatusBadge
-                tone={candidateResultPresentation(evidence.result).tone}
-              >
-                {candidateResultPresentation(evidence.result).label}
-              </StatusBadge>
+              {isBuyerRun ? (
+                <>
+                  潜客等级：{" "}
+                  <StatusBadge
+                    tone={
+                      buyerLeadTierPresentation(evidence.buyer_lead_tier).tone
+                    }
+                  >
+                    {buyerLeadTierPresentation(evidence.buyer_lead_tier).label}
+                  </StatusBadge>
+                </>
+              ) : (
+                <>
+                  结果：{" "}
+                  <StatusBadge
+                    tone={candidateResultPresentation(evidence.result).tone}
+                  >
+                    {candidateResultPresentation(evidence.result).label}
+                  </StatusBadge>
+                </>
+              )}
             </p>
             <p>
-              判断原因：
-              {evidence.reason_codes.map(candidateReasonLabel).join("、")}
+              {isBuyerRun
+                ? buyerLeadTierPresentation(evidence.buyer_lead_tier).reason
+                : `判断原因：${evidence.reason_codes.map(candidateReasonLabel).join("、")}`}
             </p>
-            {policy &&
-            policyType(policy.definition) === "BUYER_V1" &&
-            evidence.reason_codes.includes("CATEGORY_MISMATCH") ? (
-              <Alert
-                type="info"
-                showIcon
-                title="该候选池用于查找分类方向可能发生变化的账号，因此分类不匹配属于当前规则的命中条件。"
-              />
-            ) : null}
             <h3>判断依据</h3>
             <EvidenceContent member={evidence} policy={policy} />
           </>

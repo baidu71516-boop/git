@@ -26,12 +26,14 @@ from backend_core.campaigns.access import DepartmentScope
 from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.config import get_settings
 from backend_core.growth.enums import (
+    BuyerLeadTier,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidatePoolStatus,
     CandidateResult,
 )
 from backend_core.growth.schemas import (
+    BuyerScreeningBootstrapPublic,
     CandidatePoolCreateInput,
     CandidatePoolMemberPublic,
     CandidatePoolPage,
@@ -418,10 +420,14 @@ class FakeCandidatePoolService:
         cursor: UUID | None,
         limit: int,
         result: CandidateResult | None = None,
+        buyer_lead_tier: BuyerLeadTier | None = None,
         department_id: UUID | None = None,
     ) -> CandidatePoolRunMemberPage:
         self.calls.append(
-            ("list_run_members", (pool_id, run_id, cursor, limit, result, department_id))
+            (
+                "list_run_members",
+                (pool_id, run_id, cursor, limit, result, buyer_lead_tier, department_id),
+            )
         )
         if pool_id != POOL_ID or run_id != RUN_ID:
             raise TargetingError(
@@ -495,6 +501,28 @@ class FakeCandidatePoolService:
                 if idempotency_key == "running-key"
                 else CandidatePoolRunStatus.PENDING
             ),
+        )
+
+    async def bootstrap_buyer_screening(
+        self,
+        _context: AuthContext,
+        *,
+        collection_job_id: UUID,
+        idempotency_key: str,
+        ip: str,
+        user_agent: str,
+    ) -> BuyerScreeningBootstrapPublic:
+        self.calls.append(
+            (
+                "bootstrap_buyer_screening",
+                (collection_job_id, idempotency_key, ip, user_agent),
+            )
+        )
+        return BuyerScreeningBootstrapPublic(
+            pool=_pool(self.context),
+            policy=_policy_create_result(self.context),
+            run=_run(),
+            reused_existing_pool=False,
         )
 
 
@@ -597,17 +625,21 @@ def test_candidate_pool_read_routes_adapt_closed_service_contracts() -> None:
                 assert members_200.status_code == 200
                 assert service.calls[-1] == (
                     "list_run_members",
-                    (POOL_ID, RUN_ID, None, 200, None, context.department.id),
+                    (POOL_ID, RUN_ID, None, 200, None, None, context.department.id),
                 )
                 too_many_members = await client.get(
                     f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?limit=201"
                 )
                 _assert_error(too_many_members, status_code=422, code="VALIDATION_ERROR")
 
-                invalid_member_result = await client.get(
+                not_match_members = await client.get(
                     f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?result=NOT_MATCH"
                 )
-                _assert_error(invalid_member_result, status_code=422, code="VALIDATION_ERROR")
+                assert not_match_members.status_code == 200
+                tier_members = await client.get(
+                    f"/api/v1/candidate-pools/{POOL_ID}/runs/{RUN_ID}/members?buyer_lead_tier=CHANGED"
+                )
+                assert tier_members.status_code == 200
 
                 missing = await client.get(f"/api/v1/candidate-pools/{uuid4()}")
                 _assert_error(missing, status_code=404, code="CANDIDATE_POOL_NOT_FOUND")
@@ -801,6 +833,69 @@ def test_candidate_pool_create_requires_mutation_prerequisites_and_replays_with_
                 )
                 _assert_error(rejected_operator, status_code=409, code="OPERATOR_REQUIRED")
                 assert len(service.calls) == 3
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_screening_bootstrap_is_closed_csrf_protected_and_dispatched() -> None:
+    async def scenario() -> None:
+        context = _context()
+        service = FakeCandidatePoolService(context)
+        dispatcher = _install_overrides(context, service)
+        settings = get_settings()
+        collection_id = uuid4()
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                path = f"/api/v1/collection-jobs/{collection_id}/buyer-screening"
+                missing_csrf = await client.post(
+                    path,
+                    json={},
+                    headers={"Idempotency-Key": "buyer-bootstrap-key"},
+                )
+                _assert_error(missing_csrf, status_code=403, code="CSRF_FAILED")
+
+                client.cookies.set(settings.csrf_cookie_name, "candidate-pool-csrf")
+                injected_taxonomy = await client.post(
+                    path,
+                    json={"taxonomy": {"reviewed": True}},
+                    headers=_mutation_headers("buyer-bootstrap-key"),
+                )
+                _assert_error(injected_taxonomy, status_code=422, code="VALIDATION_ERROR")
+                assert service.calls == []
+
+                missing_idempotency = await client.post(
+                    path,
+                    json={},
+                    headers={"X-CSRF-Token": "candidate-pool-csrf"},
+                )
+                _assert_error(
+                    missing_idempotency,
+                    status_code=422,
+                    code="IDEMPOTENCY_KEY_INVALID",
+                )
+
+                started = await client.post(
+                    path,
+                    json={},
+                    headers=_mutation_headers("buyer-bootstrap-key"),
+                )
+                assert started.status_code == 202
+                assert started.json()["data"]["pool"]["id"] == str(POOL_ID)
+                assert started.json()["data"]["run"]["id"] == str(RUN_ID)
+                assert service.calls[-1][0] == "bootstrap_buyer_screening"
+                assert dispatcher.run_ids == [RUN_ID]
+
+                viewer = _context(role=Role.VIEWER)
+                app.dependency_overrides[require_auth] = lambda: viewer
+                rejected_viewer = await client.post(
+                    path,
+                    json={},
+                    headers=_mutation_headers("buyer-bootstrap-viewer"),
+                )
+                _assert_error(rejected_viewer, status_code=403, code="PERMISSION_DENIED")
         finally:
             app.dependency_overrides.clear()
 

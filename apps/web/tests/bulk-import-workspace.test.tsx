@@ -105,6 +105,11 @@ const queryClients: QueryClient[] = [];
 const nativeMessageChannel = globalThis.MessageChannel;
 const messageChannels = new Set<MessageChannel>();
 const bulkFileTableMode = vi.hoisted(() => ({ compact: false }));
+const routerPush = vi.hoisted(() => vi.fn());
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: routerPush }),
+}));
 
 vi.mock(
   "@/features/imports/components/bulk-file-table",
@@ -1446,6 +1451,61 @@ describe("BulkImportWorkspace Preview and compatible Job states", () => {
     ).toBeDisabled();
     expect(
       screen.queryByRole("button", { name: /确认导入/ }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("BulkImportWorkspace Buyer screening bootstrap", () => {
+  it("only exposes the start action for a completed real Bulk Job and navigates to its run", async () => {
+    const completed = makeJob({
+      status: "completed",
+      preview_revision: 1,
+      confirmed_revision: 1,
+      completed_at: "2026-08-10T03:00:00Z",
+    });
+    const fetchSpy = recoveredRouter(completed, [makeFile()], (url, init) => {
+      if (
+        url.endsWith(`/collection-jobs/${collection.id}/buyer-screening`) &&
+        init?.method === "POST"
+      ) {
+        return success(
+          {
+            pool: { id: "buyer-pool" },
+            policy: { id: "buyer-policy", version: 1 },
+            run: { id: "buyer-run", status: "PENDING" },
+            reused_existing_pool: false,
+          },
+          202,
+        );
+      }
+      return undefined;
+    });
+
+    renderBulk({ jobId: completed.id });
+    const start = await screen.findByRole("button", { name: "开始潜客筛选" });
+    fireEvent.click(start);
+
+    await waitFor(() =>
+      expect(routerPush).toHaveBeenCalledWith(
+        "/candidate-pools/buyer-pool/runs/buyer-run",
+      ),
+    );
+    expect(
+      requestCount(
+        fetchSpy,
+        `/collection-jobs/${collection.id}/buyer-screening`,
+        "POST",
+      ),
+    ).toBe(1);
+
+    cleanup();
+    render(
+      <BulkImportWorkspaceView
+        {...viewProps(makeJob({ status: "preview_ready" }), [makeFile()])}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "开始潜客筛选" }),
     ).not.toBeInTheDocument();
   });
 });

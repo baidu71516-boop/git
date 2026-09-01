@@ -19,7 +19,12 @@ from backend_core.auth.repository import AuthRepository
 from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.schemas import CampaignOwnerSummary
+from backend_core.growth.buyer_taxonomy_v1 import (
+    is_trusted_buyer_taxonomy_v1,
+    resolve_buyer_taxonomy_v1,
+)
 from backend_core.growth.enums import (
+    BuyerLeadTier,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidatePoolStatus,
@@ -47,6 +52,7 @@ from backend_core.growth.repository import (
     CandidatePoolRepository,
 )
 from backend_core.growth.schemas import (
+    BuyerScreeningBootstrapPublic,
     CandidatePoolCreateInput,
     CandidatePoolMemberPublic,
     CandidatePoolPage,
@@ -63,12 +69,14 @@ from backend_core.growth.schemas import (
     viewer_redacted_reason_codes,
 )
 from backend_core.growth.targeting import (
+    BuyerLeadTierDecision,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     SellerTargetingPolicy,
     TargetingEvaluation,
     TargetingEvaluationResult,
     TargetingReasonCode,
+    evaluate_buyer_lead_tier,
     evaluate_targeting,
     parse_targeting_policy,
 )
@@ -236,13 +244,21 @@ class CandidatePoolService:
         *,
         status_code: int,
     ) -> None:
-        """Keep unreviewed Buyer taxonomy snapshots out of an active run path."""
+        """Require the exact server-owned Buyer V1 artifact for active runs."""
 
-        if isinstance(definition, BuyerTargetingPolicy) and not definition.taxonomy.reviewed:
+        if not isinstance(definition, BuyerTargetingPolicy):
+            return
+        if not definition.taxonomy.reviewed:
             raise TargetingError(
                 status_code,
                 "BUYER_TAXONOMY_UNREVIEWED",
                 "Buyer targeting requires a reviewed taxonomy",
+            )
+        if not is_trusted_buyer_taxonomy_v1(definition.taxonomy):
+            raise TargetingError(
+                status_code,
+                "BUYER_TAXONOMY_UNTRUSTED",
+                "Buyer targeting requires the approved Buyer Taxonomy V1 artifact",
             )
 
     @staticmethod
@@ -619,6 +635,179 @@ class CandidatePoolService:
                 raise
             await self.session.rollback()
             raise
+        except TargetingError:
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    @staticmethod
+    def _buyer_bootstrap_name(collection_name: str) -> str:
+        suffix = " · 潜客筛选"
+        return f"{collection_name[: 200 - len(suffix)]}{suffix}"
+
+    async def bootstrap_buyer_screening(
+        self,
+        context: AuthContext,
+        *,
+        collection_job_id: UUID,
+        department_id: UUID | None = None,
+        idempotency_key: str,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> BuyerScreeningBootstrapPublic:
+        """Create or reuse the one server-owned Buyer screening for a CollectionJob.
+
+        The CollectionJob row lock serializes repeated clicks. This endpoint has
+        no client-provided policy surface: the trusted frozen taxonomy is the
+        sole source for the first immutable Buyer policy.
+        """
+
+        scope, operator_id = await self._resolve_mutation_scope(context, department_id)
+        self._require_idempotency_key(idempotency_key)
+        mutation_started = False
+        try:
+            collection = await self.repository.get_collection_job(
+                collection_job_id,
+                department_id=scope.department_id,
+                for_update=True,
+            )
+            if collection is None:
+                raise TargetingError(404, "COLLECTION_JOB_NOT_FOUND", "Collection Job not found")
+
+            policy_definition = BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1())
+            if any(
+                label is not None and policy_definition.taxonomy.normalize(label) is None
+                for label in (collection.industry, collection.subdirection)
+            ):
+                raise TargetingError(
+                    409,
+                    "BUYER_CLIENT_CATEGORY_UNMAPPED",
+                    "Collection Job client category is not mapped by Buyer Taxonomy V1",
+                )
+            if not await self.repository.has_committed_buyer_source_candidates(
+                collection_job_id=collection.id
+            ):
+                raise TargetingError(
+                    409,
+                    "BUYER_SOURCE_PROVENANCE_INCOMPLETE",
+                    "Collection Job has no completed committed source provenance "
+                    "for Buyer screening",
+                )
+
+            pool = await self.repository.get_active_buyer_pool_for_bootstrap(
+                department_id=scope.department_id,
+                collection_job_id=collection.id,
+                policy_hash=policy_definition.canonical_hash,
+            )
+            reused_existing_pool = pool is not None
+            if pool is None:
+                mutation_started = True
+                pool = CandidatePool(
+                    department_id=scope.department_id,
+                    owner_operator_id=operator_id,
+                    name=self._buyer_bootstrap_name(collection.name),
+                    kind=CandidatePoolKind.POTENTIAL_BUYER,
+                    source_collection_job_id=collection.id,
+                    status=CandidatePoolStatus.ACTIVE,
+                    current_policy_id=None,
+                    version=1,
+                )
+                self.session.add(pool)
+                await self.session.flush()
+                policy_record = await self._append_policy_locked(
+                    pool,
+                    operator_id,
+                    policy_definition,
+                )
+                self.audit.add(
+                    action=AuditAction.CANDIDATE_POOL_CREATED,
+                    result=AuditResult.SUCCESS,
+                    department_id=scope.department_id,
+                    operator_id=operator_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="candidate_pool",
+                    entity_id=pool.id,
+                    after=self._audit_after_with_scope(self._pool_audit_after(pool), scope),
+                )
+                self.audit.add(
+                    action=AuditAction.TARGETING_POLICY_CREATED,
+                    result=AuditResult.SUCCESS,
+                    department_id=scope.department_id,
+                    operator_id=operator_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="targeting_policy",
+                    entity_id=policy_record.id,
+                    after=self._audit_after_with_scope(
+                        self._policy_audit_after(policy_record), scope
+                    ),
+                )
+            else:
+                policy_record = await self.repository.get_current_policy(pool, for_update=True)
+                if policy_record is None:
+                    raise TargetingError(
+                        409,
+                        "TARGETING_POLICY_REQUIRED",
+                        "Candidate Pool has no policy",
+                    )
+                existing_definition = self._typed_policy(pool, policy_record)
+                self._require_reviewed_buyer_taxonomy(existing_definition, status_code=409)
+
+            typed_policy = self._typed_policy(pool, policy_record)
+            if not isinstance(typed_policy, BuyerTargetingPolicy):
+                raise TargetingError(
+                    409,
+                    "POLICY_KIND_MISMATCH",
+                    "Buyer Pool requires BUYER_V1 policy",
+                )
+            run = await self.repository.get_first_run_for_policy(
+                pool_id=pool.id,
+                policy_id=policy_record.id,
+            )
+            if run is None:
+                mutation_started = True
+                run = await self._stage_run_locked(
+                    pool=pool,
+                    policy_record=policy_record,
+                    policy=typed_policy,
+                    operator_id=operator_id,
+                    scope=scope,
+                    idempotency_key=idempotency_key,
+                    request_hash=hash_document(
+                        {
+                            "operation": "buyer_screening_bootstrap",
+                            "collection_job_id": collection.id,
+                            "policy_hash": typed_policy.canonical_hash,
+                        }
+                    ),
+                    ip=ip,
+                    user_agent=user_agent,
+                )
+
+            projection = await self.repository.get_pool_with_owner(
+                pool.id,
+                department_id=scope.department_id,
+            )
+            if projection is None:
+                raise TargetingError(
+                    500,
+                    "CANDIDATE_POOL_OWNER_PROJECTION_INVALID",
+                    "Candidate Pool owner projection is invalid",
+                )
+            result = BuyerScreeningBootstrapPublic(
+                pool=self._pool_public_from_record(projection),
+                policy=TargetingPolicyCreateResultPublic.model_validate(policy_record),
+                run=CandidatePoolRunPublic.model_validate(run),
+                reused_existing_pool=reused_existing_pool,
+            )
+            await self.session.commit()
+            return result
         except TargetingError:
             if mutation_started:
                 await self.session.rollback()
@@ -1236,6 +1425,7 @@ class CandidatePoolService:
         cursor: UUID | None,
         limit: int,
         result: CandidateResult | None = None,
+        buyer_lead_tier: BuyerLeadTier | None = None,
         department_id: UUID | None = None,
     ) -> CandidatePoolRunMemberPage:
         scope = await self._resolve_read_scope(context, department_id)
@@ -1245,6 +1435,12 @@ class CandidatePoolService:
             raise TargetingError(
                 404, "CANDIDATE_POOL_RUN_NOT_FOUND", "Candidate Pool run not found"
             )
+        if buyer_lead_tier is not None and pool.kind is not CandidatePoolKind.POTENTIAL_BUYER:
+            raise TargetingError(
+                422,
+                "BUYER_LEAD_TIER_FILTER_INVALID",
+                "Buyer lead tier filtering requires a Buyer Candidate Pool",
+            )
         page = await self.repository.list_run_members(
             pool_id=pool.id,
             department_id=scope.department_id,
@@ -1252,6 +1448,7 @@ class CandidatePoolService:
             cursor=cursor,
             limit=limit,
             result=result,
+            buyer_lead_tier=buyer_lead_tier,
         )
         viewer = context.effective_role is Role.VIEWER
         return CandidatePoolRunMemberPage(
@@ -1356,6 +1553,24 @@ class CandidatePoolService:
             as_of=as_of,
             content_activity_freshness_policy=self.content_activity_freshness_policy,
             grey_dolphin_activity_freshness_policy=(self.grey_dolphin_activity_freshness_policy),
+        )
+
+    def _evaluation_record(
+        self,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        facts: CandidateFactBundle,
+        *,
+        as_of: datetime,
+    ) -> tuple[CandidateFactBundle, TargetingEvaluation, BuyerLeadTierDecision | None]:
+        evaluation = self._evaluate_targeting(policy, facts, as_of=as_of)
+        return (
+            facts,
+            evaluation,
+            (
+                evaluate_buyer_lead_tier(policy, facts)
+                if isinstance(policy, BuyerTargetingPolicy)
+                else None
+            ),
         )
 
     async def _execute_long_inactivity_enrichment(
@@ -1574,8 +1789,7 @@ class CandidatePoolService:
                     increments = self.repository.add_evaluation_batch(
                         run=run,
                         evaluations=(
-                            (fact, self._evaluate_targeting(policy, fact, as_of=run.as_of))
-                            for fact in facts
+                            self._evaluation_record(policy, fact, as_of=run.as_of) for fact in facts
                         ),
                     )
                     match_count += increments[0]
@@ -1608,7 +1822,7 @@ class CandidatePoolService:
                 )
                 increments = self.repository.add_evaluation_batch(
                     run=run,
-                    evaluations=evaluations,
+                    evaluations=((fact, evaluation, None) for fact, evaluation in evaluations),
                 )
                 match_count += increments[0]
                 unknown_count += increments[1]
@@ -1630,7 +1844,11 @@ class CandidatePoolService:
             run.error_message = None
             watermark: dict[str, Any] = dict(run.input_watermark or {})
             watermark["materialized_at"] = _utc_now()
-            watermark["materialized_member_count"] = match_count + unknown_count
+            watermark["materialized_member_count"] = (
+                match_count
+                + unknown_count
+                + (not_match_count if isinstance(policy, BuyerTargetingPolicy) else 0)
+            )
             run.input_watermark = canonical_value(watermark)
             self._add_run_audit(
                 action=AuditAction.CANDIDATE_POOL_RUN_COMPLETED,

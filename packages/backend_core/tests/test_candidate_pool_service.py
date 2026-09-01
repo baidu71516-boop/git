@@ -36,7 +36,12 @@ from backend_core.content_activity.models import (
 )
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
+from backend_core.growth.buyer_taxonomy_v1 import (
+    BUYER_TAXONOMY_V1_HASH,
+    resolve_buyer_taxonomy_v1,
+)
 from backend_core.growth.enums import (
+    BuyerLeadTier,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidateResult,
@@ -67,7 +72,6 @@ from backend_core.growth.targeting import (
     SellerTargetingPolicy,
     TargetingEvaluation,
     TaxonomyDefinition,
-    TaxonomyRelation,
 )
 from backend_core.imports.enums import (
     CollectionJobStatus,
@@ -1847,18 +1851,18 @@ def test_buyer_materialization_uses_committed_source_provenance_once_per_account
                 account = await _account(
                     session,
                     owner=context.operator,
-                    source_tags=["gaming"],
+                    source_tags=["科技"],
                 )
                 source_collection = await _collection_job(
                     session,
                     context=context,
-                    industry="beauty",
+                    industry="美食",
                     subdirection=None,
                 )
                 unrelated_collection = await _collection_job(
                     session,
                     context=context,
-                    industry="gaming",
+                    industry="科技",
                     subdirection=None,
                 )
                 source_first = await _committed_import(
@@ -1866,21 +1870,21 @@ def test_buyer_materialization_uses_committed_source_provenance_once_per_account
                     context=context,
                     collection=source_collection,
                     account=account,
-                    creator_tags=["gaming"],
+                    creator_tags=["科技"],
                 )
                 source_second = await _committed_import(
                     session,
                     context=context,
                     collection=source_collection,
                     account=account,
-                    creator_tags=["gaming"],
+                    creator_tags=["科技"],
                 )
                 classification_import = await _committed_import(
                     session,
                     context=context,
                     collection=unrelated_collection,
                     account=account,
-                    creator_tags=["gaming"],
+                    creator_tags=["科技"],
                 )
                 await session.commit()
 
@@ -1891,19 +1895,7 @@ def test_buyer_materialization_uses_committed_source_provenance_once_per_account
                         name="Buyer provenance",
                         kind="POTENTIAL_BUYER",
                         source_collection_job_id=source_collection.id,
-                        policy=BuyerTargetingPolicy(
-                            taxonomy=TaxonomyDefinition(
-                                taxonomy_version="reviewed-v1",
-                                reviewed=True,
-                                categories=("beauty", "gaming"),
-                                incompatible=(
-                                    TaxonomyRelation(
-                                        left_category_id="beauty",
-                                        right_category_id="gaming",
-                                    ),
-                                ),
-                            )
-                        ),
+                        policy=BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1()),
                     ),
                     idempotency_key="targeting-pool-buyer-provenance",
                 )
@@ -1937,6 +1929,243 @@ def test_buyer_materialization_uses_committed_source_provenance_once_per_account
                     "provenance_import_job_ids"
                 ] == [str(classification_import.id)]
                 assert "purchased_account" not in str(member.redacted_evidence)
+                historical = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    payload=CandidatePoolRunRequest(policy_id=run.policy_id),
+                    idempotency_key="targeting-buyer-provenance-historical",
+                )
+                assert historical.policy_id == run.policy_id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_bootstrap_derives_trusted_policy_and_reuses_one_first_run() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator, source_tags=["科技"])
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="美妆",
+                    subdirection=None,
+                )
+                await _committed_import(
+                    session,
+                    context=context,
+                    collection=collection,
+                    account=account,
+                    creator_tags=["科技"],
+                )
+                await session.commit()
+
+                service = _service(session)
+                first = await service.bootstrap_buyer_screening(
+                    context,
+                    collection_job_id=collection.id,
+                    idempotency_key="buyer-bootstrap-first",
+                )
+                assert first.reused_existing_pool is False
+                assert first.run.status is CandidatePoolRunStatus.PENDING
+                assert first.policy.version == 1
+                policy = await service.get_policy(
+                    context,
+                    pool_id=first.pool.id,
+                    policy_id=first.policy.id,
+                )
+                assert isinstance(policy.definition, BuyerTargetingPolicy)
+                assert policy.definition.taxonomy.artifact_hash == BUYER_TAXONOMY_V1_HASH
+
+                second = await service.bootstrap_buyer_screening(
+                    context,
+                    collection_job_id=collection.id,
+                    idempotency_key="buyer-bootstrap-second-click",
+                )
+                assert second.reused_existing_pool is True
+                assert second.pool.id == first.pool.id
+                assert second.policy.id == first.policy.id
+                assert second.run.id == first.run.id
+
+                completed = await service.materialize_run(first.run.id)
+                assert completed is not None
+                assert completed.status is CandidatePoolRunStatus.COMPLETED
+                audit_actions = tuple(
+                    (
+                        await session.execute(
+                            select(AuditLog.action).where(
+                                AuditLog.entity_id.in_(
+                                    (first.pool.id, first.policy.id, first.run.id)
+                                )
+                            )
+                        )
+                    ).scalars()
+                )
+                assert AuditAction.CANDIDATE_POOL_CREATED in audit_actions
+                assert AuditAction.TARGETING_POLICY_CREATED in audit_actions
+                assert AuditAction.CANDIDATE_POOL_RUN_REQUESTED in audit_actions
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_bootstrap_fails_closed_for_source_scope_and_client_category() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                other_context = await _actor(session, role=Role.OPERATOR)
+                foreign = await _collection_job(
+                    session, context=other_context, industry="美妆", subdirection=None
+                )
+                incomplete = await _collection_job(
+                    session, context=context, industry="美妆", subdirection=None
+                )
+                unmapped = await _collection_job(
+                    session, context=context, industry="未映射行业", subdirection=None
+                )
+                assert context.operator is not None
+                account = await _account(session, owner=context.operator, source_tags=["科技"])
+                await _committed_import(
+                    session,
+                    context=context,
+                    collection=unmapped,
+                    account=account,
+                    creator_tags=["科技"],
+                )
+                await session.commit()
+
+                service = _service(session)
+                with pytest.raises(TargetingError) as cross_department:
+                    await service.bootstrap_buyer_screening(
+                        context,
+                        collection_job_id=foreign.id,
+                        idempotency_key="buyer-bootstrap-foreign",
+                    )
+                assert cross_department.value.status_code == 404
+                assert cross_department.value.code == "COLLECTION_JOB_NOT_FOUND"
+
+                with pytest.raises(TargetingError) as missing_provenance:
+                    await service.bootstrap_buyer_screening(
+                        context,
+                        collection_job_id=incomplete.id,
+                        idempotency_key="buyer-bootstrap-incomplete",
+                    )
+                assert missing_provenance.value.status_code == 409
+                assert missing_provenance.value.code == "BUYER_SOURCE_PROVENANCE_INCOMPLETE"
+
+                with pytest.raises(TargetingError) as unmapped_category:
+                    await service.bootstrap_buyer_screening(
+                        context,
+                        collection_job_id=unmapped.id,
+                        idempotency_key="buyer-bootstrap-unmapped",
+                    )
+                assert unmapped_category.value.status_code == 409
+                assert unmapped_category.value.code == "BUYER_CLIENT_CATEGORY_UNMAPPED"
+
+                viewer = await _actor(session, role=Role.VIEWER)
+                with pytest.raises(TargetingError) as viewer_rejected:
+                    await service.bootstrap_buyer_screening(
+                        viewer,
+                        collection_job_id=incomplete.id,
+                        idempotency_key="buyer-bootstrap-viewer",
+                    )
+                assert viewer_rejected.value.status_code == 403
+                assert viewer_rejected.value.code == "PERMISSION_DENIED"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_future_run_materializes_every_lead_tier_without_expanding_seller_rows() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                collection = await _collection_job(
+                    session, context=context, industry="科技", subdirection=None
+                )
+                expected = {
+                    "美食": BuyerLeadTier.HIGH,
+                    "休闲": BuyerLeadTier.CHANGED,
+                    "数码": BuyerLeadTier.RELATED,
+                    "科技": BuyerLeadTier.SAME_CATEGORY,
+                    None: BuyerLeadTier.UNKNOWN,
+                }
+                for creator_tag in expected:
+                    account = await _account(
+                        session,
+                        owner=context.operator,
+                        source_tags=[] if creator_tag is None else [creator_tag],
+                    )
+                    await _committed_import(
+                        session,
+                        context=context,
+                        collection=collection,
+                        account=account,
+                        creator_tags=None if creator_tag is None else [creator_tag],
+                    )
+                await session.commit()
+
+                service = _service(session)
+                pool = await service.create_pool(
+                    context,
+                    CandidatePoolCreateInput(
+                        name="Buyer lead tiers",
+                        kind=CandidatePoolKind.POTENTIAL_BUYER,
+                        source_collection_job_id=collection.id,
+                        policy=BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1()),
+                    ),
+                    idempotency_key="buyer-lead-tiers-pool",
+                )
+                run = await service.reserve_run(
+                    context,
+                    pool_id=pool.id,
+                    idempotency_key="buyer-lead-tiers-run",
+                )
+                completed = await service.materialize_run(run.id)
+
+                assert completed is not None
+                assert (
+                    completed.match_count,
+                    completed.unknown_count,
+                    completed.not_match_count,
+                ) == (1, 2, 2)
+                assert completed.input_watermark is not None
+                assert completed.input_watermark["materialized_member_count"] == 5
+                page = await service.list_run_members(
+                    context, pool_id=pool.id, run_id=run.id, cursor=None, limit=50
+                )
+                assert {item.buyer_lead_tier for item in page.items} == set(expected.values())
+                assert all(item.buyer_relation_summary is not None for item in page.items)
+                changed = await service.list_run_members(
+                    context,
+                    pool_id=pool.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=50,
+                    buyer_lead_tier=BuyerLeadTier.CHANGED,
+                )
+                assert [item.buyer_lead_tier for item in changed.items] == [BuyerLeadTier.CHANGED]
         finally:
             await engine.dispose()
 
@@ -1956,12 +2185,12 @@ def test_buyer_classification_requires_provenance_for_retained_tags() -> None:
                 account = await _account(
                     session,
                     owner=context.operator,
-                    source_tags=["gaming"],
+                    source_tags=["科技"],
                 )
                 collection = await _collection_job(
                     session,
                     context=context,
-                    industry="beauty",
+                    industry="美食",
                     subdirection=None,
                 )
                 tagged_import = await _committed_import(
@@ -1969,7 +2198,7 @@ def test_buyer_classification_requires_provenance_for_retained_tags() -> None:
                     context=context,
                     collection=collection,
                     account=account,
-                    creator_tags=["gaming"],
+                    creator_tags=["科技"],
                 )
                 tagless_import = await _committed_import(
                     session,
@@ -1987,19 +2216,7 @@ def test_buyer_classification_requires_provenance_for_retained_tags() -> None:
                         name="Buyer retained-tag provenance",
                         kind=CandidatePoolKind.POTENTIAL_BUYER,
                         source_collection_job_id=collection.id,
-                        policy=BuyerTargetingPolicy(
-                            taxonomy=TaxonomyDefinition(
-                                taxonomy_version="reviewed-v1",
-                                reviewed=True,
-                                categories=("beauty", "gaming"),
-                                incompatible=(
-                                    TaxonomyRelation(
-                                        left_category_id="beauty",
-                                        right_category_id="gaming",
-                                    ),
-                                ),
-                            )
-                        ),
+                        policy=BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1()),
                     ),
                     idempotency_key="targeting-pool-buyer-retained",
                 )
@@ -2076,6 +2293,46 @@ def test_buyer_pool_rejects_unreviewed_taxonomy_activation() -> None:
     asyncio.run(scenario())
 
 
+def test_buyer_pool_rejects_client_reviewed_taxonomy_activation() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                collection = await _collection_job(
+                    session, context=context, industry="美食", subdirection=None
+                )
+                await session.commit()
+
+                with pytest.raises(TargetingError) as rejected:
+                    await _service(session).create_pool(
+                        context,
+                        CandidatePoolCreateInput(
+                            name="Client-reviewed buyer taxonomy",
+                            kind=CandidatePoolKind.POTENTIAL_BUYER,
+                            source_collection_job_id=collection.id,
+                            policy=BuyerTargetingPolicy(
+                                taxonomy=TaxonomyDefinition(
+                                    taxonomy_version="client-v1",
+                                    reviewed=True,
+                                    categories=("FOOD",),
+                                )
+                            ),
+                        ),
+                        idempotency_key="targeting-pool-client-reviewed",
+                    )
+
+                assert rejected.value.status_code == 422
+                assert rejected.value.code == "BUYER_TAXONOMY_UNTRUSTED"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_buyer_pool_rejects_cross_department_source_collection() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite://")
@@ -2100,13 +2357,7 @@ def test_buyer_pool_rejects_cross_department_source_collection() -> None:
                             name="Foreign source",
                             kind="POTENTIAL_BUYER",
                             source_collection_job_id=foreign_collection.id,
-                            policy=BuyerTargetingPolicy(
-                                taxonomy=TaxonomyDefinition(
-                                    taxonomy_version="reviewed-v1",
-                                    reviewed=True,
-                                    categories=("beauty",),
-                                )
-                            ),
+                            policy=BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1()),
                         ),
                         idempotency_key="targeting-pool-cross-department",
                     )
@@ -2137,13 +2388,7 @@ def test_buyer_materialization_uses_reservation_time_collection_context() -> Non
                         name="Buyer candidates",
                         kind="POTENTIAL_BUYER",
                         source_collection_job_id=collection.id,
-                        policy=BuyerTargetingPolicy(
-                            taxonomy=TaxonomyDefinition(
-                                taxonomy_version="reviewed-v1",
-                                reviewed=True,
-                                categories=("beauty", "gaming"),
-                            )
-                        ),
+                        policy=BuyerTargetingPolicy(taxonomy=resolve_buyer_taxonomy_v1()),
                     ),
                     idempotency_key="targeting-pool-buyer-snapshot",
                 )

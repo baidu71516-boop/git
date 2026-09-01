@@ -12,6 +12,7 @@ from backend_core.content_activity.enums import (
     ContentActivityObservationStatus,
     ContentActivityResult,
 )
+from backend_core.growth.buyer_taxonomy_v1 import resolve_buyer_taxonomy_v1
 from backend_core.growth.targeting import (
     BuyerTargetingPolicy,
     CandidateFactBundle,
@@ -194,12 +195,13 @@ def test_huitun_runtime_exact_observation_uses_frozen_threshold_boundaries(
     expected: TargetingEvaluationResult,
 ) -> None:
     result = evaluate_seller(
-        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=minimum)),
+        SellerTargetingPolicy(
+            long_inactivity=LongInactivityConstraint(minimum_inactive_days=minimum)
+        ),
         _facts(
             platform=Platform.DOUYIN,
             content_activity=_huitun_runtime_fact(
-                huitun_last_publication_at=CONTENT_ACTIVITY_AS_OF
-                - timedelta(days=inactive_days)
+                huitun_last_publication_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=inactive_days)
             ),
             grey_dolphin_activity=_grey_dolphin_activity_fact(notes_7d=0, notes_60d=0),
         ),
@@ -304,7 +306,9 @@ def test_huitun_stale_or_same_instant_conflicting_evidence_is_unknown() -> None:
 
     for fact in (stale, conflicting):
         evaluation = evaluate_seller(
-            SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=30)),
+            SellerTargetingPolicy(
+                long_inactivity=LongInactivityConstraint(minimum_inactive_days=30)
+            ),
             _facts(platform=Platform.DOUYIN, content_activity=fact),
             as_of=CONTENT_ACTIVITY_AS_OF,
         )
@@ -789,20 +793,21 @@ def test_reason_codes_are_closed() -> None:
 
 
 def _reviewed_taxonomy() -> TaxonomyDefinition:
-    return TaxonomyDefinition(
-        taxonomy_version="reviewed-v1",
-        reviewed=True,
-        categories=("beauty", "gaming"),
-        incompatible=(TaxonomyRelation(left_category_id="beauty", right_category_id="gaming"),),
-    )
+    return resolve_buyer_taxonomy_v1()
 
 
 def test_buyer_aligned_mismatch_and_unknown_outcomes() -> None:
     policy = BuyerTargetingPolicy(taxonomy=_reviewed_taxonomy())
 
-    aligned = evaluate_buyer(policy, _facts())
-    mismatch = evaluate_buyer(policy, _facts(creator_classification_tags=("gaming",)))
-    unmapped = evaluate_buyer(policy, _facts(creator_classification_tags=("unknown",)))
+    aligned = evaluate_buyer(
+        policy, _facts(collection_industry="美食", creator_classification_tags=("美食",))
+    )
+    mismatch = evaluate_buyer(
+        policy, _facts(collection_industry="美食", creator_classification_tags=("科技",))
+    )
+    unmapped = evaluate_buyer(
+        policy, _facts(collection_industry="美食", creator_classification_tags=("unknown",))
+    )
 
     assert aligned.result is TargetingEvaluationResult.NOT_MATCH
     assert aligned.reason_codes == ("CATEGORY_ALIGNED",)
@@ -822,7 +827,8 @@ def test_buyer_evidence_captures_provenance_without_purchase_claims() -> None:
             source_collection_job_id=collection_job_id,
             source_collection_import_job_ids=(import_job_id,),
             creator_classification_import_job_ids=(import_job_id,),
-            creator_classification_tags=("gaming",),
+            collection_industry="美食",
+            creator_classification_tags=("科技",),
         ),
     )
 

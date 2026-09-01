@@ -38,6 +38,9 @@ PHASE3A_MUTATION_HEADER_REQUIREMENTS: dict[tuple[str, str], frozenset[str]] = {
     ("/api/v1/candidate-pools/{pool_id}/runs", "post"): frozenset(
         {CSRF_HEADER, IDEMPOTENCY_HEADER}
     ),
+    ("/api/v1/collection-jobs/{collection_job_id}/buyer-screening", "post"): frozenset(
+        {CSRF_HEADER, IDEMPOTENCY_HEADER}
+    ),
     ("/api/v1/campaigns", "post"): frozenset({CSRF_HEADER, IDEMPOTENCY_HEADER}),
     ("/api/v1/campaigns/{campaign_id}", "put"): frozenset({CSRF_HEADER}),
     ("/api/v1/campaigns/{campaign_id}/lifecycle", "post"): frozenset({CSRF_HEADER}),

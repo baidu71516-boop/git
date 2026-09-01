@@ -44,6 +44,7 @@ ALEMBIC_INI = PROJECT_ROOT / "infrastructure" / "migrations" / "alembic.ini"
 MIGRATIONS = PROJECT_ROOT / "infrastructure" / "migrations"
 PERMISSIONS_REVISION = "0010_permissions_v1_persistence"
 OPERATOR_AUTH_REVISION = "0011_operator_auth_p0"
+BUYER_REVISION = "0012_buyer_lead_tiers_v1"
 OPERATOR_AUTH_AUDIT_ACTIONS = (
     "OPERATOR_AUTHENTICATED",
     "OPERATOR_AUTH_FAILED",
@@ -510,9 +511,9 @@ def test_upgrade_preserves_legacy_rows_and_marks_credentials_uninitialized(
     migration_database.upgrade("head")
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == OPERATOR_AUTH_REVISION
+        assert _revision(connection) == BUYER_REVISION
         assert ScriptDirectory.from_config(migration_database.config).get_heads() == [
-            OPERATOR_AUTH_REVISION
+            BUYER_REVISION
         ]
         operator_columns = {
             column["name"]: column for column in inspect(connection).get_columns("operators")
@@ -624,16 +625,19 @@ def test_uninitialized_credentials_allow_safe_downgrade_and_reupgrade(
     migration_database.upgrade(OPERATOR_AUTH_REVISION)
     with migration_database.engine.connect() as connection:
         assert _revision(connection) == OPERATOR_AUTH_REVISION
-        assert connection.execute(
-            text(
-                """
+        assert (
+            connection.execute(
+                text(
+                    """
                 SELECT password_hash, credential_version
                 FROM operators
                 WHERE id = :operator_id
                 """
-            ),
-            {"operator_id": seeded["operator_id"]},
-        ).one() == (None, 0)
+                ),
+                {"operator_id": seeded["operator_id"]},
+            ).one()
+            == (None, 0)
+        )
         assert (
             connection.scalar(
                 text("SELECT operator_credential_version FROM sessions WHERE id = :session_id"),

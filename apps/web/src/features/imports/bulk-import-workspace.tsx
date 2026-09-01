@@ -15,6 +15,7 @@ import {
 } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useRouter } from "next/navigation";
 
 import { AppLoading } from "@/components/ui/app-loading";
 import {
@@ -37,6 +38,7 @@ import {
   isAmbiguousBulkConfirmError,
 } from "./formatters";
 import {
+  useBootstrapBuyerScreeningMutation,
   useBulkImportFiles,
   useBulkImportJob,
   useBulkImportRows,
@@ -152,6 +154,7 @@ export function BulkImportWorkspace({
   onExitRefreshReturn?: () => void;
 }) {
   const queryClient = useQueryClient();
+  const router = useRouter();
   const readOnly = role === "viewer";
   const [collectionForm] = Form.useForm<CollectionFormValues>();
   const [collectionModalOpen, setCollectionModalOpen] = useState(false);
@@ -198,6 +201,7 @@ export function BulkImportWorkspace({
   const activeUploadCountRef = useRef(0);
   const scheduledUploadIdsRef = useRef(new Set<string>());
   const refreshedCompletionRef = useRef<string | null>(null);
+  const buyerBootstrapAttemptRef = useRef<string | null>(null);
   currentJobIdRef.current = jobId;
 
   const pendingConfirmRevision =
@@ -257,6 +261,11 @@ export function BulkImportWorkspace({
   const previewMutation = useRequestBulkPreviewMutation();
   const confirmMutation = useConfirmBulkImportMutation();
   const retryJobMutation = useRetryBulkImportJobMutation();
+  const bootstrapBuyerScreeningMutation = useBootstrapBuyerScreeningMutation();
+
+  useEffect(() => {
+    buyerBootstrapAttemptRef.current = null;
+  }, [recoveredJob?.collection_job_id]);
 
   useEffect(() => {
     if (
@@ -650,6 +659,31 @@ export function BulkImportWorkspace({
     }
   }
 
+  async function startBuyerScreening() {
+    if (
+      readOnly ||
+      !collectionQuery.data ||
+      recoveredJob?.status !== "completed"
+    ) {
+      return;
+    }
+    setError(null);
+    const idempotencyKey =
+      buyerBootstrapAttemptRef.current ?? `buyer-bootstrap-${clientFileId()}`;
+    buyerBootstrapAttemptRef.current = idempotencyKey;
+    try {
+      const result = await bootstrapBuyerScreeningMutation.mutateAsync({
+        collectionJobId: collectionQuery.data.id,
+        idempotencyKey,
+      });
+      router.push(
+        `/candidate-pools/${encodeURIComponent(result.pool.id)}/runs/${encodeURIComponent(result.run.id)}`,
+      );
+    } catch (caught) {
+      setError(getBulkErrorMessage(caught, "潜客筛选启动失败，请检查后重试。"));
+    }
+  }
+
   function changePreviewCategory(category: ImportRowCategory) {
     setPreviewCategory(category);
     setPreviewOffset(0);
@@ -846,6 +880,16 @@ export function BulkImportWorkspace({
         onRequestPreview={() => void requestPreview(false)}
         onRebuildPreview={() => void requestPreview(true)}
         onRetryJob={() => void retryJob()}
+        buyerScreening={
+          !readOnly &&
+          recoveredJob?.status === "completed" &&
+          collectionQuery.data
+            ? {
+                busy: bootstrapBuyerScreeningMutation.isPending,
+                onStart: () => void startBuyerScreening(),
+              }
+            : null
+        }
         preview={
           validBulkJob && recoveredJob
             ? {

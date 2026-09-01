@@ -22,6 +22,17 @@ class CandidatePoolRunStatus(StrEnum):
 
 class CandidateResult(StrEnum):
     MATCH = "MATCH"
+    NOT_MATCH = "NOT_MATCH"
+    UNKNOWN = "UNKNOWN"
+
+
+class BuyerLeadTier(StrEnum):
+    """Buyer-only sales prioritization; it never asserts an account transaction."""
+
+    HIGH = "HIGH"
+    CHANGED = "CHANGED"
+    RELATED = "RELATED"
+    SAME_CATEGORY = "SAME_CATEGORY"
     UNKNOWN = "UNKNOWN"
 
 

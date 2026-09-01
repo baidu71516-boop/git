@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_v
 
 from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.enums import (
+    BuyerLeadTier,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidatePoolStatus,
@@ -195,6 +196,15 @@ class CandidatePoolRunPublic(TargetingReadContract):
     idempotent_replay: bool = False
 
 
+class BuyerScreeningBootstrapPublic(TargetingReadContract):
+    """Server-derived Buyer bootstrap result; no policy authoring input exists."""
+
+    pool: CandidatePoolPublic
+    policy: TargetingPolicyCreateResultPublic
+    run: CandidatePoolRunPublic
+    reused_existing_pool: bool
+
+
 class CandidatePoolRunPage(TargetingReadContract):
     items: tuple[CandidatePoolRunPublic, ...]
     next_cursor: UUID | None = None
@@ -206,6 +216,8 @@ class CandidatePoolMemberPublic(TargetingReadContract):
     influencer_id: UUID
     platform_account_id: UUID
     result: CandidateResult
+    buyer_lead_tier: BuyerLeadTier | None = None
+    buyer_relation_summary: dict[str, Any] | None = None
     reason_codes: tuple[TargetingReasonCode, ...]
     redacted_evidence: dict[str, Any]
     evidence_hash: str
@@ -311,6 +323,7 @@ def viewer_redacted_reason_codes(
 
 
 __all__ = [
+    "BuyerScreeningBootstrapPublic",
     "CandidatePoolCreateInput",
     "CandidatePoolMemberPublic",
     "CandidatePoolPage",

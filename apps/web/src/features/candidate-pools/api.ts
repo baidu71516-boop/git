@@ -11,6 +11,7 @@ import type {
   CandidatePoolRun,
   CandidatePoolRunRequest,
   CandidatePoolRunPage,
+  BuyerLeadTier,
   TargetingPolicy,
 } from "./types";
 
@@ -32,12 +33,14 @@ function pagePath(
   cursor?: string | null,
   result?: "MATCH" | "UNKNOWN",
   limit = CANDIDATE_POOL_PAGE_LIMIT,
+  buyerLeadTier?: BuyerLeadTier,
 ) {
   const params = new URLSearchParams({
     limit: String(limit),
   });
   if (cursor) params.set("cursor", cursor);
   if (result) params.set("result", result);
+  if (buyerLeadTier) params.set("buyer_lead_tier", buyerLeadTier);
   return `${path}?${params.toString()}`;
 }
 
@@ -53,12 +56,14 @@ export function candidateMemberPagePath(
   cursor?: string | null,
   result?: "MATCH" | "UNKNOWN",
   pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
+  buyerLeadTier?: BuyerLeadTier,
 ) {
   return pagePath(
     `${candidateRunPath(poolId, runId)}/members`,
     cursor,
     result,
     pageSize,
+    buyerLeadTier,
   );
 }
 
@@ -134,11 +139,19 @@ export async function fetchCandidateMembers(
   cursor?: string | null,
   result?: "MATCH" | "UNKNOWN",
   pageSize: CandidateMemberPageSize = CANDIDATE_MEMBER_PAGE_LIMIT,
+  buyerLeadTier?: BuyerLeadTier,
 ): Promise<CandidateMemberPage> {
   return requireData(
     (
       await apiRequest<CandidateMemberPage>(
-        candidateMemberPagePath(poolId, runId, cursor, result, pageSize),
+        candidateMemberPagePath(
+          poolId,
+          runId,
+          cursor,
+          result,
+          pageSize,
+          buyerLeadTier,
+        ),
       )
     ).data,
     "候选结果列表",

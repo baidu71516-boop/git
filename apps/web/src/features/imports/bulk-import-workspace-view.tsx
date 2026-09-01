@@ -205,6 +205,10 @@ export type BulkImportWorkspaceViewProps = {
   onRequestPreview: () => void;
   onRebuildPreview: () => void;
   onRetryJob: () => void;
+  buyerScreening?: {
+    busy: boolean;
+    onStart: () => void;
+  } | null;
   preview?: Omit<
     BulkPreviewWorkspaceViewProps,
     | "job"
@@ -239,6 +243,7 @@ export function BulkImportWorkspaceView({
   onRequestPreview,
   onRebuildPreview,
   onRetryJob,
+  buyerScreening = null,
   preview = null,
 }: BulkImportWorkspaceViewProps) {
   if (!job) {
@@ -324,6 +329,24 @@ export function BulkImportWorkspaceView({
             onRetryJob={onRetryJob}
           />
         )}
+
+        {buyerScreening ? (
+          <Alert
+            type="info"
+            showIcon
+            title="潜在客户筛选"
+            description="基于本次采集客户原始类目与当前达人类目生成销售线索分层。"
+            action={
+              <Button
+                type="primary"
+                loading={buyerScreening.busy}
+                onClick={buyerScreening.onStart}
+              >
+                开始潜客筛选
+              </Button>
+            }
+          />
+        ) : null}
 
         {job.preview_revision > 0 ||
         job.status === "previewing" ||

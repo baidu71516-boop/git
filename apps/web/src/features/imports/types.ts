@@ -306,6 +306,26 @@ export type CollectionJobPublic = {
   updated_at: string;
 };
 
+export type BuyerScreeningBootstrapResult = {
+  pool: {
+    id: string;
+  };
+  policy: {
+    id: string;
+    version: number;
+  };
+  run: {
+    id: string;
+    status: string;
+  };
+  reused_existing_pool: boolean;
+};
+
+export type BuyerScreeningBootstrapInput = {
+  collectionJobId: string;
+  idempotencyKey: string;
+};
+
 export type ImportJobPublic = {
   id: string;
   collection_job_id: string;

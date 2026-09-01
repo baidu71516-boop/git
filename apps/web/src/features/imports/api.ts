@@ -1,6 +1,8 @@
 import { ApiClientError, apiRequest } from "@/lib/api/client";
 
 import type {
+  BuyerScreeningBootstrapInput,
+  BuyerScreeningBootstrapResult,
   BulkImportFileIdentity,
   CollectionJobCreateInput,
   CollectionJobPublic,
@@ -30,6 +32,8 @@ export const bulkImportApiPaths = {
     `/collection-jobs/${encoded(collectionJobId)}`,
   collectionJobScreeningRules: (collectionJobId: string) =>
     `/collection-jobs/${encoded(collectionJobId)}/screening-rules`,
+  buyerScreening: (collectionJobId: string) =>
+    `/collection-jobs/${encoded(collectionJobId)}/buyer-screening`,
   createBulkJob: "/import-jobs/bulk",
   importJob: (importJobId: string) => `/import-jobs/${encoded(importJobId)}`,
   files: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/files`,
@@ -99,6 +103,21 @@ export async function updateCollectionJobScreeningRules({
     { method: "PUT", body: jsonBody(payload) },
   );
   return requireData(response.data, "筛选规则更新");
+}
+
+export async function bootstrapBuyerScreening({
+  collectionJobId,
+  idempotencyKey,
+}: BuyerScreeningBootstrapInput): Promise<BuyerScreeningBootstrapResult> {
+  const response = await apiRequest<BuyerScreeningBootstrapResult>(
+    bulkImportApiPaths.buyerScreening(collectionJobId),
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: jsonBody({}),
+    },
+  );
+  return requireData(response.data, "潜客筛选启动");
 }
 
 export async function createBulkImportJob(
