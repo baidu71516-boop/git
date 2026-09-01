@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 NULL_MARKERS = frozenset({"", "--", "null"})
 XHS_PROFILE_PATH = re.compile(r"^/user/profile/([A-Za-z0-9_-]+?)/?$", re.IGNORECASE)
+DOUYIN_PROFILE_PATH = re.compile(r"^/user/([^/?#]+?)/?$")
 EMAIL_LOCAL = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$")
 DOMAIN_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 INTEGER = re.compile(r"^[+-]?(?:\d+|\d{1,3}(?:,\d{3})+)$")
@@ -70,6 +71,38 @@ def normalize_xhs_profile_url(value: str) -> NormalizedProfile | None:
         profile_url=cleaned,
         normalized_profile_url=normalized,
         platform_account_id=account_id,
+    )
+
+
+def normalize_douyin_profile_url(value: str) -> NormalizedProfile | None:
+    """Normalize a neutral Douyin profile token, not a UID or sec_uid."""
+
+    cleaned = normalize_null(value)
+    if cleaned is None:
+        return None
+    try:
+        parsed = urlsplit(cleaned)
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme.lower() not in {"http", "https"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        or hostname not in {"douyin.com", "www.douyin.com"}
+    ):
+        return None
+    path_match = DOUYIN_PROFILE_PATH.fullmatch(parsed.path)
+    if path_match is None:
+        return None
+    profile_token = path_match.group(1)
+    normalized = f"https://www.douyin.com/user/{profile_token}"
+    return NormalizedProfile(
+        profile_url=cleaned,
+        normalized_profile_url=normalized,
+        platform_account_id=profile_token,
     )
 
 
@@ -219,6 +252,7 @@ def parse_labeled_percentages(value: str) -> list[dict[str, str | Decimal]] | No
 __all__ = [
     "NormalizedEmail",
     "NormalizedProfile",
+    "normalize_douyin_profile_url",
     "normalize_email",
     "normalize_null",
     "normalize_xhs_profile_url",

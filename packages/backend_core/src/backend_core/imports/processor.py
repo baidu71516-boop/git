@@ -114,6 +114,7 @@ class ImportProcessor:
                 file_type=stored_file.detected_type,
                 declared_mime=occurrence.declared_mime or job.mime_type or "",
                 limits=self.parser_limits,
+                repair_huitun_dimensions=(job.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT),
             )
             mapping = dict(occurrence.field_mapping or job.field_mapping or {})
             adapter: SourceAdapter | None = None
@@ -147,6 +148,7 @@ class ImportProcessor:
                     "status": ImportJobStatus.MAPPING_REQUIRED.value,
                 }
 
+            adapter.validate_table(table.rows)
             adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
             return await self._persist_preview(
                 job.id,

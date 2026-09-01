@@ -168,6 +168,9 @@ class BatchImportProcessor:
                 file_type=snapshot.file_type,
                 declared_mime=snapshot.declared_mime,
                 limits=self.parser_limits,
+                repair_huitun_dimensions=(
+                    snapshot.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT
+                ),
             )
             mapping, adapter = self._mapping_and_adapter(snapshot, table)
             if adapter is None:
@@ -178,6 +181,7 @@ class BatchImportProcessor:
                     task_context=task_context,
                 )
 
+            adapter.validate_table(table.rows)
             adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
             return await self._persist_parsed_file(
                 snapshot,
@@ -280,6 +284,7 @@ class BatchImportProcessor:
                 file_type=stored_file.detected_type,
                 declared_mime=occurrence.declared_mime or stored_file.detected_mime,
                 limits=self.parser_limits,
+                repair_huitun_dimensions=(job.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT),
             )
             snapshot = _TaskSnapshot(
                 job_id=job.id,
@@ -305,6 +310,7 @@ class BatchImportProcessor:
                     "Preview file mapping no longer matches its source fields",
                 )
 
+            adapter.validate_table(table.rows)
             adapted_rows = [adapter.adapt(raw_row) for raw_row in table.rows]
             for index, adapted in enumerate(adapted_rows):
                 locator = (occurrence.id, adapted.row_number)

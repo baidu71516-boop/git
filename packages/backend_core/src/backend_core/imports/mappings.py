@@ -5,7 +5,7 @@ from types import MappingProxyType
 
 from backend_core.imports.errors import ImportDomainError
 
-HUITUN_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
+HUITUN_XHS_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
     {
         "达人名称": "nickname",
         "达人官方地址": "profile_url",
@@ -47,6 +47,24 @@ HUITUN_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
         "视频CPM": "video_cpm",
     }
 )
+
+# Backwards-compatible name for the established Xiaohongshu export.
+HUITUN_FIELD_MAPPING = HUITUN_XHS_FIELD_MAPPING
+
+# Douyin V1 deliberately imports only fields with a settled canonical meaning.
+# The profile URL is the sole hard identity input; ``抖音号`` is display data.
+HUITUN_DOUYIN_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
+    {
+        "播主昵称": "nickname",
+        "抖音号": "account_handle",
+        "所属MCN": "mcn_name",
+        "简介": "bio",
+        "内容标签": "creator_tags",
+        "粉丝数": "followers_count",
+        "达人主页链接": "profile_url",
+    }
+)
+HUITUN_DOUYIN_REQUIRED_HEADERS = frozenset({"播主昵称", "抖音号", "达人主页链接"})
 
 CANONICAL_FIELDS = frozenset(
     {
@@ -156,13 +174,33 @@ def huitun_mapping_for_headers(headers: list[str]) -> dict[str, str]:
     return validate_mapping(headers, mapping)
 
 
+def huitun_douyin_mapping_for_headers(headers: list[str]) -> dict[str, str]:
+    missing = sorted(HUITUN_DOUYIN_REQUIRED_HEADERS - set(headers))
+    if missing:
+        raise ImportDomainError(
+            "MAPPING_INVALID",
+            "Huitun Douyin export is missing required identity headers",
+            details={"missing_source_fields": missing},
+        )
+    mapping = {
+        field: canonical
+        for field, canonical in HUITUN_DOUYIN_FIELD_MAPPING.items()
+        if field in headers
+    }
+    return validate_mapping(headers, mapping)
+
+
 __all__ = [
     "CANONICAL_FIELDS",
     "HUITUN_DECIMAL_FIELDS",
+    "HUITUN_DOUYIN_FIELD_MAPPING",
+    "HUITUN_DOUYIN_REQUIRED_HEADERS",
     "HUITUN_FIELD_MAPPING",
     "HUITUN_INTEGER_FIELDS",
     "HUITUN_PERCENT_FIELDS",
     "HUITUN_RAW_COMPOSITE_FIELDS",
+    "HUITUN_XHS_FIELD_MAPPING",
+    "huitun_douyin_mapping_for_headers",
     "huitun_mapping_for_headers",
     "validate_mapping",
 ]

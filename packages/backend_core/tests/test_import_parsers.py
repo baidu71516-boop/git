@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import io
+import re
 import stat
 import zipfile
 from collections.abc import AsyncIterator, Callable
@@ -47,6 +48,18 @@ def add_zip_entry(content: bytes, name: str, payload: bytes) -> bytes:
         for entry in existing.infolist():
             rewritten.writestr(entry, existing.read(entry))
         rewritten.writestr(name, payload)
+    return output.getvalue()
+
+
+def replace_zip_entry(content: bytes, name: str, payload: bytes) -> bytes:
+    source = io.BytesIO(content)
+    output = io.BytesIO()
+    with (
+        zipfile.ZipFile(source) as existing,
+        zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as rewritten,
+    ):
+        for entry in existing.infolist():
+            rewritten.writestr(entry, payload if entry.filename == name else existing.read(entry))
     return output.getvalue()
 
 
@@ -208,6 +221,52 @@ def test_xlsx_parses_values_and_ignores_formula_cells() -> None:
     assert table.rows[0].raw_data["calculated"] == "=1+1"
     assert table.rows[0].warnings == [{"code": "FORMULA_IGNORED", "location": "2:3"}]
     assert table.rows[1].values["calculated"] == "plain"
+
+
+def test_huitun_dimension_repair_only_recovers_proven_stale_a1_metadata() -> None:
+    content = make_xlsx(["昵称", "主页"], ["达人", "https://www.douyin.com/user/token"])
+    sheet_xml = zipfile.ZipFile(io.BytesIO(content)).read("xl/worksheets/sheet1.xml")
+    malformed = replace_zip_entry(
+        content,
+        "xl/worksheets/sheet1.xml",
+        re.sub(rb'<dimension[^>]*ref="[^"]+"[^>]*/>', b'<dimension ref="A1"/>', sheet_xml),
+    )
+
+    with pytest.raises(ImportDomainError) as unrepaired:
+        parse_xlsx(malformed, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert unrepaired.value.code == "NO_DATA_ROWS"
+
+    repaired = parse_xlsx(
+        malformed,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        repair_huitun_dimensions=True,
+    )
+    assert repaired.headers == ["昵称", "主页"]
+    assert [row.values for row in repaired.rows] == [
+        {"昵称": "达人", "主页": "https://www.douyin.com/user/token"}
+    ]
+
+
+def test_huitun_dimension_repair_leaves_normal_and_genuine_a1_workbooks_unchanged() -> None:
+    normal = make_xlsx(["name", "profile"], ["Alpha", "https://example.test/profile"])
+    baseline = parse_xlsx(
+        normal, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    repaired_flag = parse_xlsx(
+        normal,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        repair_huitun_dimensions=True,
+    )
+    assert repaired_flag == baseline
+
+    one_cell = make_xlsx(["only-header"])
+    with pytest.raises(ImportDomainError) as genuine_a1:
+        parse_xlsx(
+            one_cell,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            repair_huitun_dimensions=True,
+        )
+    assert genuine_a1.value.code == "NO_DATA_ROWS"
 
 
 def test_xlsx_rejects_formula_header() -> None:

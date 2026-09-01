@@ -27,7 +27,7 @@ from backend_core.imports.enums import (
     StoredFileType,
 )
 from backend_core.imports.errors import ImportDomainError
-from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
+from backend_core.imports.mappings import HUITUN_DOUYIN_FIELD_MAPPING, HUITUN_FIELD_MAPPING
 from backend_core.imports.models import (
     CollectionJob,
     ImportJob,
@@ -57,6 +57,23 @@ LEGACY_HUITUN_HEADERS = [header for header in HUITUN_FIELD_MAPPING if header != 
 LEGACY_HUITUN_FIELD_MAPPING = {
     header: HUITUN_FIELD_MAPPING[header] for header in LEGACY_HUITUN_HEADERS
 }
+DOUYIN_HEADERS = [
+    "播主昵称",
+    "抖音号",
+    "分类",
+    "所属MCN",
+    "企业认证信息",
+    "个人认证信息",
+    "简介",
+    "省份",
+    "城市",
+    "内容标签",
+    "粉丝数",
+    "作品数",
+    "点赞数",
+    "达人主页链接",
+    "带货类目",
+]
 
 
 @asynccontextmanager
@@ -96,6 +113,33 @@ def huitun_xlsx(rows: list[dict[str, str]]) -> bytes:
             row = {header: "--" for header in HUITUN_FIELD_MAPPING}
             row.update(overrides)
             worksheet.append([row[header] for header in HUITUN_FIELD_MAPPING])
+        workbook.save(stream)
+    finally:
+        workbook.close()
+    return stream.getvalue()
+
+
+def huitun_douyin_csv(rows: list[dict[str, str]]) -> bytes:
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=DOUYIN_HEADERS)
+    writer.writeheader()
+    for overrides in rows:
+        row = {header: "--" for header in DOUYIN_HEADERS}
+        row.update(overrides)
+        writer.writerow(row)
+    return stream.getvalue().encode("utf-8-sig")
+
+
+def huitun_douyin_xlsx(rows: list[dict[str, str]]) -> bytes:
+    stream = io.BytesIO()
+    workbook = Workbook()
+    try:
+        worksheet = workbook.active
+        worksheet.append(DOUYIN_HEADERS)
+        for overrides in rows:
+            row = {header: "--" for header in DOUYIN_HEADERS}
+            row.update(overrides)
+            worksheet.append([row[header] for header in DOUYIN_HEADERS])
         workbook.save(stream)
     finally:
         workbook.close()
@@ -203,6 +247,26 @@ def valid_row(profile_id: str, *, email: str = "--", followers: str = "1000") ->
     }
 
 
+def valid_douyin_row(profile_token: str, *, nickname: str, handle: str) -> dict[str, str]:
+    return {
+        "播主昵称": nickname,
+        "抖音号": handle,
+        "所属MCN": "脱敏MCN",
+        "企业认证信息": "企业认证原文",
+        "个人认证信息": "个人认证原文",
+        "简介": "脱敏简介",
+        "省份": "上海",
+        "城市": "上海",
+        "内容标签": "美食,探店",
+        "粉丝数": "4567",
+        "作品数": "88",
+        "点赞数": "9999",
+        "达人主页链接": f"https://www.douyin.com/user/{profile_token}?source=huitun",
+        "分类": "美食",
+        "带货类目": "食品饮料",
+    }
+
+
 def limits() -> ParserLimits:
     return ParserLimits(max_rows=1000, max_columns=100, max_cells=100_000)
 
@@ -300,6 +364,100 @@ def test_current_38_field_huitun_export_preserves_notes_7d_in_preview() -> None:
             row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
             assert row is not None
             assert row.normalized_data["metrics"]["notes_7d"] == 3
+
+    asyncio.run(scenario())
+
+
+def test_douyin_csv_and_xlsx_share_preview_confirm_and_token_dedupe() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            profile_token = "neutral-profile-token"
+            first_job = await seed_import_job(
+                session,
+                storage,
+                huitun_douyin_csv(
+                    [valid_douyin_row(profile_token, nickname="首次昵称", handle="cctv.com")]
+                ),
+                filename="huitun-douyin.csv",
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+            first_preview = await processor.parse_and_preview(first_job.id)
+            assert first_preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            assert first_job.field_mapping == dict(HUITUN_DOUYIN_FIELD_MAPPING)
+            first_row = await session.scalar(
+                select(ImportRow).where(ImportRow.import_job_id == first_job.id)
+            )
+            assert first_row is not None
+            assert first_row.raw_data["分类"] == "美食"
+            assert first_row.raw_data["带货类目"] == "食品饮料"
+            assert (
+                first_row.normalized_data["platform_identity"]["platform_account_id"]
+                == profile_token
+            )
+            assert first_row.normalized_data["metrics"] == {"followers_count": 4567}
+            await queue_confirm(session, first_job.id, 1)
+            assert (await processor.confirm(first_job.id, 1))["created_rows"] == 1
+
+            second_job = await seed_import_job(
+                session,
+                storage,
+                huitun_douyin_xlsx(
+                    [
+                        valid_douyin_row(
+                            profile_token, nickname="改名后昵称", handle="dongfangzhenxuan"
+                        )
+                    ]
+                ),
+                filename="huitun-douyin.xlsx",
+                detected_type=StoredFileType.XLSX,
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            second_preview = await processor.parse_and_preview(second_job.id)
+            assert second_preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            assert second_job.field_mapping == dict(HUITUN_DOUYIN_FIELD_MAPPING)
+            await queue_confirm(session, second_job.id, 1)
+            second_result = await processor.confirm(second_job.id, 1)
+            assert second_result["updated_rows"] + second_result["no_change_rows"] == 1
+
+            accounts = list(await session.scalars(select(InfluencerPlatformAccount)))
+            assert len(accounts) == 1
+            account = accounts[0]
+            assert account.platform is Platform.DOUYIN
+            assert account.platform_account_id == profile_token
+            # Unknown freshness preserves existing imported profile fields, but
+            # the changed nickname/handle still resolve to this same account.
+            assert account.account_name == "首次昵称"
+            assert account.account_handle == "cctv.com"
+            assert account.normalized_profile_url == (
+                "https://www.douyin.com/user/neutral-profile-token"
+            )
+            assert account.is_active is True
+            assert await session.scalar(select(func.count()).select_from(Influencer)) == 1
+
+    asyncio.run(scenario())
+
+
+def test_distinct_douyin_profile_tokens_do_not_merge_on_shared_name_or_handle() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            rows = [
+                valid_douyin_row("token-one", nickname="同名达人", handle="shared-handle"),
+                valid_douyin_row("token-two", nickname="同名达人", handle="shared-handle"),
+            ]
+            job = await seed_import_job(
+                session, storage, huitun_douyin_csv(rows), filename="distinct-douyin.csv"
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+            preview = await processor.parse_and_preview(job.id)
+            assert preview["status"] == ImportJobStatus.PREVIEW_READY.value
+            await queue_confirm(session, job.id, 1)
+            assert (await processor.confirm(job.id, 1))["created_rows"] == 2
+            accounts = list(await session.scalars(select(InfluencerPlatformAccount)))
+            assert {account.platform_account_id for account in accounts} == {
+                "token-one",
+                "token-two",
+            }
+            assert len(accounts) == 2
 
     asyncio.run(scenario())
 

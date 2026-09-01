@@ -22,8 +22,14 @@ from backend_core.imports.enums import (
     SourceAcquiredAtOrigin,
     StoredFileType,
 )
-from backend_core.imports.mappings import HUITUN_FIELD_MAPPING
-from backend_core.imports.models import CollectionJob, ImportJob, ImportJobFile, StoredImportFile
+from backend_core.imports.mappings import HUITUN_DOUYIN_FIELD_MAPPING, HUITUN_FIELD_MAPPING
+from backend_core.imports.models import (
+    CollectionJob,
+    ImportJob,
+    ImportJobFile,
+    ImportRow,
+    StoredImportFile,
+)
 from backend_core.imports.parsers import ParserLimits
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
@@ -96,6 +102,43 @@ def _sanitized_huitun_csv(profile_id: str) -> bytes:
     return stream.getvalue().encode("utf-8-sig")
 
 
+def _sanitized_huitun_douyin_csv(profile_token: str, *, nickname: str, handle: str) -> bytes:
+    headers = [
+        *HUITUN_DOUYIN_FIELD_MAPPING,
+        "省份",
+        "城市",
+        "企业认证信息",
+        "个人认证信息",
+        "分类",
+        "带货类目",
+        "作品数",
+        "点赞数",
+    ]
+    stream = io.StringIO(newline="")
+    writer = csv.DictWriter(stream, fieldnames=headers)
+    writer.writeheader()
+    writer.writerow(
+        {
+            "播主昵称": nickname,
+            "抖音号": handle,
+            "所属MCN": "脱敏MCN",
+            "简介": "脱敏简介",
+            "内容标签": "美食,探店",
+            "粉丝数": "4567",
+            "达人主页链接": f"https://www.douyin.com/user/{profile_token}?from=huitun",
+            "省份": "上海",
+            "城市": "上海",
+            "企业认证信息": "企业认证原文",
+            "个人认证信息": "个人认证原文",
+            "分类": "美食",
+            "带货类目": "食品饮料",
+            "作品数": "88",
+            "点赞数": "9999",
+        }
+    )
+    return stream.getvalue().encode("utf-8-sig")
+
+
 @asynccontextmanager
 async def _isolated_postgres() -> (
     AsyncIterator[tuple[async_sessionmaker[AsyncSession], LocalStorageAdapter]]
@@ -135,8 +178,9 @@ async def _seed_preview_ready_jobs(
     *,
     profile_id: str,
     job_count: int,
+    content: bytes | None = None,
 ) -> list[UUID]:
-    content = _sanitized_huitun_csv(profile_id)
+    content = content or _sanitized_huitun_csv(profile_id)
     stored = await storage.store(_one_chunk(content), suffix=".csv", max_bytes=25 * 1024 * 1024)
     department = Department(
         name=f"PostgreSQL concurrency fixture {uuid4().hex}",
@@ -318,5 +362,96 @@ def test_concurrent_jobs_with_same_identity_complete_once_and_stale_once() -> No
                 assert await _count(inspection_session, InfluencerContact) == 1
                 assert await _count(inspection_session, InfluencerCurrentMetrics) == 1
                 assert await _count(inspection_session, InfluencerMetricSnapshot) == 1
+
+    asyncio.run(scenario())
+
+
+def test_douyin_confirm_persists_neutral_profile_token_and_dedupes_reimport() -> None:
+    async def scenario() -> None:
+        async with _isolated_postgres() as (factory, storage):
+            profile_token = "postgres-neutral-profile-token"
+            async with factory() as setup_session:
+                first_job_id = (
+                    await _seed_preview_ready_jobs(
+                        setup_session,
+                        storage,
+                        profile_id="unused",
+                        job_count=1,
+                        content=_sanitized_huitun_douyin_csv(
+                            profile_token,
+                            nickname="首次昵称",
+                            handle="cctv.com",
+                        ),
+                    )
+                )[0]
+                first_result = await ImportProcessor(
+                    setup_session, storage, parser_limits=_limits()
+                ).confirm(first_job_id, 1)
+                assert first_result["created_rows"] == 1
+
+                second_job_id = (
+                    await _seed_preview_ready_jobs(
+                        setup_session,
+                        storage,
+                        profile_id="unused-second",
+                        job_count=1,
+                        content=_sanitized_huitun_douyin_csv(
+                            profile_token,
+                            nickname="改名后昵称",
+                            handle="dongfangzhenxuan",
+                        ),
+                    )
+                )[0]
+                second_result = await ImportProcessor(
+                    setup_session, storage, parser_limits=_limits()
+                ).confirm(second_job_id, 1)
+                assert second_result["updated_rows"] + second_result["no_change_rows"] == 1
+
+                distinct_job_id = (
+                    await _seed_preview_ready_jobs(
+                        setup_session,
+                        storage,
+                        profile_id="unused-distinct",
+                        job_count=1,
+                        content=_sanitized_huitun_douyin_csv(
+                            "postgres-distinct-profile-token",
+                            nickname="改名后昵称",
+                            handle="dongfangzhenxuan",
+                        ),
+                    )
+                )[0]
+                distinct_result = await ImportProcessor(
+                    setup_session, storage, parser_limits=_limits()
+                ).confirm(distinct_job_id, 1)
+                assert distinct_result["created_rows"] == 1
+
+            async with factory() as inspection_session:
+                accounts = list(await inspection_session.scalars(select(InfluencerPlatformAccount)))
+                assert len(accounts) == 2
+                accounts_by_token = {account.platform_account_id: account for account in accounts}
+                assert set(accounts_by_token) == {
+                    profile_token,
+                    "postgres-distinct-profile-token",
+                }
+                assert len({account.influencer_id for account in accounts}) == 2
+                account = accounts_by_token[profile_token]
+                assert account.platform.value == "douyin"
+                assert isinstance(account.id, UUID)
+                assert account.platform_account_id == profile_token
+                assert account.account_handle == "cctv.com"
+                assert account.normalized_profile_url == (
+                    f"https://www.douyin.com/user/{profile_token}"
+                )
+                assert account.source.value == "huitun"
+                assert account.is_active is True
+                assert await _count(inspection_session, Influencer) == 2
+                rows = list(
+                    await inspection_session.scalars(
+                        select(ImportRow).where(ImportRow.import_job_id == first_job_id)
+                    )
+                )
+                assert len(rows) == 1
+                assert rows[0].raw_data["分类"] == "美食"
+                assert rows[0].raw_data["带货类目"] == "食品饮料"
 
     asyncio.run(scenario())

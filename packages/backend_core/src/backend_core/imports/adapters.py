@@ -16,10 +16,12 @@ from backend_core.imports.mappings import (
     HUITUN_INTEGER_FIELDS,
     HUITUN_PERCENT_FIELDS,
     HUITUN_RAW_COMPOSITE_FIELDS,
+    huitun_douyin_mapping_for_headers,
     huitun_mapping_for_headers,
     validate_mapping,
 )
 from backend_core.imports.normalizers import (
+    normalize_douyin_profile_url,
     normalize_email,
     normalize_null,
     normalize_xhs_profile_url,
@@ -62,6 +64,8 @@ def _issue(code: str, message: str, field: str) -> RowIssue:
 class _MappedAdapter:
     platform = Platform.XIAOHONGSHU
     source: DataSource
+    profile_normalizer = staticmethod(normalize_xhs_profile_url)
+    profile_platform_name = "Xiaohongshu"
 
     def __init__(self, field_mapping: Mapping[str, str]) -> None:
         self._field_mapping = dict(field_mapping)
@@ -102,13 +106,11 @@ class _MappedAdapter:
         supplied_account_id = values.get("platform_account_id")
         external_source_id = values.get("external_source_id")
         raw_profile_url = values.get("profile_url")
-        normalized_profile = (
-            normalize_xhs_profile_url(raw_profile_url) if raw_profile_url is not None else None
-        )
+        normalized_profile = self.profile_normalizer(raw_profile_url) if raw_profile_url else None
         if raw_profile_url is not None and normalized_profile is None:
             issue = _issue(
                 "INVALID_PROFILE_URL",
-                "Profile URL is not a valid Xiaohongshu profile URL",
+                f"Profile URL is not a valid {self.profile_platform_name} profile URL",
                 "profile_url",
             )
             (
@@ -234,6 +236,9 @@ class _MappedAdapter:
             else:
                 output[field] = value
 
+    def validate_table(self, rows: list[RawTabularRecord]) -> None:
+        """Allow source adapters to reject cross-platform files before Preview."""
+
     def _populate_metrics(
         self,
         values: Mapping[str, str | None],
@@ -324,7 +329,7 @@ class _MappedAdapter:
                 output[target] = distribution
 
 
-class HuitunCsvAdapter(_MappedAdapter):
+class _HuitunXhsAdapter(_MappedAdapter):
     source = DataSource.HUITUN
 
     def __init__(self, field_mapping: Mapping[str, str] | None = None) -> None:
@@ -339,6 +344,140 @@ class HuitunCsvAdapter(_MappedAdapter):
         )
         self._field_mapping = mapping
         return mapping
+
+
+class _HuitunDouyinAdapter(_MappedAdapter):
+    """Strict Huitun Douyin adapter with profile-token-only hard identity."""
+
+    platform = Platform.DOUYIN
+    source = DataSource.HUITUN
+    profile_normalizer = staticmethod(normalize_douyin_profile_url)
+    profile_platform_name = "Douyin"
+
+    def __init__(self, field_mapping: Mapping[str, str] | None = None) -> None:
+        self._explicit_mapping = dict(field_mapping) if field_mapping is not None else None
+        super().__init__(field_mapping or {})
+
+    def mapping_for_headers(self, headers: list[str]) -> dict[str, str]:
+        mapping = huitun_douyin_mapping_for_headers(headers)
+        if self._explicit_mapping is not None and self._explicit_mapping != mapping:
+            raise ImportDomainError(
+                "MAPPING_INVALID",
+                "Huitun Douyin mapping is fixed to its safe canonical fields",
+            )
+        self._field_mapping = mapping
+        return mapping
+
+    def _canonical_values(self, raw_record: RawTabularRecord) -> dict[str, str | None]:
+        values = super()._canonical_values(raw_record)
+        region_parts = [
+            ("省份", normalize_null(raw_record.values.get("省份"))),
+            ("城市", normalize_null(raw_record.values.get("城市"))),
+        ]
+        if any(value is not None for _, value in region_parts):
+            values["region_raw"] = "；".join(
+                f"{label}: {value}" for label, value in region_parts if value is not None
+            )
+        verification_parts = [
+            ("企业认证信息", normalize_null(raw_record.values.get("企业认证信息"))),
+            ("个人认证信息", normalize_null(raw_record.values.get("个人认证信息"))),
+        ]
+        if any(value is not None for _, value in verification_parts):
+            values["verification_info"] = "；".join(
+                f"{label}: {value}" for label, value in verification_parts if value is not None
+            )
+        return values
+
+    def _populate_metrics(
+        self,
+        values: Mapping[str, str | None],
+        output: dict[str, Any],
+        warnings: list[RowIssue],
+    ) -> None:
+        self._parse_metric(
+            values,
+            output,
+            warnings,
+            "followers_count",
+            parse_integer,
+            "INVALID_INTEGER",
+        )
+
+    def validate_table(self, rows: list[RawTabularRecord]) -> None:
+        has_douyin_profile = False
+        has_xhs_profile = False
+        for row in rows:
+            profile_url = normalize_null(row.values.get("达人主页链接"))
+            if profile_url is None:
+                continue
+            has_douyin_profile = (
+                has_douyin_profile or normalize_douyin_profile_url(profile_url) is not None
+            )
+            has_xhs_profile = has_xhs_profile or normalize_xhs_profile_url(profile_url) is not None
+        if has_douyin_profile and has_xhs_profile:
+            raise ImportDomainError(
+                "HUITUN_PLATFORM_MIXED",
+                "Huitun file mixes Douyin and Xiaohongshu profile URLs",
+            )
+
+
+def _huitun_platform_for_headers(headers: list[str]) -> Platform:
+    header_set = set(headers)
+    douyin_headers = {"抖音号", "达人主页链接"}
+    xhs_headers = {"小红书号", "达人官方地址"}
+    has_douyin = bool(header_set & douyin_headers)
+    has_xhs = bool(header_set & xhs_headers)
+    if has_douyin and has_xhs:
+        raise ImportDomainError(
+            "HUITUN_PLATFORM_AMBIGUOUS",
+            "Huitun file contains both Douyin and Xiaohongshu identity headers",
+        )
+    if has_douyin:
+        return Platform.DOUYIN
+    if has_xhs:
+        return Platform.XIAOHONGSHU
+    raise ImportDomainError(
+        "HUITUN_PLATFORM_AMBIGUOUS",
+        "Huitun platform cannot be determined from identity headers",
+    )
+
+
+class HuitunCsvAdapter:
+    """Select exactly one Huitun platform adapter from unambiguous headers."""
+
+    source = DataSource.HUITUN
+    platform = Platform.XIAOHONGSHU
+
+    def __init__(self, field_mapping: Mapping[str, str] | None = None) -> None:
+        self._explicit_mapping = dict(field_mapping) if field_mapping is not None else None
+        self._selected: _MappedAdapter | None = None
+
+    def mapping_for_headers(self, headers: list[str]) -> dict[str, str]:
+        try:
+            platform = _huitun_platform_for_headers(headers)
+        except ImportDomainError:
+            # Existing explicitly-mapped Huitun imports predate platform
+            # detection and carry no provider headers.  Preserve their frozen
+            # Xiaohongshu behavior; auto-detected files still fail closed.
+            identity_headers = {"抖音号", "达人主页链接", "小红书号", "达人官方地址"}
+            if self._explicit_mapping is None or identity_headers & set(headers):
+                raise
+            platform = Platform.XIAOHONGSHU
+        adapter_type = _HuitunDouyinAdapter if platform is Platform.DOUYIN else _HuitunXhsAdapter
+        self._selected = adapter_type(self._explicit_mapping)
+        self.platform = self._selected.platform
+        return self._selected.mapping_for_headers(headers)
+
+    def adapt(self, raw_record: RawTabularRecord) -> AdaptedRow:
+        if self._selected is None:
+            self.mapping_for_headers(list(raw_record.values))
+        assert self._selected is not None
+        return self._selected.adapt(raw_record)
+
+    def validate_table(self, rows: list[RawTabularRecord]) -> None:
+        if self._selected is None:
+            raise ImportDomainError("MAPPING_INVALID", "Huitun adapter is not configured")
+        self._selected.validate_table(rows)
 
 
 class HuitunExcelAdapter(HuitunCsvAdapter):

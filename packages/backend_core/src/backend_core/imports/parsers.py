@@ -294,8 +294,25 @@ def _validate_xlsx_archive(content: bytes, limits: ParserLimits) -> None:
         raise ImportDomainError("INVALID_XLSX", "Workbook structure is invalid") from exc
 
 
+def _huitun_dimension_repair_needed(content: bytes, workbook: Workbook, worksheet: Any) -> bool:
+    """Recognize only Huitun's one-sheet stale ``A1`` dimension metadata."""
+
+    if len(workbook.worksheets) != 1 or worksheet.calculate_dimension() not in {"A1", "A1:A1"}:
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            sheet_xml = archive.read("xl/worksheets/sheet1.xml")
+    except (KeyError, ValueError, zipfile.BadZipFile):
+        return False
+    return re.search(rb'<c\b[^>]*\br="(?!A1")[A-Z]+[1-9][0-9]*"', sheet_xml) is not None
+
+
 def parse_xlsx(
-    content: bytes, declared_mime: str, limits: ParserLimits | None = None
+    content: bytes,
+    declared_mime: str,
+    limits: ParserLimits | None = None,
+    *,
+    repair_huitun_dimensions: bool = False,
 ) -> ParsedTable:
     active_limits = limits or ParserLimits()
     _validate_declared_mime(declared_mime, XLSX_MIME_TYPES)
@@ -310,6 +327,10 @@ def parse_xlsx(
         worksheet = workbook.active
         if worksheet is None:
             raise ImportDomainError("EMPTY_FILE", "Workbook has no active worksheet")
+        if repair_huitun_dimensions and _huitun_dimension_repair_needed(
+            content, workbook, worksheet
+        ):
+            worksheet.reset_dimensions()
         iterator = worksheet.iter_rows()
         first = next(iterator, None)
         if first is None:
@@ -392,9 +413,15 @@ def parse_table(
     file_type: StoredFileType,
     declared_mime: str,
     limits: ParserLimits,
+    repair_huitun_dimensions: bool = False,
 ) -> ParsedTable:
     if file_type == StoredFileType.CSV:
         return parse_csv(content, declared_mime, limits)
     if file_type == StoredFileType.XLSX:
-        return parse_xlsx(content, declared_mime, limits)
+        return parse_xlsx(
+            content,
+            declared_mime,
+            limits,
+            repair_huitun_dimensions=repair_huitun_dimensions,
+        )
     raise ImportDomainError("INVALID_FILE_TYPE", "Unsupported import file type")

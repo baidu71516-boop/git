@@ -107,6 +107,8 @@ class SourceAdapter(Protocol):
 
     def adapt(self, raw_record: RawTabularRecord) -> AdaptedRow: ...
 
+    def validate_table(self, rows: list[RawTabularRecord]) -> None: ...
+
 
 __all__ = [
     "AdaptedRow",
