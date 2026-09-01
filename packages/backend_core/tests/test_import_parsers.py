@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
+from backend_core.imports.adapters import HuitunExcelAdapter
 from backend_core.imports.enums import StoredFileType
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.parsers import (
@@ -19,6 +20,51 @@ from backend_core.imports.parsers import (
 )
 from backend_core.imports.storage import LocalStorageAdapter
 from openpyxl import Workbook
+from openpyxl.worksheet._read_only import ReadOnlyWorksheet
+
+HUITUN_DOUYIN_41_HEADERS = [
+    "播主昵称",
+    "抖音号",
+    "分类",
+    "带货等级",
+    "所属MCN",
+    "企业认证信息",
+    "个人认证信息",
+    "简介",
+    "省份",
+    "城市",
+    "内容标签",
+    "橱窗",
+    "粉丝数",
+    "作品数",
+    "点赞数",
+    "带货额",
+    "新增粉丝",
+    "平均点赞",
+    "总直播场次",
+    "直播场次（带货）",
+    "团购直播场次（带货）",
+    "总平均场观",
+    "平均场观（带货）",
+    "总平均销售额",
+    "平均销售额（带货）",
+    "平均销售额（团购）",
+    "总销售额",
+    "销售额（带货）",
+    "销售额（团购）",
+    "总平均UV价值",
+    "总平均直播GPM",
+    "达人主页链接",
+    "图文作品数",
+    "图文平均点赞数",
+    "图文平均销售额",
+    "视频作品数",
+    "视频平均点赞数",
+    "视频平均销售额",
+    "视频平均gpm",
+    "图文平均gpm",
+    "带货类目",
+]
 
 
 def assert_import_error(error: ImportDomainError, code: str) -> None:
@@ -61,6 +107,13 @@ def replace_zip_entry(content: bytes, name: str, payload: bytes) -> bytes:
         for entry in existing.infolist():
             rewritten.writestr(entry, payload if entry.filename == name else existing.read(entry))
     return output.getvalue()
+
+
+def remove_worksheet_dimension(content: bytes) -> bytes:
+    sheet_xml = zipfile.ZipFile(io.BytesIO(content)).read("xl/worksheets/sheet1.xml")
+    unsized_xml, replacements = re.subn(rb"<dimension[^>]*/>", b"", sheet_xml, count=1)
+    assert replacements == 1
+    return replace_zip_entry(content, "xl/worksheets/sheet1.xml", unsized_xml)
 
 
 async def chunks(*values: bytes) -> AsyncIterator[bytes]:
@@ -267,6 +320,68 @@ def test_huitun_dimension_repair_leaves_normal_and_genuine_a1_workbooks_unchange
             repair_huitun_dimensions=True,
         )
     assert genuine_a1.value.code == "NO_DATA_ROWS"
+
+
+def test_huitun_dimension_repair_recovers_openpyxl_unsized_douyin_workbook() -> None:
+    values = {header: "--" for header in HUITUN_DOUYIN_41_HEADERS}
+    values.update(
+        {
+            "播主昵称": "脱敏抖音达人",
+            "抖音号": "douyin-handle",
+            "分类": "美食",
+            "达人主页链接": "https://www.douyin.com/user/profile-token",
+            "带货类目": "食品饮料",
+        }
+    )
+    unsized = remove_worksheet_dimension(
+        make_xlsx(HUITUN_DOUYIN_41_HEADERS, [values[header] for header in HUITUN_DOUYIN_41_HEADERS])
+    )
+
+    unrepaired = parse_xlsx(
+        unsized, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    table = parse_xlsx(
+        unsized,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        repair_huitun_dimensions=True,
+    )
+
+    assert unrepaired == table
+    assert table.headers == HUITUN_DOUYIN_41_HEADERS
+    assert len(table.rows) == 1
+    adapter = HuitunExcelAdapter()
+    mapping = adapter.mapping_for_headers(table.headers)
+    assert mapping["播主昵称"] == "nickname"
+    assert mapping["抖音号"] == "account_handle"
+    assert mapping["达人主页链接"] == "profile_url"
+    adapter.validate_table(table.rows)
+    assert adapter.adapt(table.rows[0]).is_valid
+
+
+def test_huitun_dimension_repair_does_not_swallow_unrelated_dimension_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_called = False
+
+    def raise_unrelated_value_error(_: ReadOnlyWorksheet) -> str:
+        raise ValueError("unexpected dimension failure")
+
+    def record_reset(_: ReadOnlyWorksheet) -> None:
+        nonlocal reset_called
+        reset_called = True
+
+    monkeypatch.setattr(ReadOnlyWorksheet, "calculate_dimension", raise_unrelated_value_error)
+    monkeypatch.setattr(ReadOnlyWorksheet, "reset_dimensions", record_reset)
+
+    with pytest.raises(ImportDomainError) as caught:
+        parse_xlsx(
+            make_xlsx(["name"], ["Alpha"]),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            repair_huitun_dimensions=True,
+        )
+
+    assert_import_error(caught.value, "INVALID_XLSX")
+    assert not reset_called
 
 
 def test_xlsx_rejects_formula_header() -> None:

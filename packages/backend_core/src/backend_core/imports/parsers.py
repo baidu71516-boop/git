@@ -55,6 +55,7 @@ UNSAFE_ARCHIVE_MARKERS = (
     "vbaproject",
     "webextensions",
 )
+_OPENPYXL_UNSIZED_WORKSHEET = "Worksheet is unsized, use calculate_dimension(force=True)"
 
 
 @dataclass(frozen=True)
@@ -297,7 +298,15 @@ def _validate_xlsx_archive(content: bytes, limits: ParserLimits) -> None:
 def _huitun_dimension_repair_needed(content: bytes, workbook: Workbook, worksheet: Any) -> bool:
     """Recognize only Huitun's one-sheet stale ``A1`` dimension metadata."""
 
-    if len(workbook.worksheets) != 1 or worksheet.calculate_dimension() not in {"A1", "A1:A1"}:
+    if len(workbook.worksheets) != 1:
+        return False
+    try:
+        declared_dimension = worksheet.calculate_dimension()
+    except ValueError as exc:
+        if str(exc) != _OPENPYXL_UNSIZED_WORKSHEET:
+            raise
+        declared_dimension = None
+    if declared_dimension not in {None, "A1", "A1:A1"}:
         return False
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
