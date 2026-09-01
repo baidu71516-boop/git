@@ -21,6 +21,9 @@ from backend_core.auth.enums import Role
 from backend_core.config import get_settings
 from backend_core.content_activity.schemas import (
     ContentActivityRefreshRequestPublic,
+    DouyinRuntimeCaptureIngestInput,
+    DouyinRuntimeCaptureIngestPublic,
+    DouyinRuntimeCaptureLaunchPublic,
     XhsIdentityResolutionPublic,
 )
 from backend_core.content_activity.service import ContentActivityError
@@ -34,6 +37,7 @@ IDENTITY_ID = UUID("00000000-0000-0000-0000-000000000805")
 VERIFICATION_ID = UUID("00000000-0000-0000-0000-000000000806")
 REQUEST_TOKEN = UUID("00000000-0000-0000-0000-000000000807")
 SECOND_REQUEST_TOKEN = UUID("00000000-0000-0000-0000-000000000808")
+CAPTURE_REQUEST_ID = UUID("00000000-0000-4000-8000-000000000809")
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
@@ -56,6 +60,8 @@ class FakeContentActivityService:
     def __init__(self) -> None:
         self.identity_calls: list[dict[str, object]] = []
         self.refresh_calls: list[dict[str, object]] = []
+        self.capture_launch_calls: list[dict[str, object]] = []
+        self.capture_ingest_calls: list[dict[str, object]] = []
 
     async def resolve_xhs_identity(self, **kwargs: object) -> XhsIdentityResolutionPublic:
         self.identity_calls.append(kwargs)
@@ -87,6 +93,27 @@ class FakeContentActivityService:
                 max_attempts=3,
                 requested_at=NOW,
             ),
+        )
+
+    async def create_douyin_runtime_capture(
+        self, **kwargs: object
+    ) -> DouyinRuntimeCaptureLaunchPublic:
+        self.capture_launch_calls.append(kwargs)
+        return DouyinRuntimeCaptureLaunchPublic(
+            capture_request_id=CAPTURE_REQUEST_ID,
+            capture_token="capture-token-for-http-contract-only-000000",
+            expires_at=NOW,
+            ingest_path="/api/v1/admin/content-activity/douyin/runtime-captures/ingest",
+        )
+
+    async def ingest_douyin_runtime_capture(
+        self, **kwargs: object
+    ) -> DouyinRuntimeCaptureIngestPublic:
+        self.capture_ingest_calls.append(kwargs)
+        return DouyinRuntimeCaptureIngestPublic(
+            capture_request_id=CAPTURE_REQUEST_ID,
+            observation_id=IDENTITY_ID,
+            outcome="ACCEPTED",
         )
 
 
@@ -136,6 +163,7 @@ def test_content_activity_openapi_declares_admin_csrf_and_idempotency_headers() 
     for path in (
         "/api/v1/admin/content-activity/xiaohongshu/identities/resolve",
         "/api/v1/admin/content-activity/xiaohongshu/refreshes",
+        "/api/v1/admin/content-activity/douyin/runtime-captures",
     ):
         operation = document["paths"][path]["post"]
         headers = {
@@ -384,3 +412,97 @@ def test_content_activity_dispatcher_publishes_exactly_one_uuid_only_message() -
         queue="analytics",
         retry=False,
     )
+
+
+def test_douyin_runtime_capture_launch_requires_admin_session_but_not_provider_enablement() -> None:
+    async def scenario() -> None:
+        service = FakeContentActivityService()
+        dispatcher = FakeDispatcher()
+        _install_overrides(context=_context(), service=service, dispatcher=dispatcher)
+        settings = get_settings()
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                missing_csrf = await client.post(
+                    "/api/v1/admin/content-activity/douyin/runtime-captures",
+                    json={"platform_account_id": str(ACCOUNT_ID)},
+                    headers={"Idempotency-Key": "douyin-capture-key"},
+                )
+                _assert_error(missing_csrf, status_code=403, code="CSRF_FAILED")
+                assert service.capture_launch_calls == []
+
+                client.cookies.set(settings.csrf_cookie_name, "content-activity-csrf")
+                accepted = await client.post(
+                    "/api/v1/admin/content-activity/douyin/runtime-captures",
+                    json={"platform_account_id": str(ACCOUNT_ID)},
+                    headers={
+                        "X-CSRF-Token": "content-activity-csrf",
+                        "Idempotency-Key": "douyin-capture-key",
+                        "User-Agent": "content-activity-http-test",
+                    },
+                )
+                assert accepted.status_code == 201
+                assert accepted.json()["data"]["capture_request_id"] == str(CAPTURE_REQUEST_ID)
+                assert service.capture_launch_calls == [
+                    {
+                        "platform_account_id": ACCOUNT_ID,
+                        "idempotency_key": "douyin-capture-key",
+                        "operator_id": OPERATOR_ID,
+                        "department_id": DEPARTMENT_ID,
+                        "ip": "127.0.0.1",
+                        "user_agent": "content-activity-http-test",
+                    }
+                ]
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
+def test_douyin_runtime_ingest_is_capability_only_and_rejects_raw_payload_fields() -> None:
+    async def scenario() -> None:
+        service = FakeContentActivityService()
+        dispatcher = FakeDispatcher()
+        _install_overrides(context=_context(), service=service, dispatcher=dispatcher)
+        payload = {
+            "capture_request_id": str(CAPTURE_REQUEST_ID),
+            "runtime_request_id": "runtime-http-1",
+            "outcome": "SUCCESS",
+            "actual_uid": "huitun-uid-http",
+            "semantic_uid": "huitun-uid-http",
+            "publications": [{"published_at": "2026-08-13T09:57:52Z"}],
+            "pagination_terminal": True,
+            "coverage_end_at": "2026-08-23T12:00:00Z",
+        }
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                accepted = await client.post(
+                    "/api/v1/admin/content-activity/douyin/runtime-captures/ingest",
+                    json=payload,
+                    headers={"X-Content-Activity-Capture-Token": "bridge-token-not-huitun"},
+                )
+                assert accepted.status_code == 200
+                assert accepted.json()["data"] == {
+                    "capture_request_id": str(CAPTURE_REQUEST_ID),
+                    "observation_id": str(IDENTITY_ID),
+                    "outcome": "ACCEPTED",
+                }
+                assert len(service.capture_ingest_calls) == 1
+                ingest_call = service.capture_ingest_calls[0]
+                assert ingest_call["capture_token"] == "bridge-token-not-huitun"
+                parsed = ingest_call["payload"]
+                assert isinstance(parsed, DouyinRuntimeCaptureIngestInput)
+                assert parsed.actual_uid == "huitun-uid-http"
+
+                rejected_raw = await client.post(
+                    "/api/v1/admin/content-activity/douyin/runtime-captures/ingest",
+                    json={**payload, "raw_encrypted_envelope": "never-accepted"},
+                    headers={"X-Content-Activity-Capture-Token": "bridge-token-not-huitun"},
+                )
+                assert rejected_raw.status_code == 422
+                assert len(service.capture_ingest_calls) == 1
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())

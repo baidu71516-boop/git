@@ -5,6 +5,7 @@ from enum import StrEnum
 
 class Platform(StrEnum):
     XIAOHONGSHU = "xiaohongshu"
+    DOUYIN = "douyin"
 
 
 class DataSource(StrEnum):

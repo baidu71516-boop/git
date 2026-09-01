@@ -86,6 +86,9 @@ class TargetingReasonCode(StrEnum):
     LONG_INACTIVITY_GREY_DOLPHIN_MATCH = "LONG_INACTIVITY_GREY_DOLPHIN_MATCH"
     LONG_INACTIVITY_GREY_DOLPHIN_RECENT = "LONG_INACTIVITY_GREY_DOLPHIN_RECENT"
     LONG_INACTIVITY_GREY_DOLPHIN_STALE = "LONG_INACTIVITY_GREY_DOLPHIN_STALE"
+    LONG_INACTIVITY_HUITUN_MATCH = "LONG_INACTIVITY_HUITUN_MATCH"
+    LONG_INACTIVITY_HUITUN_RECENT = "LONG_INACTIVITY_HUITUN_RECENT"
+    LONG_INACTIVITY_HUITUN_STALE = "LONG_INACTIVITY_HUITUN_STALE"
     LONG_INACTIVITY_UNKNOWN = "LONG_INACTIVITY_UNKNOWN"
     NO_COMPARISON_RULE = "NO_COMPARISON_RULE"
     NO_CURRENT_CONTACT = "NO_CURRENT_CONTACT"
@@ -214,11 +217,33 @@ class ContentActivityFact(FrozenTargetingContract):
     # is unorderable evidence.  The repository preserves this cardinality so
     # targeting never picks a UUID-sorted winner and treats it as current.
     latest_attempt_same_instant_count: int | None = Field(default=None, ge=1)
+    # Huitun runtime evidence is intentionally separate from trusted current
+    # public Content Activity. It can support the frozen Douyin V1 business
+    # rule, but it must never be reclassified as CURRENT_PUBLIC_VISIBLE.
+    huitun_observation_id: UUID | None = None
+    huitun_observed_at: datetime | None = None
+    huitun_observation_status: ContentActivityObservationStatus | None = None
+    huitun_coverage_status: ContentActivityCoverageStatus | None = None
+    huitun_activity_result: ContentActivityResult | None = None
+    huitun_last_publication_at: datetime | None = None
+    huitun_coverage_start_at: datetime | None = None
+    huitun_coverage_end_at: datetime | None = None
+    huitun_latest_observation_id: UUID | None = None
+    huitun_latest_observed_at: datetime | None = None
+    huitun_latest_observation_status: ContentActivityObservationStatus | None = None
+    huitun_latest_coverage_status: ContentActivityCoverageStatus | None = None
+    huitun_latest_activity_result: ContentActivityResult | None = None
+    huitun_latest_same_instant_count: int | None = Field(default=None, ge=1)
 
     @field_validator(
         "trusted_observed_at",
         "last_publication_at",
         "latest_attempt_observed_at",
+        "huitun_observed_at",
+        "huitun_last_publication_at",
+        "huitun_coverage_start_at",
+        "huitun_coverage_end_at",
+        "huitun_latest_observed_at",
     )
     @classmethod
     def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
@@ -1037,6 +1062,211 @@ def _content_activity_evaluation(
     )
 
 
+def _huitun_runtime_unknown(
+    *,
+    configured: LongInactivityConstraint,
+    fact: ContentActivityFact | None,
+    as_of: datetime | None,
+    reason_code: TargetingReasonCode = TargetingReasonCode.LONG_INACTIVITY_UNKNOWN,
+) -> CriterionEvaluation:
+    """Return one explicit unknown without upgrading returned-scope evidence.
+
+    The fields intentionally omit a synthetic last-publication timestamp.  In
+    particular, an encrypted envelope, auth failure, partial response, uid
+    mismatch, or stale semantic observation cannot flow into a duration.
+    """
+
+    return CriterionEvaluation(
+        criterion="long_inactivity",
+        result=TargetingEvaluationResult.UNKNOWN,
+        reason_code=reason_code,
+        configured={
+            "schema_version": configured.schema_version,
+            "minimum_inactive_days": configured.minimum_inactive_days,
+        },
+        observed={
+            "source": "HUITUN_DOUYIN_AWEME_LIST",
+            "precision": "UNKNOWN",
+            "as_of": as_of,
+            "observed_at": fact.huitun_observed_at if fact is not None else None,
+            "latest_attempt_observed_at": (
+                fact.huitun_latest_observed_at if fact is not None else None
+            ),
+            "last_publication_at": None,
+            "inactive_days": None,
+            "lower_bound_inactive_days": None,
+        },
+    )
+
+
+def _huitun_douyin_inactivity_evaluation(
+    facts: CandidateFactBundle,
+    configured: LongInactivityConstraint,
+    *,
+    as_of: datetime | None,
+    freshness_policy: ContentActivityFreshnessPolicy,
+) -> CriterionEvaluation:
+    """Evaluate only a bound Huitun awemeList runtime semantic observation.
+
+    This evidence has a deliberately narrower visibility contract than
+    ``_content_activity_evaluation``. An exact semantic result can decide a
+    threshold; a confirmed empty current-ending range yields only a lower bound
+    and therefore may match but can never prove an account is recent.
+    """
+
+    fact = facts.content_activity
+    if facts.platform is not Platform.DOUYIN or fact is None:
+        return _huitun_runtime_unknown(configured=configured, fact=fact, as_of=as_of)
+    if as_of is None:
+        return _huitun_runtime_unknown(configured=configured, fact=fact, as_of=None)
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("Huitun runtime as_of must be timezone-aware")
+    evaluation_time = as_of.astimezone(UTC)
+    if fact.huitun_observation_id is None or fact.huitun_observed_at is None:
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    # A later (or concurrent same-instant) Huitun attempt is authoritative for
+    # fail-closed semantics. Do not let a retained older semantic success mask
+    # an encrypted/auth/partial/mismatched current attempt.
+    if (
+        fact.huitun_latest_observation_id is None
+        or fact.huitun_latest_observed_at is None
+        or fact.huitun_latest_same_instant_count != 1
+        or fact.huitun_latest_observed_at > fact.huitun_observed_at
+        or (
+            fact.huitun_latest_observed_at == fact.huitun_observed_at
+            and fact.huitun_latest_observation_id != fact.huitun_observation_id
+        )
+    ):
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    if (
+        fact.huitun_observation_status is not ContentActivityObservationStatus.COMPLETE
+        or fact.huitun_coverage_status
+        not in {
+            ContentActivityCoverageStatus.LATEST_BOUND_PROVEN,
+            ContentActivityCoverageStatus.LOOKBACK_BOUNDED,
+        }
+    ):
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    if not freshness_policy.is_current(fact.huitun_observed_at, evaluation_time):
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+            reason_code=TargetingReasonCode.LONG_INACTIVITY_HUITUN_STALE,
+        )
+    if (
+        fact.huitun_coverage_end_at is None
+        or fact.huitun_coverage_end_at > fact.huitun_observed_at
+        or fact.huitun_observed_at - fact.huitun_coverage_end_at > timedelta(minutes=5)
+    ):
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+
+    configured_document = {
+        "schema_version": configured.schema_version,
+        "minimum_inactive_days": configured.minimum_inactive_days,
+    }
+    common_observed = {
+        "source": "HUITUN_DOUYIN_AWEME_LIST",
+        "observed_at": fact.huitun_observed_at,
+        "latest_attempt_observed_at": fact.huitun_latest_observed_at,
+        "coverage_start_at": fact.huitun_coverage_start_at,
+        "coverage_end_at": fact.huitun_coverage_end_at,
+    }
+    if fact.huitun_activity_result is ContentActivityResult.PUBLICATION_FOUND:
+        publication = fact.huitun_last_publication_at
+        if publication is None or publication > evaluation_time:
+            return _huitun_runtime_unknown(
+                configured=configured,
+                fact=fact,
+                as_of=evaluation_time,
+            )
+        cutoff = evaluation_time - timedelta(days=configured.minimum_inactive_days)
+        matches = publication <= cutoff
+        return CriterionEvaluation(
+            criterion="long_inactivity",
+            result=(
+                TargetingEvaluationResult.MATCH if matches else TargetingEvaluationResult.NOT_MATCH
+            ),
+            reason_code=(
+                TargetingReasonCode.LONG_INACTIVITY_HUITUN_MATCH
+                if matches
+                else TargetingReasonCode.LONG_INACTIVITY_HUITUN_RECENT
+            ),
+            configured=configured_document,
+            observed={
+                "precision": "EXACT",
+                "as_of": evaluation_time,
+                "last_publication_at": publication,
+                "inactive_days": int(
+                    (evaluation_time - publication).total_seconds() // 86_400
+                ),
+                **common_observed,
+            },
+        )
+
+    if fact.huitun_activity_result is not ContentActivityResult.AT_LEAST_LOOKBACK_INACTIVE:
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    coverage_start_at = fact.huitun_coverage_start_at
+    coverage_end_at = fact.huitun_coverage_end_at
+    if (
+        coverage_start_at is None
+        or coverage_end_at is None
+        or coverage_start_at >= coverage_end_at
+        or coverage_end_at > evaluation_time
+        or coverage_end_at > fact.huitun_observed_at
+    ):
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    lower_bound_days = int((coverage_end_at - coverage_start_at).total_seconds() // 86_400)
+    if lower_bound_days < configured.minimum_inactive_days:
+        # A bounded empty range below the requested threshold cannot establish
+        # recency: older work may exist immediately before the range.
+        return _huitun_runtime_unknown(
+            configured=configured,
+            fact=fact,
+            as_of=evaluation_time,
+        )
+    return CriterionEvaluation(
+        criterion="long_inactivity",
+        result=TargetingEvaluationResult.MATCH,
+        reason_code=TargetingReasonCode.LONG_INACTIVITY_HUITUN_MATCH,
+        configured=configured_document,
+        observed={
+            "precision": "LOWER_BOUND",
+            "as_of": evaluation_time,
+            "last_publication_at": None,
+            "inactive_days": None,
+            "lower_bound_inactive_days": lower_bound_days,
+            **common_observed,
+        },
+    )
+
+
 def _long_inactivity_evaluation(
     facts: CandidateFactBundle,
     configured: LongInactivityConstraint,
@@ -1045,12 +1275,28 @@ def _long_inactivity_evaluation(
     content_activity_freshness_policy: ContentActivityFreshnessPolicy,
     grey_dolphin_activity_freshness_policy: GreyDolphinActivityFreshnessPolicy,
 ) -> CriterionEvaluation:
-    """Route exact cache first, then coarse Grey Dolphin business evidence.
+    """Route Huitun semantic evidence, exact cache, then coarse Grey Dolphin.
 
     Grey Dolphin is intentionally evaluated here rather than being copied into
     ``ContentActivityFact``: its aggregate notes counters can support only the
     frozen business conclusions below and never become a trusted-public fact.
     """
+
+    huitun = _huitun_douyin_inactivity_evaluation(
+        facts,
+        configured,
+        as_of=as_of,
+        freshness_policy=content_activity_freshness_policy,
+    )
+    # Once an account has a Huitun runtime attempt, its semantic state is the
+    # current source-specific truth. Incomplete, raw-encrypted, auth, uid, and
+    # runtime failures must remain UNKNOWN rather than falling through to a
+    # coarse aggregate that could hide the failure.
+    if (
+        facts.content_activity is not None
+        and facts.content_activity.huitun_latest_observation_id is not None
+    ):
+        return huitun
 
     exact = _content_activity_evaluation(
         facts,

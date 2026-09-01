@@ -9,6 +9,10 @@ from typing import Annotated, Any
 from backend_core.auth import AuthContext
 from backend_core.config import get_settings
 from backend_core.content_activity.schemas import (
+    DouyinRuntimeCaptureCreateInput,
+    DouyinRuntimeCaptureIngestInput,
+    DouyinRuntimeCaptureIngestPublic,
+    DouyinRuntimeCaptureLaunchPublic,
     XhsIdentityResolutionInput,
     XhsIdentityResolutionPublic,
     XhsRefreshCreateInput,
@@ -129,6 +133,64 @@ async def create_xiaohongshu_refreshes(
         except Exception:
             _log_dispatch_failure(str(refresh.request_token))
     return envelope(request, data=XhsRefreshCreateResult(requests=refreshes))
+
+
+@router.post(
+    "/douyin/runtime-captures",
+    status_code=status.HTTP_201_CREATED,
+    response_model=SuccessEnvelope[DouyinRuntimeCaptureLaunchPublic],
+    responses=error_responses(401, 403, 404, 409, 422),
+)
+async def create_douyin_runtime_capture(
+    payload: DouyinRuntimeCaptureCreateInput,
+    request: Request,
+    context: Annotated[AuthContext, Depends(require_super_admin)],
+    service: Annotated[ContentActivityService, Depends(get_content_activity_service)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> dict[str, Any]:
+    """Mint one account-scoped bridge token without making a provider call."""
+
+    result = await _service_call(
+        service.create_douyin_runtime_capture(
+            platform_account_id=payload.platform_account_id,
+            idempotency_key=require_single_idempotency_key(request, idempotency_key),
+            operator_id=context.operator.id if context.operator is not None else None,
+            department_id=context.department.id,
+            ip=get_client_ip(request),
+            user_agent=get_user_agent(request),
+        )
+    )
+    return envelope(request, data=result)
+
+
+@router.post(
+    "/douyin/runtime-captures/ingest",
+    response_model=SuccessEnvelope[DouyinRuntimeCaptureIngestPublic],
+    responses=error_responses(401, 409, 410, 422),
+)
+async def ingest_douyin_runtime_capture(
+    payload: DouyinRuntimeCaptureIngestInput,
+    request: Request,
+    service: Annotated[ContentActivityService, Depends(get_content_activity_service)],
+    capture_token: Annotated[
+        str | None,
+        Header(alias="X-Content-Activity-Capture-Token"),
+    ] = None,
+) -> dict[str, Any]:
+    """Accept a one-time, normalized local-browser result without session transfer.
+
+    This endpoint intentionally uses only its narrowly scoped bridge token;
+    it does not accept, read, or persist a Huitun cookie, Authorization header,
+    encrypted response body, or operator session material.
+    """
+
+    result = await _service_call(
+        service.ingest_douyin_runtime_capture(
+            capture_token=capture_token or "",
+            payload=payload,
+        )
+    )
+    return envelope(request, data=result)
 
 
 __all__ = ["get_content_activity_service", "router"]

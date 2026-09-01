@@ -74,6 +74,28 @@ def _content_activity_fact(**changes: object) -> ContentActivityFact:
     return ContentActivityFact.model_validate(values)
 
 
+def _huitun_runtime_fact(**changes: object) -> ContentActivityFact:
+    observation_id = uuid4()
+    values: dict[str, object] = {
+        "huitun_observation_id": observation_id,
+        "huitun_observed_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "huitun_observation_status": ContentActivityObservationStatus.COMPLETE,
+        "huitun_coverage_status": ContentActivityCoverageStatus.LATEST_BOUND_PROVEN,
+        "huitun_activity_result": ContentActivityResult.PUBLICATION_FOUND,
+        "huitun_last_publication_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=90),
+        "huitun_coverage_start_at": None,
+        "huitun_coverage_end_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "huitun_latest_observation_id": observation_id,
+        "huitun_latest_observed_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        "huitun_latest_observation_status": ContentActivityObservationStatus.COMPLETE,
+        "huitun_latest_coverage_status": ContentActivityCoverageStatus.LATEST_BOUND_PROVEN,
+        "huitun_latest_activity_result": ContentActivityResult.PUBLICATION_FOUND,
+        "huitun_latest_same_instant_count": 1,
+    }
+    values.update(changes)
+    return ContentActivityFact.model_validate(values)
+
+
 def _grey_dolphin_activity_fact(**changes: object) -> GreyDolphinActivityFact:
     values: dict[str, object] = {
         "observed_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
@@ -151,6 +173,142 @@ def test_long_inactivity_prefers_fresh_trusted_content_activity_over_grey_dolphi
     criterion = result.redacted_evidence["criteria"][0]
     assert criterion["observed"]["source"] == "TRUSTED_CONTENT_ACTIVITY"
     assert criterion["reason_code"] == "LONG_INACTIVITY_CACHE_RECENT"
+
+
+@pytest.mark.parametrize(
+    ("minimum", "inactive_days", "expected"),
+    [
+        (30, 29, TargetingEvaluationResult.NOT_MATCH),
+        (30, 30, TargetingEvaluationResult.MATCH),
+        (60, 59, TargetingEvaluationResult.NOT_MATCH),
+        (60, 60, TargetingEvaluationResult.MATCH),
+        (90, 89, TargetingEvaluationResult.NOT_MATCH),
+        (90, 90, TargetingEvaluationResult.MATCH),
+        (180, 179, TargetingEvaluationResult.NOT_MATCH),
+        (180, 180, TargetingEvaluationResult.MATCH),
+    ],
+)
+def test_huitun_runtime_exact_observation_uses_frozen_threshold_boundaries(
+    minimum: int,
+    inactive_days: int,
+    expected: TargetingEvaluationResult,
+) -> None:
+    result = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=minimum)),
+        _facts(
+            platform=Platform.DOUYIN,
+            content_activity=_huitun_runtime_fact(
+                huitun_last_publication_at=CONTENT_ACTIVITY_AS_OF
+                - timedelta(days=inactive_days)
+            ),
+            grey_dolphin_activity=_grey_dolphin_activity_fact(notes_7d=0, notes_60d=0),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is expected
+    criterion = result.redacted_evidence["criteria"][0]
+    assert criterion["observed"]["source"] == "HUITUN_DOUYIN_AWEME_LIST"
+    assert criterion["observed"]["precision"] == "EXACT"
+    assert criterion["observed"]["inactive_days"] == inactive_days
+
+
+def test_huitun_terminal_empty_range_can_match_only_a_proven_lower_bound() -> None:
+    observation_id = uuid4()
+    fact = _huitun_runtime_fact(
+        huitun_observation_id=observation_id,
+        huitun_coverage_status=ContentActivityCoverageStatus.LOOKBACK_BOUNDED,
+        huitun_activity_result=ContentActivityResult.AT_LEAST_LOOKBACK_INACTIVE,
+        huitun_last_publication_at=None,
+        huitun_coverage_start_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=60),
+        huitun_coverage_end_at=CONTENT_ACTIVITY_AS_OF,
+        huitun_latest_observation_id=observation_id,
+        huitun_observed_at=CONTENT_ACTIVITY_AS_OF,
+        huitun_latest_observed_at=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    matched = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=60)),
+        _facts(platform=Platform.DOUYIN, content_activity=fact),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+    unknown = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=90)),
+        _facts(platform=Platform.DOUYIN, content_activity=fact),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert matched.result is TargetingEvaluationResult.MATCH
+    matched_criterion = matched.redacted_evidence["criteria"][0]
+    assert matched_criterion["observed"]["precision"] == "LOWER_BOUND"
+    assert matched_criterion["observed"]["lower_bound_inactive_days"] == 60
+    assert matched_criterion["observed"]["last_publication_at"] is None
+    assert unknown.result is TargetingEvaluationResult.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("status", "coverage", "result"),
+    [
+        (
+            ContentActivityObservationStatus.RESULT_UNTRUSTED,
+            ContentActivityCoverageStatus.UNKNOWN,
+            ContentActivityResult.UNDETERMINED,
+        ),
+        (
+            ContentActivityObservationStatus.PROVIDER_AUTH_ERROR,
+            ContentActivityCoverageStatus.UNKNOWN,
+            ContentActivityResult.UNDETERMINED,
+        ),
+        (
+            ContentActivityObservationStatus.RESULT_INCOMPLETE,
+            ContentActivityCoverageStatus.INCOMPLETE,
+            ContentActivityResult.UNDETERMINED,
+        ),
+    ],
+)
+def test_huitun_raw_auth_or_partial_latest_attempt_is_unknown_and_cannot_fall_back_to_grey(
+    status: ContentActivityObservationStatus,
+    coverage: ContentActivityCoverageStatus,
+    result: ContentActivityResult,
+) -> None:
+    fact = ContentActivityFact(
+        huitun_latest_observation_id=uuid4(),
+        huitun_latest_observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=1),
+        huitun_latest_observation_status=status,
+        huitun_latest_coverage_status=coverage,
+        huitun_latest_activity_result=result,
+        huitun_latest_same_instant_count=1,
+    )
+    evaluation = evaluate_seller(
+        SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=30)),
+        _facts(
+            platform=Platform.DOUYIN,
+            content_activity=fact,
+            grey_dolphin_activity=_grey_dolphin_activity_fact(notes_7d=0, notes_60d=0),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert evaluation.result is TargetingEvaluationResult.UNKNOWN
+    criterion = evaluation.redacted_evidence["criteria"][0]
+    assert criterion["observed"]["source"] == "HUITUN_DOUYIN_AWEME_LIST"
+    assert criterion["observed"]["precision"] == "UNKNOWN"
+
+
+def test_huitun_stale_or_same_instant_conflicting_evidence_is_unknown() -> None:
+    stale = _huitun_runtime_fact(
+        huitun_observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=8),
+        huitun_latest_observed_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=8),
+    )
+    conflicting = _huitun_runtime_fact(huitun_latest_same_instant_count=2)
+
+    for fact in (stale, conflicting):
+        evaluation = evaluate_seller(
+            SellerTargetingPolicy(long_inactivity=LongInactivityConstraint(minimum_inactive_days=30)),
+            _facts(platform=Platform.DOUYIN, content_activity=fact),
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        )
+        assert evaluation.result is TargetingEvaluationResult.UNKNOWN
 
 
 @pytest.mark.parametrize(

@@ -102,6 +102,9 @@ class ContentActivityRepository:
         statement = (
             select(ContentActivityRefreshRequest)
             .where(
+                # A local runtime capture is held by its short-lived capability
+                # token, never by the XHS analytics worker/reconciler.
+                ContentActivityRefreshRequest.capture_token_digest.is_(None),
                 or_(
                     and_(
                         ContentActivityRefreshRequest.state.in_(

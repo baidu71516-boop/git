@@ -1,0 +1,9 @@
+{
+  "name": "huitun-douyin-inactivity-extension",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "test": "node --test tests/runtime-contract.test.mjs tests/popup-storage.test.mjs tests/service-worker-injection.test.mjs tests/page-main-resource-observer.test.mjs tests/page-main-semantic-hook.test.mjs tests/content-bridge-order.test.mjs",
+    "check": "node --check runtime-contract.js && node --check page-main.js && node --check content-bridge.js && node --check service-worker.js && node --check popup.js"
+  }
+}

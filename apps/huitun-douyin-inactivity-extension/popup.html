@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>灰豚抖音断更 V1</title>
+    <style>
+      body { width: 340px; margin: 0; padding: 16px; color: #1f2937; font: 13px/1.45 -apple-system, BlinkMacSystemFont, sans-serif; }
+      h1 { margin: 0 0 8px; font-size: 16px; }
+      p { margin: 6px 0; }
+      label { display: block; margin-top: 10px; font-weight: 600; }
+      input { box-sizing: border-box; width: 100%; margin-top: 4px; padding: 7px; border: 1px solid #cbd5e1; border-radius: 4px; }
+      button { width: 100%; margin-top: 12px; padding: 8px; border: 0; border-radius: 4px; color: white; background: #2563eb; cursor: pointer; }
+      button.secondary { background: #475569; }
+      #status { min-height: 36px; margin-top: 10px; padding: 8px; border-radius: 4px; background: #f1f5f9; white-space: pre-wrap; }
+      .note { color: #475569; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>灰豚抖音断更 V1</h1>
+    <p class="note">仅捕获已解密的 awemeList 语义结果。不要粘贴灰豚 Cookie、Authorization 或响应正文。</p>
+    <label for="ingest-url">后端 ingest URL</label>
+    <input id="ingest-url" type="url" autocomplete="off" placeholder="https://your-api/.../ingest" />
+    <label for="capture-request-id">Capture request ID</label>
+    <input id="capture-request-id" type="text" autocomplete="off" />
+    <label for="capture-token">一次性 capture token</label>
+    <input id="capture-token" type="password" autocomplete="off" />
+    <button id="arm">在当前灰豚页启动捕获</button>
+    <button id="retry" class="secondary" type="button">重试本会话内未送达结果</button>
+    <div id="status" role="status">未启动。</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

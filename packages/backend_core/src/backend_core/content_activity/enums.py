@@ -7,6 +7,7 @@ class ProviderAccountIdentityNamespace(StrEnum):
     """Canonical external-identity namespaces accepted by this migration."""
 
     XIAOHONGSHU_USERID = "xiaohongshu.userid"
+    DOUYIN_HUITUN_UID = "douyin.huitun_uid"
 
 
 class ProviderAccountIdentityVerificationState(StrEnum):
@@ -27,12 +28,14 @@ class ContentActivityProvider(StrEnum):
     """Registry keys for Content Activity source providers."""
 
     TIKHUB = "TIKHUB"
+    HUITUN_DOUYIN_AWEME_LIST = "HUITUN_DOUYIN_AWEME_LIST"
 
 
 class ContentActivitySemantics(StrEnum):
     """Business semantic represented by an observation."""
 
     CURRENT_PUBLIC_VISIBLE = "CURRENT_PUBLIC_VISIBLE"
+    HUITUN_RETURNED_SCOPE = "HUITUN_RETURNED_SCOPE"
 
 
 class ContentActivityObservationStatus(StrEnum):

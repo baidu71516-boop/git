@@ -12,6 +12,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+from hmac import compare_digest
+from secrets import token_urlsafe
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -45,6 +47,23 @@ from backend_core.content_activity.enums import (
     ProviderAccountIdentityVerificationOutcome,
     ProviderAccountIdentityVerificationState,
 )
+from backend_core.content_activity.huitun_douyin import (
+    HUITUN_DOUYIN_ADAPTER_VERSION,
+    HUITUN_DOUYIN_CAPABILITY_POLICY_VERSION,
+    HUITUN_DOUYIN_ENDPOINT,
+    HUITUN_DOUYIN_ENDPOINT_VERSION,
+    HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+    HUITUN_DOUYIN_IDENTITY_SOURCE,
+    HUITUN_DOUYIN_PROVENANCE_REF,
+    HUITUN_DOUYIN_PROVIDER_PRODUCT,
+    HUITUN_DOUYIN_PUBLICATION_KEY_NAMESPACE,
+    HUITUN_DOUYIN_RESPONSE_SCHEMA_VERSION,
+    HUITUN_DOUYIN_SOURCE_TIMEZONE,
+    HUITUN_DOUYIN_TIMESTAMP_ENCODING,
+    HUITUN_DOUYIN_VISIBILITY_POLICY_VERSION,
+    HuitunDouyinRuntimeAttempt,
+    normalize_douyin_runtime_capture,
+)
 from backend_core.content_activity.models import (
     ContentActivityObservation,
     ContentActivityProjection,
@@ -60,6 +79,9 @@ from backend_core.content_activity.projection import (
 from backend_core.content_activity.repository import ContentActivityRepository
 from backend_core.content_activity.schemas import (
     ContentActivityRefreshRequestPublic,
+    DouyinRuntimeCaptureIngestInput,
+    DouyinRuntimeCaptureIngestPublic,
+    DouyinRuntimeCaptureLaunchPublic,
     XhsIdentityResolutionPublic,
 )
 from backend_core.content_activity.tikhub_xhs import (
@@ -81,6 +103,7 @@ ENDPOINT_VERSION = "APP_V2"
 # A non-blocking, database-global slot enforces the frozen D1A one-call
 # concurrency even if more than one analytics worker process consumes the queue.
 PROVIDER_CALL_SLOT_LOCK_KEY = advisory_lock_key("content-activity:xhs-provider-call-slot:v1")
+DOUYIN_RUNTIME_CAPTURE_TTL = timedelta(minutes=10)
 
 
 class ContentActivityError(Exception):
@@ -517,6 +540,278 @@ class ContentActivityService:
         )
         await self.session.commit()
         return replacement, event
+
+    async def create_douyin_runtime_capture(
+        self,
+        *,
+        platform_account_id: UUID,
+        idempotency_key: str,
+        operator_id: UUID | None,
+        department_id: UUID | None,
+        ip: str,
+        user_agent: str,
+    ) -> DouyinRuntimeCaptureLaunchPublic:
+        """Create one short-lived, local-browser capture capability.
+
+        This is intentionally not a provider refresh.  It makes no Huitun or
+        TikHub request and remains available while all provider feature flags
+        are off.  Only a digest of the generated one-time bridge token enters
+        persistence.
+        """
+
+        try:
+            validate_idempotency_key(idempotency_key)
+        except ValueError as exc:
+            raise ContentActivityError(
+                422,
+                "IDEMPOTENCY_KEY_INVALID",
+                "Idempotency-Key is invalid",
+            ) from exc
+
+        now = await self._current_time()
+        try:
+            account = await self._require_douyin_account(platform_account_id, for_update=True)
+            stored_key = _scoped_idempotency_key(
+                "douyin-runtime-capture", account.id, idempotency_key
+            )
+            existing = await self._request_by_account_key(
+                account.id,
+                stored_key,
+                for_update=True,
+            )
+            if existing is not None:
+                # A raw one-time token is intentionally never persisted, so it
+                # cannot be replayed after the original response is lost.
+                raise ContentActivityError(
+                    409,
+                    "CAPTURE_TOKEN_ALREADY_ISSUED",
+                    "Create a new capture request after the prior token expires",
+                )
+            active = await self._active_request_for_account(account.id, for_update=True)
+            if active is not None:
+                if (
+                    active.capture_token_digest is not None
+                    and active.lease_expires_at is not None
+                    and _ledger_timestamp_utc(active.lease_expires_at) <= now
+                ):
+                    active.state = ContentActivityRefreshRequestState.FAILED
+                    active.finished_at = now
+                    active.lease_expires_at = None
+                    active.next_attempt_at = None
+                    active.last_error_code = "CAPTURE_EXPIRED"
+                    active.capture_token_digest = None
+                    self._audit_refresh_settlement(active, failed=True)
+                    await self.session.flush()
+                else:
+                    raise ContentActivityError(
+                        409,
+                        "CAPTURE_ALREADY_ACTIVE",
+                        "An active Content Activity request already exists for this account",
+                    )
+
+            capture_token = token_urlsafe(32)
+            expires_at = now + DOUYIN_RUNTIME_CAPTURE_TTL
+            request = ContentActivityRefreshRequest(
+                platform_account_id=account.id,
+                platform=Platform.DOUYIN,
+                requested_by_operator_id=operator_id,
+                request_token=uuid4(),
+                idempotency_key=stored_key,
+                state=ContentActivityRefreshRequestState.RUNNING,
+                attempt_count=1,
+                max_attempts=1,
+                next_attempt_at=None,
+                lease_generation=1,
+                lease_expires_at=expires_at,
+                started_at=now,
+                finished_at=None,
+                last_observation_id=None,
+                last_error_code=None,
+                capture_token_digest=sha256(capture_token.encode("utf-8")).hexdigest(),
+            )
+            self.session.add(request)
+            await self.session.flush()
+            AuditRepository(self.session).add(
+                action=AuditAction.CONTENT_ACTIVITY_REFRESH_REQUESTED,
+                result=AuditResult.SUCCESS,
+                department_id=department_id,
+                operator_id=operator_id,
+                ip=ip[:64],
+                user_agent=user_agent[:512],
+                entity_type="content_activity_refresh_request",
+                entity_id=request.id,
+                after={
+                    "platform_account_id": str(account.id),
+                    "request_token": str(request.request_token),
+                    "state": request.state.value,
+                    "capture_kind": "HUITUN_DOUYIN_RUNTIME",
+                },
+            )
+            await self.session.commit()
+            return DouyinRuntimeCaptureLaunchPublic(
+                capture_request_id=request.request_token,
+                capture_token=capture_token,
+                expires_at=expires_at,
+                ingest_path="/api/v1/admin/content-activity/douyin/runtime-captures/ingest",
+            )
+        except ContentActivityError:
+            await self.session.rollback()
+            raise
+        except IntegrityError as exc:
+            await self.session.rollback()
+            raise ContentActivityError(
+                409,
+                "CAPTURE_CONFLICT",
+                "Runtime capture request conflicts",
+            ) from exc
+
+    async def ingest_douyin_runtime_capture(
+        self,
+        *,
+        capture_token: str,
+        payload: DouyinRuntimeCaptureIngestInput,
+    ) -> DouyinRuntimeCaptureIngestPublic:
+        """Persist one extension-emitted semantic result under a single-use token."""
+
+        if not capture_token or len(capture_token) > 512:
+            raise ContentActivityError(401, "CAPTURE_TOKEN_INVALID", "Capture token is invalid")
+
+        # Resolve the account before taking any row lock so the authoritative
+        # order stays account -> request -> identity, matching the existing
+        # Content Activity write paths.
+        untrusted_request = await self._request_by_token(payload.capture_request_id)
+        if (
+            untrusted_request is None
+            or untrusted_request.capture_token_digest is None
+            or not compare_digest(
+                sha256(capture_token.encode("utf-8")).hexdigest(),
+                untrusted_request.capture_token_digest,
+            )
+        ):
+            await self.session.rollback()
+            raise ContentActivityError(401, "CAPTURE_TOKEN_INVALID", "Capture token is invalid")
+
+        account = await self.repository.get_platform_account(
+            untrusted_request.platform_account_id,
+            for_update=True,
+        )
+        request = await self._request_by_token(payload.capture_request_id, for_update=True)
+        if request is None or request.capture_token_digest is None:
+            await self.session.rollback()
+            raise ContentActivityError(
+                409,
+                "CAPTURE_REQUEST_MISMATCH",
+                "Capture request is unavailable",
+            )
+        if not compare_digest(
+            sha256(capture_token.encode("utf-8")).hexdigest(), request.capture_token_digest
+        ):
+            await self.session.rollback()
+            raise ContentActivityError(401, "CAPTURE_TOKEN_INVALID", "Capture token is invalid")
+
+        now = await self._current_time()
+        if request.state is not ContentActivityRefreshRequestState.RUNNING:
+            await self.session.rollback()
+            raise ContentActivityError(
+                409,
+                "CAPTURE_ALREADY_SETTLED",
+                "Capture request is already settled",
+            )
+        if (
+            request.lease_expires_at is None
+            or _ledger_timestamp_utc(request.lease_expires_at) <= now
+        ):
+            request.state = ContentActivityRefreshRequestState.FAILED
+            request.finished_at = now
+            request.lease_expires_at = None
+            request.next_attempt_at = None
+            request.last_error_code = "CAPTURE_EXPIRED"
+            request.capture_token_digest = None
+            self._audit_refresh_settlement(request, failed=True)
+            await self.session.commit()
+            raise ContentActivityError(410, "CAPTURE_EXPIRED", "Capture request expired")
+
+        if account is None or account.platform is not Platform.DOUYIN or not account.is_active:
+            attempt = _douyin_untrusted_attempt(
+                payload.actual_uid,
+                error_class=ContentActivityProviderErrorClass.POLICY_REJECTED,
+                error_code="ACCOUNT_NOT_PERMITTED",
+            )
+            identity = None
+            verification_id = None
+        else:
+            attempt = normalize_douyin_runtime_capture(payload, observed_at=now)
+            identity: ProviderAccountIdentity | None = None
+            verification_id: UUID | None = None
+            if attempt.is_accepted_semantic_result:
+                identity, verification_id = await self._bind_douyin_runtime_identity(
+                    account=account,
+                    uid=attempt.actual_uid,
+                    verified_at=now,
+                    request_token=request.request_token,
+                    operator_id=request.requested_by_operator_id,
+                )
+                if identity is None or verification_id is None:
+                    attempt = _douyin_untrusted_attempt(
+                        attempt.actual_uid,
+                        error_class=ContentActivityProviderErrorClass.IDENTITY_CONFLICT,
+                        error_code="IDENTITY_CONFLICT",
+                    )
+
+        observation = _douyin_observation_from_attempt(
+            account_id=request.platform_account_id,
+            identity_id=identity.id if identity is not None else None,
+            verification_id=verification_id,
+            attempt_started_at=(
+                _ledger_timestamp_utc(request.started_at)
+                if request.started_at is not None
+                else now
+            ),
+            request_token=request.request_token,
+            runtime_request_id=payload.runtime_request_id,
+            observed_at=now,
+            attempt=attempt,
+        )
+        self.session.add(observation)
+        await self.session.flush()
+        projection = await self.repository.get_projection(
+            request.platform_account_id,
+            for_update=True,
+        )
+        self.session.add(apply_observation(projection, observation))
+
+        request.last_observation_id = observation.id
+        request.finished_at = now
+        request.lease_expires_at = None
+        request.next_attempt_at = None
+        request.last_error_code = attempt.provider_error_code
+        # A settled capability can never be used again. Retain no
+        # authentication material—raw or digest—after its terminal audit and
+        # immutable observation have been recorded.
+        request.capture_token_digest = None
+        request.state = (
+            ContentActivityRefreshRequestState.SUCCEEDED
+            if (
+                attempt.is_accepted_semantic_result
+                and identity is not None
+                and verification_id is not None
+            )
+            else ContentActivityRefreshRequestState.FAILED
+        )
+        self._audit_refresh_settlement(
+            request,
+            failed=request.state is ContentActivityRefreshRequestState.FAILED,
+        )
+        await self.session.commit()
+        return DouyinRuntimeCaptureIngestPublic(
+            capture_request_id=request.request_token,
+            observation_id=observation.id,
+            outcome=(
+                "ACCEPTED"
+                if request.state is ContentActivityRefreshRequestState.SUCCEEDED
+                else "UNKNOWN"
+            ),
+        )
 
     async def create_xhs_refresh_requests(
         self,
@@ -988,6 +1283,130 @@ class ContentActivityService:
             )
         return account
 
+    async def _require_douyin_account(
+        self,
+        platform_account_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> InfluencerPlatformAccount:
+        account = await self.repository.get_platform_account(
+            platform_account_id,
+            for_update=for_update,
+        )
+        if account is None:
+            raise ContentActivityError(
+                404,
+                "PLATFORM_ACCOUNT_NOT_FOUND",
+                "Platform account was not found",
+            )
+        if account.platform is not Platform.DOUYIN or not account.is_active:
+            raise ContentActivityError(
+                422,
+                "DOUYIN_ACCOUNT_REQUIRED",
+                "An active Douyin account is required",
+            )
+        return account
+
+    async def _bind_douyin_runtime_identity(
+        self,
+        *,
+        account: InfluencerPlatformAccount,
+        uid: str | None,
+        verified_at: datetime,
+        request_token: UUID,
+        operator_id: UUID | None,
+    ) -> tuple[ProviderAccountIdentity | None, UUID | None]:
+        """Return the current matching uid binding, creating it only from capture evidence."""
+
+        if uid is None:
+            return None, None
+        current = await self.repository.get_current_identity(
+            platform_account_id=account.id,
+            namespace=ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
+            for_update=True,
+        )
+        if current is not None:
+            if (
+                current.opaque_external_identity != uid
+                or current.platform is not Platform.DOUYIN
+                or current.identity_source != HUITUN_DOUYIN_IDENTITY_SOURCE
+                or current.resolver_contract_version != HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION
+            ):
+                return None, None
+            verification_id = await self._latest_douyin_runtime_verification_id(current.id)
+            return current, verification_id
+
+        # The capture request is already account-scoped and authenticated with a
+        # one-time digest.  The opaque uid is taken only from the matching real
+        # awemeList request, never inferred from an internal account field.
+        binding = ProviderAccountIdentity(
+            platform_account_id=account.id,
+            platform=Platform.DOUYIN,
+            namespace=ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
+            opaque_external_identity=uid,
+            identity_source=HUITUN_DOUYIN_IDENTITY_SOURCE,
+            resolver_contract_version=HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+            verification_state=ProviderAccountIdentityVerificationState.VERIFIED_CURRENT,
+            resolved_at=verified_at,
+            verified_at=verified_at,
+            provenance_ref=f"huitun-runtime-capture:{request_token}",
+            lock_version=1,
+            superseded_at=None,
+            revoked_at=None,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(binding)
+                await self.session.flush()
+        except IntegrityError:
+            # The external uid may already be bound to another account, or a
+            # concurrent capture may have won this account's binding.  Do not
+            # reassign or guess: the caller persists an UNKNOWN attempt.
+            return None, None
+        verification = ProviderAccountIdentityVerification(
+            provider_account_identity_id=binding.id,
+            identity_source=HUITUN_DOUYIN_IDENTITY_SOURCE,
+            resolver_contract_version=HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+            verification_outcome=ProviderAccountIdentityVerificationOutcome.POLICY_VERIFIED,
+            verified_at=verified_at,
+            provenance_ref=HUITUN_DOUYIN_PROVENANCE_REF,
+            idempotency_key=f"douyin-runtime:{request_token}",
+        )
+        self.session.add(verification)
+        await self.session.flush()
+        await self._record_identity_verified(
+            account_id=account.id,
+            binding_id=binding.id,
+            operator_id=operator_id,
+            department_id=None,
+            ip="extension",
+            user_agent="huitun-douyin-runtime-capture",
+            namespace=ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
+        )
+        return binding, verification.id
+
+    async def _latest_douyin_runtime_verification_id(self, binding_id: UUID) -> UUID | None:
+        return cast(
+            UUID | None,
+            await self.session.scalar(
+                select(ProviderAccountIdentityVerification.id)
+                .where(
+                    ProviderAccountIdentityVerification.provider_account_identity_id == binding_id,
+                    ProviderAccountIdentityVerification.identity_source
+                    == HUITUN_DOUYIN_IDENTITY_SOURCE,
+                    ProviderAccountIdentityVerification.resolver_contract_version
+                    == HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+                    ProviderAccountIdentityVerification.verification_outcome
+                    == ProviderAccountIdentityVerificationOutcome.POLICY_VERIFIED,
+                )
+                .order_by(
+                    ProviderAccountIdentityVerification.verified_at.desc(),
+                    ProviderAccountIdentityVerification.id.desc(),
+                )
+                .limit(1)
+            ),
+        )
+
     def _require_provider_enabled(self) -> None:
         if not self._provider_enabled:
             raise ContentActivityError(
@@ -1186,6 +1605,9 @@ class ContentActivityService:
         department_id: UUID | None,
         ip: str,
         user_agent: str,
+        namespace: ProviderAccountIdentityNamespace = (
+            ProviderAccountIdentityNamespace.XIAOHONGSHU_USERID
+        ),
     ) -> None:
         AuditRepository(self.session).add(
             action=AuditAction.CONTENT_ACTIVITY_IDENTITY_VERIFIED,
@@ -1196,7 +1618,7 @@ class ContentActivityService:
             user_agent=user_agent[:512],
             entity_type="provider_account_identity",
             entity_id=binding_id,
-            after={"platform_account_id": str(account_id), "namespace": "xiaohongshu.userid"},
+            after={"platform_account_id": str(account_id), "namespace": namespace.value},
         )
 
     async def _record_identity_conflict(
@@ -1266,6 +1688,20 @@ def _scoped_idempotency_key(scope: str, account_id: UUID, key: str) -> str:
         ) from exc
     digest = sha256(f"{scope}:{account_id}:{key}".encode()).hexdigest()
     return f"{scope}:{digest}"
+
+
+def _ledger_timestamp_utc(value: datetime) -> datetime:
+    """Normalize an ORM timestamp for comparison without trusting client time.
+
+    PostgreSQL returns the model's timestamptz values aware. SQLite test
+    adapters return the same persisted UTC instants without tzinfo, so normalize
+    that storage representation at the ledger boundary instead of allowing a
+    naive/aware comparison to bypass expiry or crash a capture settlement.
+    """
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _is_policy_accepted_identity(binding: ProviderAccountIdentity) -> bool:
@@ -1385,6 +1821,89 @@ def _observation_from_attempt(
         scanned_item_count=attempt.item_count,
         provider_error_class=attempt.provider_error_class,
         provider_error_code=attempt.provider_error_code,
+    )
+
+
+def _douyin_observation_from_attempt(
+    *,
+    account_id: UUID,
+    identity_id: UUID | None,
+    verification_id: UUID | None,
+    attempt_started_at: datetime,
+    request_token: UUID,
+    runtime_request_id: str,
+    observed_at: datetime,
+    attempt: HuitunDouyinRuntimeAttempt,
+) -> ContentActivityObservation:
+    """Build an immutable returned-scope observation without provider payload data."""
+
+    is_publication = attempt.activity_result is ContentActivityResult.PUBLICATION_FOUND
+    return ContentActivityObservation(
+        platform_account_id=account_id,
+        platform=Platform.DOUYIN,
+        schema_version=1,
+        activity_semantics=ContentActivitySemantics.HUITUN_RETURNED_SCOPE,
+        provider_account_identity_id=identity_id,
+        provider_account_identity_verification_id=verification_id,
+        activity_source_provider=ContentActivityProvider.HUITUN_DOUYIN_AWEME_LIST,
+        provider_product=HUITUN_DOUYIN_PROVIDER_PRODUCT,
+        endpoint=HUITUN_DOUYIN_ENDPOINT,
+        endpoint_version=HUITUN_DOUYIN_ENDPOINT_VERSION,
+        adapter_version=HUITUN_DOUYIN_ADAPTER_VERSION,
+        capability_policy_version=HUITUN_DOUYIN_CAPABILITY_POLICY_VERSION,
+        response_schema_version=HUITUN_DOUYIN_RESPONSE_SCHEMA_VERSION,
+        visibility_policy_version=HUITUN_DOUYIN_VISIBILITY_POLICY_VERSION,
+        attempt_started_at=attempt_started_at.astimezone(UTC),
+        observed_at=observed_at.astimezone(UTC),
+        observation_status=attempt.observation_status,
+        coverage_status=attempt.coverage_status,
+        activity_result=attempt.activity_result,
+        last_publication_at=attempt.last_publication_at if is_publication else None,
+        latest_publication_id_namespace=(
+            HUITUN_DOUYIN_PUBLICATION_KEY_NAMESPACE if is_publication else None
+        ),
+        latest_publication_id=attempt.latest_publication_id if is_publication else None,
+        latest_publication_type=attempt.latest_publication_type if is_publication else None,
+        co_latest_publication_count=(
+            attempt.co_latest_publication_count if is_publication else None
+        ),
+        coverage_start_at=attempt.coverage_start_at,
+        coverage_end_at=attempt.coverage_end_at,
+        timestamp_encoding=HUITUN_DOUYIN_TIMESTAMP_ENCODING,
+        source_timezone=HUITUN_DOUYIN_SOURCE_TIMEZONE,
+        timezone_basis=HUITUN_DOUYIN_TIMESTAMP_ENCODING,
+        normalized_timezone="UTC",
+        request_ref=f"huitun-douyin-runtime:{request_token}:{runtime_request_id}",
+        provenance_ref=HUITUN_DOUYIN_PROVENANCE_REF,
+        scan_terminal_reason=attempt.terminal_reason,
+        scanned_page_count=1 if attempt.actual_uid is not None else 0,
+        scanned_item_count=attempt.scanned_item_count,
+        provider_error_class=attempt.provider_error_class,
+        provider_error_code=attempt.provider_error_code,
+    )
+
+
+def _douyin_untrusted_attempt(
+    actual_uid: str | None,
+    *,
+    error_class: ContentActivityProviderErrorClass,
+    error_code: str,
+) -> HuitunDouyinRuntimeAttempt:
+    return HuitunDouyinRuntimeAttempt(
+        actual_uid=actual_uid,
+        observation_status=ContentActivityObservationStatus.RESULT_UNTRUSTED,
+        coverage_status=ContentActivityCoverageStatus.UNKNOWN,
+        activity_result=ContentActivityResult.UNDETERMINED,
+        last_publication_at=None,
+        latest_publication_id=None,
+        latest_publication_type=None,
+        co_latest_publication_count=None,
+        coverage_start_at=None,
+        coverage_end_at=None,
+        terminal_reason=ContentActivityScanTerminalReason.RESPONSE_UNTRUSTED,
+        scanned_item_count=0,
+        provider_error_class=error_class,
+        provider_error_code=error_code,
     )
 
 

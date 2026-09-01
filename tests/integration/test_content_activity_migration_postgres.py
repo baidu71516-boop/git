@@ -45,6 +45,15 @@ XHS_ACTIVITY_ADAPTER_VERSION = "TIKHUB_XHS_CONTENT_ACTIVITY_ADAPTER_V1"
 XHS_ACTIVITY_CAPABILITY_POLICY_VERSION = "TIKHUB_CONTENT_ACTIVITY_CAPABILITY_POLICY_V1"
 XHS_ACTIVITY_RESPONSE_SCHEMA_VERSION = "TIKHUB_XHS_APP_V2_GET_USER_POSTED_NOTES_RESPONSE_SCHEMA_V1"
 XHS_ACTIVITY_VISIBILITY_POLICY_VERSION = "TIKHUB_XHS_APP_V2_CURRENT_PUBLIC_VISIBILITY_POLICY_V1"
+HUITUN_IDENTITY_SOURCE = "HUITUN_DOUYIN_AWEME_LIST_RUNTIME_CAPTURE"
+HUITUN_IDENTITY_CONTRACT_VERSION = "HUITUN_DOUYIN_AWEME_LIST_RUNTIME_SEMANTIC_V1"
+HUITUN_ACTIVITY_PRODUCT = "HUITUN_DOUYIN_AWEME_LIST"
+HUITUN_ACTIVITY_ENDPOINT = "/user/awemeList"
+HUITUN_ACTIVITY_ENDPOINT_VERSION = "RUNTIME_SEMANTIC_V1"
+HUITUN_ACTIVITY_ADAPTER_VERSION = "HUITUN_DOUYIN_RUNTIME_CAPTURE_ADAPTER_V1"
+HUITUN_ACTIVITY_CAPABILITY_POLICY_VERSION = "HUITUN_DOUYIN_RUNTIME_CAPTURE_POLICY_V1"
+HUITUN_ACTIVITY_RESPONSE_SCHEMA_VERSION = "HUITUN_DOUYIN_AWEME_LIST_SEMANTIC_SCHEMA_V1"
+HUITUN_ACTIVITY_VISIBILITY_POLICY_VERSION = "HUITUN_DOUYIN_RETURNED_SCOPE_POLICY_V1"
 
 
 def _test_database_url() -> URL:
@@ -165,6 +174,34 @@ def _seed_account(connection: Connection, *, label: str) -> tuple[UUID, UUID]:
     return influencer_id, account_id
 
 
+def _seed_douyin_account(connection: Connection, *, label: str) -> tuple[UUID, UUID]:
+    influencer_id = uuid4()
+    account_id = uuid4()
+    connection.execute(
+        text("INSERT INTO influencers (id, display_name) VALUES (:id, :display_name)"),
+        {"id": influencer_id, "display_name": f"Douyin Content Activity {label}"},
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO influencer_platform_accounts (
+                id, influencer_id, platform, platform_account_id, account_name, source
+            ) VALUES (
+                :id, :influencer_id, 'douyin'::platform_enum,
+                :platform_account_id, :account_name, 'manual'::data_source
+            )
+            """
+        ),
+        {
+            "id": account_id,
+            "influencer_id": influencer_id,
+            "platform_account_id": f"douyin-account-{label}",
+            "account_name": f"Douyin Content Activity {label}",
+        },
+    )
+    return influencer_id, account_id
+
+
 def _insert_identity(
     connection: Connection,
     *,
@@ -225,6 +262,135 @@ def _insert_identity(
         },
     )
     return identity_id, verification_id
+
+
+def _insert_huitun_douyin_identity(
+    connection: Connection,
+    *,
+    account_id: UUID,
+    external_uid: str,
+) -> tuple[UUID, UUID]:
+    identity_id = uuid4()
+    verification_id = uuid4()
+    now = datetime(2026, 8, 23, tzinfo=UTC)
+    connection.execute(
+        text(
+            """
+            INSERT INTO provider_account_identities (
+                id, platform_account_id, platform, namespace, opaque_external_identity,
+                identity_source, resolver_contract_version, verification_state,
+                resolved_at, verified_at, provenance_ref, lock_version
+            ) VALUES (
+                :id, :platform_account_id, 'douyin'::platform_enum,
+                'douyin.huitun_uid'::provider_account_identity_namespace,
+                :opaque_external_identity, :identity_source, :resolver_contract_version,
+                'VERIFIED_CURRENT'::provider_account_identity_verification_state,
+                :resolved_at, :verified_at, 'huitun-runtime-fixture', 1
+            )
+            """
+        ),
+        {
+            "id": identity_id,
+            "platform_account_id": account_id,
+            "opaque_external_identity": external_uid,
+            "identity_source": HUITUN_IDENTITY_SOURCE,
+            "resolver_contract_version": HUITUN_IDENTITY_CONTRACT_VERSION,
+            "resolved_at": now,
+            "verified_at": now,
+        },
+    )
+    connection.execute(
+        text(
+            """
+            INSERT INTO provider_account_identity_verifications (
+                id, provider_account_identity_id, identity_source, resolver_contract_version,
+                verification_outcome, verified_at, provenance_ref, idempotency_key
+            ) VALUES (
+                :id, :provider_account_identity_id, :identity_source, :resolver_contract_version,
+                'POLICY_VERIFIED'::provider_account_identity_verification_outcome,
+                :verified_at, 'huitun-runtime-fixture', :idempotency_key
+            )
+            """
+        ),
+        {
+            "id": verification_id,
+            "provider_account_identity_id": identity_id,
+            "identity_source": HUITUN_IDENTITY_SOURCE,
+            "resolver_contract_version": HUITUN_IDENTITY_CONTRACT_VERSION,
+            "verified_at": now,
+            "idempotency_key": f"huitun-fixture-{identity_id}",
+        },
+    )
+    return identity_id, verification_id
+
+
+def _insert_complete_huitun_observation(
+    connection: Connection,
+    *,
+    account_id: UUID,
+    identity_id: UUID,
+    verification_id: UUID,
+    coverage_status: str = "LATEST_BOUND_PROVEN",
+) -> UUID:
+    observation_id = uuid4()
+    observed_at = datetime(2026, 8, 23, tzinfo=UTC)
+    connection.execute(
+        text(
+            """
+            INSERT INTO content_activity_observations (
+                id, platform_account_id, platform, schema_version, activity_semantics,
+                provider_account_identity_id, provider_account_identity_verification_id,
+                activity_source_provider, provider_product, endpoint, endpoint_version,
+                adapter_version, capability_policy_version, response_schema_version,
+                visibility_policy_version, attempt_started_at, observed_at,
+                observation_status, coverage_status, activity_result, last_publication_at,
+                latest_publication_id_namespace, latest_publication_id, latest_publication_type,
+                co_latest_publication_count, coverage_start_at, coverage_end_at,
+                timestamp_encoding, source_timezone, timezone_basis, normalized_timezone,
+                request_ref, provenance_ref, scan_terminal_reason, scanned_page_count,
+                scanned_item_count
+            ) VALUES (
+                :id, :platform_account_id, 'douyin'::platform_enum, 1,
+                'HUITUN_RETURNED_SCOPE'::content_activity_semantics,
+                :identity_id, :verification_id,
+                'HUITUN_DOUYIN_AWEME_LIST'::content_activity_provider, :provider_product,
+                :endpoint, :endpoint_version, :adapter_version, :capability_policy_version,
+                :response_schema_version, :visibility_policy_version,
+                :attempt_started_at, :observed_at,
+                'COMPLETE'::content_activity_observation_status,
+                CAST(:coverage_status AS content_activity_coverage_status),
+                'PUBLICATION_FOUND'::content_activity_result, :last_publication_at,
+                'huitun.douyin.aweme_list.timestamp.v1', :latest_publication_id,
+                'OTHER'::content_activity_publication_type, 1, NULL, :coverage_end_at,
+                'HUITUN_PUBLISH_TIME_ASIA_SHANGHAI', 'Asia/Shanghai',
+                'HUITUN_PUBLISH_TIME_ASIA_SHANGHAI', 'UTC',
+                :request_ref, 'huitun-runtime-fixture',
+                'SINGLE_RESPONSE_COMPLETE'::content_activity_scan_terminal_reason, 1, 1
+            )
+            """
+        ),
+        {
+            "id": observation_id,
+            "platform_account_id": account_id,
+            "identity_id": identity_id,
+            "verification_id": verification_id,
+            "provider_product": HUITUN_ACTIVITY_PRODUCT,
+            "endpoint": HUITUN_ACTIVITY_ENDPOINT,
+            "endpoint_version": HUITUN_ACTIVITY_ENDPOINT_VERSION,
+            "adapter_version": HUITUN_ACTIVITY_ADAPTER_VERSION,
+            "capability_policy_version": HUITUN_ACTIVITY_CAPABILITY_POLICY_VERSION,
+            "response_schema_version": HUITUN_ACTIVITY_RESPONSE_SCHEMA_VERSION,
+            "visibility_policy_version": HUITUN_ACTIVITY_VISIBILITY_POLICY_VERSION,
+            "attempt_started_at": observed_at - timedelta(seconds=1),
+            "observed_at": observed_at,
+            "coverage_status": coverage_status,
+            "last_publication_at": observed_at - timedelta(days=60),
+            "latest_publication_id": "a" * 64,
+            "coverage_end_at": observed_at,
+            "request_ref": f"huitun-runtime-fixture:{observation_id}",
+        },
+    )
+    return observation_id
 
 
 def _insert_complete_observation(
@@ -386,11 +552,20 @@ def test_fresh_upgrade_physical_contract_and_alembic_check(
     migration_database.check()
 
     with migration_database.engine.connect() as connection:
-        assert _revision(connection) == "0008_content_activity_p0"
+        assert _revision(connection) == "0009_douyin_runtime_capture_v1"
         inspector = inspect(connection)
         assert CONTENT_ACTIVITY_TABLES <= set(inspector.get_table_names())
         assert _enum_values(connection, "provider_account_identity_namespace") == [
-            "xiaohongshu.userid"
+            "xiaohongshu.userid",
+            "douyin.huitun_uid",
+        ]
+        assert _enum_values(connection, "content_activity_provider") == [
+            "TIKHUB",
+            "HUITUN_DOUYIN_AWEME_LIST",
+        ]
+        assert _enum_values(connection, "content_activity_semantics") == [
+            "CURRENT_PUBLIC_VISIBLE",
+            "HUITUN_RETURNED_SCOPE",
         ]
         assert _enum_values(connection, "content_activity_observation_status") == [
             "COMPLETE",
@@ -521,7 +696,7 @@ def test_empty_migration_downgrade_removes_projection_guard_and_reupgrades(
     # migration must also be re-upgrade-safe after a practical empty rollback.
     migration_database.upgrade("head")
     with migration_database.engine.connect() as connection:
-        assert _revision(connection) == "0008_content_activity_p0"
+        assert _revision(connection) == "0009_douyin_runtime_capture_v1"
         assert CONTENT_ACTIVITY_TABLES <= set(inspect(connection).get_table_names())
 
 
@@ -766,6 +941,50 @@ def test_observation_append_only_and_projection_account_reference(
                     connection,
                     account_id=account_id,
                     observation_id=observation_id,
+                )
+
+
+def test_huitun_douyin_returned_scope_contract_is_complete_but_never_trusted_current(
+    migration_database: MigrationDatabase,
+) -> None:
+    migration_database.upgrade("head")
+    with migration_database.engine.begin() as connection:
+        _, account_id = _seed_douyin_account(connection, label="returned-scope")
+        identity_id, verification_id = _insert_huitun_douyin_identity(
+            connection,
+            account_id=account_id,
+            external_uid="huitun-runtime-uid-1",
+        )
+        observation_id = _insert_complete_huitun_observation(
+            connection,
+            account_id=account_id,
+            identity_id=identity_id,
+            verification_id=verification_id,
+        )
+        assert connection.scalar(
+            text(
+                "SELECT activity_semantics::text FROM content_activity_observations "
+                "WHERE id = :id"
+            ),
+            {"id": observation_id},
+        ) == "HUITUN_RETURNED_SCOPE"
+        # Returned-scope evidence is valid for the V1 business rule only. The
+        # existing trusted-current projection guard must not accept it.
+        with pytest.raises(DBAPIError):
+            with connection.begin_nested():
+                _insert_trusted_projection(
+                    connection,
+                    account_id=account_id,
+                    observation_id=observation_id,
+                )
+        with pytest.raises(DBAPIError):
+            with connection.begin_nested():
+                _insert_complete_huitun_observation(
+                    connection,
+                    account_id=account_id,
+                    identity_id=identity_id,
+                    verification_id=verification_id,
+                    coverage_status="FULL_CURRENT_PUBLIC_SET",
                 )
 
 

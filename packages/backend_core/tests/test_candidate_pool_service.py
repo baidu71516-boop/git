@@ -465,9 +465,10 @@ def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_histor
                     if "content_activity_observations" in statement.lower()
                     and statement.lstrip().upper().startswith("SELECT")
                 ]
-                # One latest-attempt and one trusted-current window query for
-                # the whole account batch; never a per-candidate history read.
-                assert len(activity_history_reads) == 2
+                # Latest/trusted XHS and latest/accepted returned-scope Huitun
+                # queries are each set-based for the whole account batch;
+                # never a per-candidate history read or provider call.
+                assert len(activity_history_reads) == 4
         finally:
             event.remove(engine.sync_engine, "before_cursor_execute", track_statement)
             await engine.dispose()

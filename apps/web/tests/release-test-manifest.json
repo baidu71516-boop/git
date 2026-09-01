@@ -202,6 +202,7 @@
     {
       "path": "apps/web/tests/candidate-long-inactivity-wording.test.ts",
       "tests": [
+        "Grey Dolphin Long Inactivity wording > distinguishes Huitun runtime exact, bounded, and unknown evidence",
         "Grey Dolphin Long Inactivity wording > does not convert recent aggregate evidence into a generic account update claim",
         "Grey Dolphin Long Inactivity wording > labels the aggregate as coarse note-publication evidence"
       ]
@@ -217,6 +218,17 @@
         "Candidate Pool API > posts only the two explicit historical and adjusted rerun shapes",
         "Candidate Pool API > posts the exact empty run body with CSRF and the supplied attempt key",
         "Candidate Pool API > submits server-resolved ALL_MATCH with only explicit exclusions"
+      ]
+    },
+    {
+      "path": "apps/web/tests/candidate-pool-authorability.test.ts",
+      "tests": [
+        "isAuthorableSellerTargetingPolicy > accepts a current string contact rule",
+        "isAuthorableSellerTargetingPolicy > accepts absent nullable fields",
+        "isAuthorableSellerTargetingPolicy > accepts an API round-trip nullable SELLER_V1",
+        "isAuthorableSellerTargetingPolicy > rejects an old object contact rule",
+        "isAuthorableSellerTargetingPolicy > rejects non-null content activity",
+        "isAuthorableSellerTargetingPolicy > rejects non-null long inactivity"
       ]
     },
     {

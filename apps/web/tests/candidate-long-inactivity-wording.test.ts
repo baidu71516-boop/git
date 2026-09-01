@@ -20,4 +20,29 @@ describe("Grey Dolphin Long Inactivity wording", () => {
       ),
     ).toBe("灰豚粗略判断：近7天检测到笔记");
   });
+
+  it("distinguishes Huitun runtime exact, bounded, and unknown evidence", () => {
+    expect(
+      criterionObservedValue(
+        { source: "HUITUN_DOUYIN_AWEME_LIST", precision: "EXACT", inactive_days: 60 },
+        "long_inactivity",
+      ),
+    ).toBe("灰豚运行时观测：断更 60 天");
+    expect(
+      criterionObservedValue(
+        {
+          source: "HUITUN_DOUYIN_AWEME_LIST",
+          precision: "LOWER_BOUND",
+          lower_bound_inactive_days: 30,
+        },
+        "long_inactivity",
+      ),
+    ).toBe("灰豚运行时观测：至少断更 30 天（已验证范围）");
+    expect(
+      criterionObservedValue(
+        { source: "HUITUN_DOUYIN_AWEME_LIST", precision: "UNKNOWN" },
+        "long_inactivity",
+      ),
+    ).toBe("断更状态：未知 · 灰豚运行时观测未形成可信结果");
+  });
 });

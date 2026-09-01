@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from backend_core.content_activity.enums import (
     ContentActivityCoverageStatus,
     ContentActivityObservationStatus,
@@ -37,6 +39,14 @@ def is_trusted_current_public(observation: ContentActivityObservation) -> bool:
             ContentActivityResult.NO_PUBLIC_CONTENT,
         }
     )
+
+
+def _projection_timestamp_utc(value: datetime) -> datetime:
+    """Compare persisted UTC timestamps safely across supported test adapters."""
+
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def apply_observation(
@@ -77,8 +87,11 @@ def apply_observation(
             co_latest_publication_count=None,
             version=1,
         )
-    elif observation.observed_at > projection.latest_attempt_observed_at or (
-        observation.observed_at == projection.latest_attempt_observed_at
+    elif _projection_timestamp_utc(observation.observed_at) > _projection_timestamp_utc(
+        projection.latest_attempt_observed_at
+    ) or (
+        _projection_timestamp_utc(observation.observed_at)
+        == _projection_timestamp_utc(projection.latest_attempt_observed_at)
         and not is_trusted_current_public(observation)
     ):
         # Equal trusted observations are intentionally not tie-broken.  Once
@@ -98,7 +111,8 @@ def apply_observation(
 
     if is_trusted_current_public(observation) and (
         projection.trusted_observed_at is None
-        or observation.observed_at > projection.trusted_observed_at
+        or _projection_timestamp_utc(observation.observed_at)
+        > _projection_timestamp_utc(projection.trusted_observed_at)
     ):
         projection.trusted_observation_id = observation.id
         projection.trusted_observed_at = observation.observed_at

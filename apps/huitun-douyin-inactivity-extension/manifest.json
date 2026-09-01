@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Huitun Douyin Inactivity Capture V1",
+  "version": "0.1.0",
+  "description": "Captures normalized, decoded Huitun awemeList semantics for Douyin inactivity V1 only.",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["https://*.huitun.com/*"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Huitun Douyin Inactivity V1",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.huitun.com/*"],
+      "js": ["content-bridge.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

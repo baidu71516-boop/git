@@ -1336,6 +1336,8 @@ class CandidatePoolService:
                 return result, LongInactivityEvidenceSource.UNKNOWN
             if source == LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY.value:
                 return result, LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY
+            if source == LongInactivityEvidenceSource.HUITUN_DOUYIN_AWEME_LIST.value:
+                return result, LongInactivityEvidenceSource.HUITUN_DOUYIN_AWEME_LIST
             if source == LongInactivityEvidenceSource.GREY_DOLPHIN.value:
                 return result, LongInactivityEvidenceSource.GREY_DOLPHIN
             raise ValueError("resolved long inactivity evidence source is invalid")

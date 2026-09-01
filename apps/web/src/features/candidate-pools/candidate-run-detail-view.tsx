@@ -308,6 +308,16 @@ export function criterionObservedValue(
       const inactiveDays = safeString(item.inactive_days);
       if (inactiveDays) return `断更 ${inactiveDays} 天 · 来源：API验证`;
     }
+    if (source === "HUITUN_DOUYIN_AWEME_LIST") {
+      const precision = safeString(item.precision);
+      const inactiveDays = safeString(item.inactive_days);
+      if (precision === "EXACT" && inactiveDays)
+        return `灰豚运行时观测：断更 ${inactiveDays} 天`;
+      const lowerBoundDays = safeString(item.lower_bound_inactive_days);
+      if (precision === "LOWER_BOUND" && lowerBoundDays)
+        return `灰豚运行时观测：至少断更 ${lowerBoundDays} 天（已验证范围）`;
+      return "断更状态：未知 · 灰豚运行时观测未形成可信结果";
+    }
     return "断更状态：未知";
   }
   return safeString(item.value ?? item.status) ?? "—";

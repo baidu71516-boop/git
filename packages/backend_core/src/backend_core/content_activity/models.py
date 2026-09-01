@@ -84,7 +84,8 @@ class ProviderAccountIdentity(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("lock_version >= 1", name="ck_provider_account_identity_lock_version"),
         CheckConstraint(
-            "platform = 'xiaohongshu' AND namespace = 'xiaohongshu.userid'",
+            "(platform = 'xiaohongshu' AND namespace = 'xiaohongshu.userid') OR "
+            "(platform = 'douyin' AND namespace = 'douyin.huitun_uid')",
             name="ck_provider_account_identity_platform_namespace",
         ),
         CheckConstraint(
@@ -662,6 +663,10 @@ class ContentActivityRefreshRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="ck_content_activity_refresh_request_error_code",
         ),
         CheckConstraint(
+            "capture_token_digest IS NULL OR length(capture_token_digest) = 64",
+            name="ck_content_activity_refresh_request_capture_token_digest",
+        ),
+        CheckConstraint(
             "(state IN ('PENDING', 'RETRY_WAIT') AND finished_at IS NULL "
             "AND lease_expires_at IS NULL AND next_attempt_at IS NOT NULL) OR "
             "(state = 'RUNNING' AND finished_at IS NULL "
@@ -726,3 +731,7 @@ class ContentActivityRefreshRequest(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_observation_id: Mapped[UUID | None] = mapped_column(nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Only a SHA-256 digest of an application-owned, single-use bridge token is
+    # retained. Huitun cookies, Authorization values, and browser session data
+    # are never written to this ledger.
+    capture_token_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)

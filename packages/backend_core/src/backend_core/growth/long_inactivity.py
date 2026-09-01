@@ -23,6 +23,7 @@ from backend_core.growth.targeting import (
 
 class LongInactivityEvidenceSource(StrEnum):
     TRUSTED_CONTENT_ACTIVITY = "TRUSTED_CONTENT_ACTIVITY"
+    HUITUN_DOUYIN_AWEME_LIST = "HUITUN_DOUYIN_AWEME_LIST"
     GREY_DOLPHIN = "GREY_DOLPHIN"
     UNKNOWN = "UNKNOWN"
 
@@ -121,7 +122,11 @@ async def execute_bounded_long_inactivity_enrichment(
 
     cache_resolved = sum(
         candidate.local_result is not TargetingEvaluationResult.UNKNOWN
-        and candidate.evidence_source is LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY
+        and candidate.evidence_source
+        in {
+            LongInactivityEvidenceSource.TRUSTED_CONTENT_ACTIVITY,
+            LongInactivityEvidenceSource.HUITUN_DOUYIN_AWEME_LIST,
+        }
         for candidate in ordered
     )
     grey_resolved = sum(

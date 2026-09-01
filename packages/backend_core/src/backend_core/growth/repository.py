@@ -17,8 +17,15 @@ from backend_core.auth.models import Operator
 from backend_core.content_activity.enums import (
     ContentActivityCoverageStatus,
     ContentActivityObservationStatus,
+    ContentActivityProvider,
     ContentActivityResult,
+    ContentActivitySemantics,
+    ProviderAccountIdentityNamespace,
     ProviderAccountIdentityVerificationState,
+)
+from backend_core.content_activity.huitun_douyin import (
+    HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+    HUITUN_DOUYIN_IDENTITY_SOURCE,
 )
 from backend_core.content_activity.models import ContentActivityObservation, ProviderAccountIdentity
 from backend_core.growth.enums import CandidatePoolKind, CandidateResult, Phase3AOperationScope
@@ -849,6 +856,56 @@ class CandidatePoolRepository:
             )
         ).all()
 
+        # Huitun is a returned-scope semantic evidence stream, never a
+        # trusted-current projection. Keep its latest attempt separate so a
+        # newer raw/encrypted/partial/auth failure overrides an older semantic
+        # success for the Douyin V1 rule without changing XHS semantics.
+        huitun_latest_ranked = (
+            select(
+                ContentActivityObservation.id.label("observation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ContentActivityObservation.platform_account_id,
+                    order_by=(
+                        ContentActivityObservation.observed_at.desc(),
+                        ContentActivityObservation.id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+                func.count()
+                .over(
+                    partition_by=(
+                        ContentActivityObservation.platform_account_id,
+                        ContentActivityObservation.observed_at,
+                    )
+                )
+                .label("same_instant_attempt_count"),
+            )
+            .where(
+                ContentActivityObservation.platform_account_id.in_(account_ids),
+                ContentActivityObservation.observed_at <= as_of_utc,
+                ContentActivityObservation.platform == Platform.DOUYIN,
+                ContentActivityObservation.activity_semantics
+                == ContentActivitySemantics.HUITUN_RETURNED_SCOPE,
+                ContentActivityObservation.activity_source_provider
+                == ContentActivityProvider.HUITUN_DOUYIN_AWEME_LIST,
+            )
+            .subquery()
+        )
+        huitun_latest_rows = (
+            await self.session.execute(
+                select(
+                    ContentActivityObservation,
+                    huitun_latest_ranked.c.same_instant_attempt_count,
+                )
+                .join(
+                    huitun_latest_ranked,
+                    ContentActivityObservation.id == huitun_latest_ranked.c.observation_id,
+                )
+                .where(huitun_latest_ranked.c.row_rank == 1)
+            )
+        ).all()
+
         identity_valid_at_as_of = and_(
             ProviderAccountIdentity.verified_at <= as_of_utc,
             or_(
@@ -865,6 +922,79 @@ class CandidatePoolRepository:
                     ProviderAccountIdentity.revoked_at > as_of_utc,
                 ),
             ),
+        )
+
+        huitun_identity_valid_at_as_of = and_(
+            identity_valid_at_as_of,
+            ProviderAccountIdentity.platform == Platform.DOUYIN,
+            ProviderAccountIdentity.namespace
+            == ProviderAccountIdentityNamespace.DOUYIN_HUITUN_UID,
+            ProviderAccountIdentity.identity_source == HUITUN_DOUYIN_IDENTITY_SOURCE,
+            ProviderAccountIdentity.resolver_contract_version
+            == HUITUN_DOUYIN_IDENTITY_CONTRACT_VERSION,
+        )
+        huitun_accepted_result = or_(
+            and_(
+                ContentActivityObservation.coverage_status
+                == ContentActivityCoverageStatus.LATEST_BOUND_PROVEN,
+                ContentActivityObservation.activity_result
+                == ContentActivityResult.PUBLICATION_FOUND,
+            ),
+            and_(
+                ContentActivityObservation.coverage_status
+                == ContentActivityCoverageStatus.LOOKBACK_BOUNDED,
+                ContentActivityObservation.activity_result
+                == ContentActivityResult.AT_LEAST_LOOKBACK_INACTIVE,
+            ),
+        )
+        huitun_accepted_ranked = (
+            select(
+                ContentActivityObservation.id.label("observation_id"),
+                func.row_number()
+                .over(
+                    partition_by=ContentActivityObservation.platform_account_id,
+                    order_by=(
+                        ContentActivityObservation.observed_at.desc(),
+                        ContentActivityObservation.id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+            )
+            .join(
+                ProviderAccountIdentity,
+                and_(
+                    ProviderAccountIdentity.id
+                    == ContentActivityObservation.provider_account_identity_id,
+                    ProviderAccountIdentity.platform_account_id
+                    == ContentActivityObservation.platform_account_id,
+                    ProviderAccountIdentity.platform == ContentActivityObservation.platform,
+                ),
+            )
+            .where(
+                ContentActivityObservation.platform_account_id.in_(account_ids),
+                ContentActivityObservation.observed_at <= as_of_utc,
+                ContentActivityObservation.platform == Platform.DOUYIN,
+                ContentActivityObservation.activity_semantics
+                == ContentActivitySemantics.HUITUN_RETURNED_SCOPE,
+                ContentActivityObservation.activity_source_provider
+                == ContentActivityProvider.HUITUN_DOUYIN_AWEME_LIST,
+                ContentActivityObservation.observation_status
+                == ContentActivityObservationStatus.COMPLETE,
+                huitun_accepted_result,
+                ContentActivityObservation.provider_account_identity_verification_id.is_not(None),
+                huitun_identity_valid_at_as_of,
+            )
+            .subquery()
+        )
+        huitun_accepted_observations = tuple(
+            await self.session.scalars(
+                select(ContentActivityObservation)
+                .join(
+                    huitun_accepted_ranked,
+                    ContentActivityObservation.id == huitun_accepted_ranked.c.observation_id,
+                )
+                .where(huitun_accepted_ranked.c.row_rank == 1)
+            )
         )
         trusted_ranked = (
             select(
@@ -939,10 +1069,29 @@ class CandidatePoolRepository:
         trusted_by_account = {
             observation.platform_account_id: observation for observation in trusted_observations
         }
+        huitun_latest_by_account = {
+            observation.platform_account_id: observation
+            for observation, _same_instant_attempt_count in huitun_latest_rows
+        }
+        huitun_latest_same_instant_attempt_count_by_account = {
+            observation.platform_account_id: int(same_instant_attempt_count)
+            for observation, same_instant_attempt_count in huitun_latest_rows
+        }
+        huitun_by_account = {
+            observation.platform_account_id: observation
+            for observation in huitun_accepted_observations
+        }
         facts: dict[UUID, ContentActivityFact] = {}
-        for account_id in set(latest_by_account) | set(trusted_by_account):
+        for account_id in (
+            set(latest_by_account)
+            | set(trusted_by_account)
+            | set(huitun_latest_by_account)
+            | set(huitun_by_account)
+        ):
             latest = latest_by_account.get(account_id)
             trusted = trusted_by_account.get(account_id)
+            huitun = huitun_by_account.get(account_id)
+            huitun_latest = huitun_latest_by_account.get(account_id)
             facts[account_id] = ContentActivityFact(
                 trusted_observation_id=trusted.id if trusted is not None else None,
                 trusted_observed_at=_utc(trusted.observed_at) if trusted is not None else None,
@@ -966,6 +1115,40 @@ class CandidatePoolRepository:
                 ),
                 latest_attempt_same_instant_count=(
                     latest_same_instant_attempt_count_by_account.get(account_id)
+                ),
+                huitun_observation_id=huitun.id if huitun is not None else None,
+                huitun_observed_at=_utc(huitun.observed_at) if huitun is not None else None,
+                huitun_observation_status=(
+                    huitun.observation_status if huitun is not None else None
+                ),
+                huitun_coverage_status=(huitun.coverage_status if huitun is not None else None),
+                huitun_activity_result=(huitun.activity_result if huitun is not None else None),
+                huitun_last_publication_at=(
+                    _utc(huitun.last_publication_at) if huitun is not None else None
+                ),
+                huitun_coverage_start_at=(
+                    _utc(huitun.coverage_start_at) if huitun is not None else None
+                ),
+                huitun_coverage_end_at=(
+                    _utc(huitun.coverage_end_at) if huitun is not None else None
+                ),
+                huitun_latest_observation_id=(
+                    huitun_latest.id if huitun_latest is not None else None
+                ),
+                huitun_latest_observed_at=(
+                    _utc(huitun_latest.observed_at) if huitun_latest is not None else None
+                ),
+                huitun_latest_observation_status=(
+                    huitun_latest.observation_status if huitun_latest is not None else None
+                ),
+                huitun_latest_coverage_status=(
+                    huitun_latest.coverage_status if huitun_latest is not None else None
+                ),
+                huitun_latest_activity_result=(
+                    huitun_latest.activity_result if huitun_latest is not None else None
+                ),
+                huitun_latest_same_instant_count=(
+                    huitun_latest_same_instant_attempt_count_by_account.get(account_id)
                 ),
             )
         return facts
