@@ -3,9 +3,9 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictStr
 
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.enums import DepartmentStatus, ModuleKey, OperatorStatus, Role
 
 
 class LoginInput(BaseModel):
@@ -57,3 +57,37 @@ class AuthMePublic(BaseModel):
 class PasswordResetPublic(BaseModel):
     department_id: UUID
     revoked_sessions: int
+
+
+class OperatorAdminCreateInput(BaseModel):
+    """Closed request contract for one new Department-local Operator."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: StrictStr = Field(min_length=1, max_length=120)
+    role: StrictStr = Field(min_length=1, max_length=32)
+    module_grants: list[StrictStr]
+
+
+class OperatorAdminUpdateInput(BaseModel):
+    """One atomic, optimistic-concurrency Operator administration mutation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_updated_at: datetime
+    name: StrictStr | None = Field(default=None, min_length=1, max_length=120)
+    role: StrictStr | None = Field(default=None, min_length=1, max_length=32)
+    status: StrictStr | None = Field(default=None, min_length=1, max_length=32)
+    module_grants: list[StrictStr] | None = None
+
+
+class OperatorAdminPublic(BaseModel):
+    """Safe future-Web representation; grants are persisted positive grants only."""
+
+    id: UUID
+    name: str
+    role: Role
+    status: OperatorStatus
+    module_grants: tuple[ModuleKey, ...]
+    created_at: datetime
+    updated_at: datetime
