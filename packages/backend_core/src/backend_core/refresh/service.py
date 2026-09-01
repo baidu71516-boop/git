@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import DepartmentStatus, Role
 from backend_core.auth.repository import AuthRepository
-from backend_core.auth.service import AuthContext
 from backend_core.config.settings import Settings
 from backend_core.influencers.enums import DataSource
 from backend_core.influencers.freshness import FreshnessPolicy, FreshnessStatus
@@ -129,7 +129,7 @@ class RefreshQueueService:
     def _require_mutation(context: AuthContext) -> UUID:
         if context.operator is None:
             raise RefreshQueueError(409, "OPERATOR_REQUIRED", "Select an operator first")
-        if context.role is Role.VIEWER:
+        if context.effective_role is Role.VIEWER:
             raise RefreshQueueError(403, "PERMISSION_DENIED", "Viewer role is read-only")
         return _model_id(
             context.operator,
@@ -147,7 +147,7 @@ class RefreshQueueService:
 
     @classmethod
     def _read_department_scope(cls, context: AuthContext) -> UUID | None:
-        if context.role is Role.SUPER_ADMIN:
+        if context.effective_role is Role.SUPER_ADMIN:
             return None
         return cls._context_department_id(context)
 
@@ -158,7 +158,10 @@ class RefreshQueueService:
     ) -> UUID:
         own_department_id = self._context_department_id(context)
         target_department_id = requested_department_id or own_department_id
-        if context.role is not Role.SUPER_ADMIN and target_department_id != own_department_id:
+        if (
+            context.effective_role is not Role.SUPER_ADMIN
+            and target_department_id != own_department_id
+        ):
             raise RefreshQueueError(
                 403,
                 "PERMISSION_DENIED",

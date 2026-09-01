@@ -5,16 +5,12 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from backend_core.auth import AuthContext
-from backend_core.auth.repository import AuthRepository
-from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
-from backend_core.campaigns.errors import CampaignOutreachError
+from backend_core.auth import AuthContext, AuthService
+from backend_core.campaigns.access import DepartmentScope
 from fastapi import Depends, Header, Request
 from fastapi.exceptions import RequestValidationError
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.http.dependencies import get_database_session, require_auth
-from app.http.errors import ApiError
+from app.http.dependencies import get_auth_service, require_auth
 
 
 def _header_validation_error(*, message: str) -> RequestValidationError:
@@ -48,7 +44,7 @@ def _requested_department_id(request: Request) -> UUID | None:
 async def resolve_phase3a_department_scope(
     request: Request,
     context: Annotated[AuthContext, Depends(require_auth)],
-    session: Annotated[AsyncSession, Depends(get_database_session)],
+    service: Annotated[AuthService, Depends(get_auth_service)],
     # This scalar is intentionally not trusted for selection. It documents the
     # optional header in OpenAPI while `_requested_department_id` rejects repeats.
     _department_header: Annotated[
@@ -67,11 +63,14 @@ async def resolve_phase3a_department_scope(
 
     del _department_header
     requested_department_id = _requested_department_id(request)
-    access = CampaignOutreachAccess(AuthRepository(session))
-    try:
-        return await access.resolve_read_scope(context, requested_department_id)
-    except CampaignOutreachError as error:
-        raise ApiError(error.status_code, error.code, error.message) from error
+    authorization = await service.resolve_effective_authorization(
+        context,
+        department_id=requested_department_id,
+    )
+    return DepartmentScope(
+        department_id=authorization.department_scope.department_id,
+        cross_department_override=authorization.department_scope.cross_department_override,
+    )
 
 
 async def resolve_phase3a_department_id(

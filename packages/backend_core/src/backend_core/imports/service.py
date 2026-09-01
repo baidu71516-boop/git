@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import Role
-from backend_core.auth.service import AuthContext
 from backend_core.config.settings import Settings
 from backend_core.imports.enums import (
     CollectionJobStatus,
@@ -236,7 +236,7 @@ class ImportService:
             raise ImportDomainError(
                 "OPERATOR_REQUIRED", "Select an operator first", status_code=409
             )
-        if context.role == Role.VIEWER:
+        if context.effective_role is Role.VIEWER:
             raise ImportDomainError(
                 "PERMISSION_DENIED", "Viewer role is read-only", status_code=403
             )
@@ -244,7 +244,7 @@ class ImportService:
     @staticmethod
     def _require_scope(context: AuthContext, department_id: UUID) -> None:
         identity = sa_inspect(context.department).identity
-        if context.role is not Role.SUPER_ADMIN and (
+        if context.effective_role is not Role.SUPER_ADMIN and (
             identity is None or identity[0] != department_id
         ):
             raise ImportDomainError(
@@ -254,7 +254,7 @@ class ImportService:
     @staticmethod
     def _file_scope_visible(context: AuthContext, department_id: UUID) -> bool:
         identity = sa_inspect(context.department).identity
-        return context.role is Role.SUPER_ADMIN or (
+        return context.effective_role is Role.SUPER_ADMIN or (
             identity is not None and identity[0] == department_id
         )
 
@@ -309,7 +309,9 @@ class ImportService:
         return job
 
     async def list_collection_jobs(self, context: AuthContext) -> list[CollectionJob]:
-        department_id = None if context.role == Role.SUPER_ADMIN else context.department.id
+        department_id = (
+            None if context.effective_role is Role.SUPER_ADMIN else context.department.id
+        )
         return await self.repository.list_collection_jobs(department_id)
 
     async def get_collection_job(
@@ -1395,7 +1397,9 @@ class ImportService:
         offset: int,
         limit: int,
     ) -> tuple[list[ImportJob], int]:
-        department_id = None if context.role == Role.SUPER_ADMIN else context.department.id
+        department_id = (
+            None if context.effective_role is Role.SUPER_ADMIN else context.department.id
+        )
         return await self.repository.list_import_jobs(
             department_id,
             offset=offset,
@@ -1430,7 +1434,7 @@ class ImportService:
             category=category,
         )
         public = [ImportRowPublic.model_validate(row) for row in rows]
-        if context.role is Role.VIEWER:
+        if context.effective_role is Role.VIEWER:
             public = [self._viewer_import_row(row) for row in public]
         return public, total
 

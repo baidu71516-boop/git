@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import (
     ModuleKey,
     OperatorStatus,
@@ -27,7 +28,6 @@ from backend_core.auth.schemas import (
     OperatorAdminPublic,
     OperatorAdminUpdateInput,
 )
-from backend_core.auth.service import AuthContext
 
 
 class Clock(Protocol):

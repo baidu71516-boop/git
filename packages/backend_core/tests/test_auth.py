@@ -4,7 +4,13 @@ from uuid import UUID, uuid4
 
 from backend_core.audit.enums import AuditAction
 from backend_core.audit.models import AuditLog
-from backend_core.auth.authorization import ModuleKey, viewer_mutation_allowed
+from backend_core.auth.authorization import (
+    EXACT,
+    ModuleKey,
+    require_module_mutation,
+    require_module_read,
+    viewer_mutation_allowed,
+)
 from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role, role_at_or_below
 from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
 from backend_core.auth.security import hash_password, hash_token
@@ -542,6 +548,117 @@ def test_operator_role_change_is_resolved_on_the_next_request() -> None:
             assert refreshed.effective_role == Role.MANAGER
             effective = await service.resolve_effective_authorization(refreshed)
             assert effective.effective_role == Role.MANAGER
+
+    asyncio.run(scenario())
+
+
+def test_effective_authorization_reloads_grants_role_and_status_per_business_request() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            clock = MutableClock()
+            department, operator = await add_department(
+                session,
+                department_role=Role.SUPER_ADMIN,
+                operator_role=Role.OPERATOR,
+            )
+            service = AuthService(session, MemoryThrottle(clock), clock=clock)
+            login = await service.login(
+                department_id=department.id,
+                password="correct-horse-battery",
+                remember_me=False,
+                ip="192.0.2.56",
+                user_agent="pytest",
+            )
+            selected = await service.select_operator(
+                await service.authenticate(login.session_token),
+                operator.id,
+                ip="192.0.2.56",
+                user_agent="pytest",
+            )
+            assert selected.effective_role is Role.OPERATOR
+
+            other_department, _ = await add_department(session, name="Other department")
+            try:
+                await service.resolve_effective_authorization(
+                    await service.authenticate(login.session_token),
+                    department_id=other_department.id,
+                )
+            except AuthError as exc:
+                assert_auth_error(exc, 404, "RESOURCE_NOT_FOUND")
+            else:
+                raise AssertionError("selected non-SA gained cross-Department authority")
+
+            await service.repository.replace_operator_module_grants(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_keys=[ModuleKey.CAMPAIGNS],
+            )
+            await session.commit()
+            first = await service.resolve_effective_authorization(
+                await service.authenticate(login.session_token)
+            )
+            require_module_read(first, EXACT(ModuleKey.CAMPAIGNS))
+            try:
+                require_module_read(first, EXACT(ModuleKey.ADMIN))
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "PERMISSION_DENIED")
+            else:
+                raise AssertionError("selected non-SA gained admin authority from SA ceiling")
+
+            await service.repository.replace_operator_module_grants(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_keys=[],
+            )
+            await session.commit()
+            after_removal = await service.resolve_effective_authorization(
+                await service.authenticate(login.session_token)
+            )
+            try:
+                require_module_read(after_removal, EXACT(ModuleKey.CAMPAIGNS))
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "MODULE_ACCESS_DENIED")
+            else:
+                raise AssertionError("removed grant remained authorized")
+
+            await service.repository.replace_operator_module_grants(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_keys=[ModuleKey.DATA_COLLECTION],
+            )
+            await session.commit()
+            after_addition = await service.resolve_effective_authorization(
+                await service.authenticate(login.session_token)
+            )
+            require_module_read(after_addition, EXACT(ModuleKey.DATA_COLLECTION))
+
+            operator.role = Role.VIEWER
+            await session.commit()
+            viewer = await service.resolve_effective_authorization(
+                await service.authenticate(login.session_token)
+            )
+            assert viewer.effective_role is Role.VIEWER
+            try:
+                require_module_read(viewer, EXACT(ModuleKey.ADMIN))
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "PERMISSION_DENIED")
+            else:
+                raise AssertionError("Viewer gained admin authority from SA ceiling")
+            try:
+                require_module_mutation(viewer, EXACT(ModuleKey.DATA_COLLECTION))
+            except AuthError as exc:
+                assert_auth_error(exc, 403, "PERMISSION_DENIED")
+            else:
+                raise AssertionError("Viewer mutation remained authorized")
+
+            operator.status = OperatorStatus.DISABLED
+            await session.commit()
+            try:
+                await service.authenticate(login.session_token)
+            except AuthError as exc:
+                assert_auth_error(exc, 401, "INVALID_SESSION")
+            else:
+                raise AssertionError("disabled bound Operator retained business access")
 
     asyncio.run(scenario())
 

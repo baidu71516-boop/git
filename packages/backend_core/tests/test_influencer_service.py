@@ -101,10 +101,11 @@ class FakeInfluencerRepository:
 def make_context(
     role: Role,
     *,
-    operator_role: Role = Role.OPERATOR,
+    operator_role: Role | None = None,
     department_id: UUID | None = None,
 ) -> AuthContext:
     resolved_department_id = department_id or uuid4()
+    selected_role = operator_role or role
     department = Department(
         id=resolved_department_id,
         name=f"Department {role.value}",
@@ -117,8 +118,8 @@ def make_context(
     operator = Operator(
         id=uuid4(),
         department_id=resolved_department_id,
-        name=f"Selected {operator_role.value}",
-        role=operator_role,
+        name=f"Selected {selected_role.value}",
+        role=selected_role,
         status=OperatorStatus.ACTIVE,
         created_at=NOW,
         updated_at=NOW,
@@ -670,24 +671,24 @@ def test_zero_eligible_account_summary_is_unknown_but_not_refreshable() -> None:
     asyncio.run(scenario())
 
 
-def test_session_role_not_selected_operator_role_controls_contact_access() -> None:
+def test_selected_operator_effective_role_controls_contact_access() -> None:
     async def scenario() -> None:
         repository = FakeInfluencerRepository()
         repository.list_result = ([make_list_record()], 1)
         repository.detail_result = make_detail_record()
         service = InfluencerService(repository)
 
-        viewer_context = make_context(Role.VIEWER, operator_role=Role.SUPER_ADMIN)
+        viewer_context = make_context(Role.SUPER_ADMIN, operator_role=Role.VIEWER)
         viewer_page = await service.list_influencers(viewer_context, InfluencerListQuery())
         viewer_detail = await service.get_influencer_detail(viewer_context, INFLUENCER_ID)
         assert viewer_page.items[0].current_contacts[0].display_value == "***"
         assert viewer_detail.contacts[0].display_value == "***"
 
-        admin_context = make_context(Role.SUPER_ADMIN, operator_role=Role.VIEWER)
-        admin_page = await service.list_influencers(admin_context, InfluencerListQuery())
-        admin_detail = await service.get_influencer_detail(admin_context, INFLUENCER_ID)
-        assert admin_page.items[0].current_contacts[0].display_value == "fixture@example.invalid"
-        assert admin_detail.contacts[0].display_value == "fixture@example.invalid"
+        operator_context = make_context(Role.SUPER_ADMIN, operator_role=Role.OPERATOR)
+        operator_page = await service.list_influencers(operator_context, InfluencerListQuery())
+        operator_detail = await service.get_influencer_detail(operator_context, INFLUENCER_ID)
+        assert operator_page.items[0].current_contacts[0].display_value == "fixture@example.invalid"
+        assert operator_detail.contacts[0].display_value == "fixture@example.invalid"
 
     asyncio.run(scenario())
 

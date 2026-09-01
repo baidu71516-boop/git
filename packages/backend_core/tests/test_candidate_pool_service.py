@@ -126,7 +126,7 @@ async def _actor(session: AsyncSession, *, role: Role) -> AuthContext:
     operator = Operator(
         department_id=department.id,
         name="Targeting operator",
-        role=Role.OPERATOR,
+        role=role,
         status=OperatorStatus.ACTIVE,
     )
     permission = DepartmentPermission(department_id=department.id, role=role)
@@ -2296,10 +2296,18 @@ def test_viewer_contact_evidence_is_masked_and_cross_department_is_hidden() -> N
                 )
                 await service.materialize_run(run.id)
 
+                viewer_operator = Operator(
+                    department_id=manager.department.id,
+                    name="Targeting viewer",
+                    role=Role.VIEWER,
+                    status=OperatorStatus.ACTIVE,
+                )
+                session.add(viewer_operator)
+                await session.flush()
                 viewer = AuthContext(
                     department=manager.department,
-                    operator=None,
-                    role=Role.VIEWER,
+                    operator=viewer_operator,
+                    role=Role.MANAGER,
                     auth_session=manager.auth_session,
                 )
                 members = await service.list_run_members(

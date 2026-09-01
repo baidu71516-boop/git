@@ -97,6 +97,12 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
                         assert before_selection.status_code == 200
                         assert before_selection.json()["data"]["operator"] is None
 
+                        business_before_selection = await client.get("/api/v1/influencers")
+                        assert business_before_selection.status_code == 409
+                        assert (
+                            business_before_selection.json()["error"]["code"] == "OPERATOR_REQUIRED"
+                        )
+
                         csrf_rejected = await client.post(
                             "/api/v1/auth/select-operator",
                             json={"operator_id": str(operator.id)},
@@ -138,7 +144,7 @@ def test_auth_http_cookie_csrf_and_operator_permission_boundaries() -> None:
     asyncio.run(scenario())
 
 
-def test_operator_directory_uses_phase3a_department_scope_without_selected_operator() -> None:
+def test_operator_directory_stays_same_department_without_selected_operator() -> None:
     async def scenario() -> None:
         engine = create_async_engine("sqlite+aiosqlite://")
         async with engine.begin() as connection:
@@ -239,44 +245,45 @@ def test_operator_directory_uses_phase3a_department_scope_without_selected_opera
                             str(super_operator.id)
                         ]
 
-                        cross_department = await client.get(
+                        ignored_cross_department_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(target_department.id)},
                         )
-                        assert cross_department.status_code == 200
-                        assert cross_department.json()["data"] == [
+                        assert ignored_cross_department_header.status_code == 200
+                        assert ignored_cross_department_header.json()["data"] == [
                             {
-                                "id": str(target_active.id),
-                                "department_id": str(target_department.id),
-                                "name": target_active.name,
+                                "id": str(super_operator.id),
+                                "department_id": str(super_department.id),
+                                "name": super_operator.name,
                                 "role": "operator",
                                 "status": "active",
                             }
                         ]
 
-                        disabled_department_response = await client.get(
+                        ignored_disabled_department_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(disabled_department.id)},
                         )
-                        assert disabled_department_response.status_code == 404
+                        assert ignored_disabled_department_header.status_code == 200
                         assert (
-                            disabled_department_response.json()["error"]["code"]
-                            == "DEPARTMENT_NOT_FOUND"
+                            ignored_disabled_department_header.json()["data"] == own.json()["data"]
                         )
 
-                        invalid = await client.get(
+                        ignored_invalid_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": "not-a-uuid"},
                         )
-                        assert invalid.status_code == 422
-                        duplicated = await client.get(
+                        assert ignored_invalid_header.status_code == 200
+                        assert ignored_invalid_header.json()["data"] == own.json()["data"]
+                        ignored_duplicate_header = await client.get(
                             "/api/v1/operators",
                             headers=[
                                 ("X-Department-ID", str(target_department.id)),
                                 ("X-Department-ID", str(target_department.id)),
                             ],
                         )
-                        assert duplicated.status_code == 422
+                        assert ignored_duplicate_header.status_code == 200
+                        assert ignored_duplicate_header.json()["data"] == own.json()["data"]
 
                         normal_login = await client.post(
                             "/api/v1/auth/login",
@@ -286,27 +293,28 @@ def test_operator_directory_uses_phase3a_department_scope_without_selected_opera
                             },
                         )
                         assert normal_login.status_code == 200
-                        # No selected Operator: Viewer reads are still allowed.
+                        # The bootstrap selection directory remains usable with
+                        # a valid session before an Operator is selected.
                         normal_own = await client.get("/api/v1/operators")
                         assert normal_own.status_code == 200
                         assert [item["id"] for item in normal_own.json()["data"]] == [
                             str(normal_operator.id)
                         ]
-                        concealed = await client.get(
+                        normal_ignored_cross_header = await client.get(
                             "/api/v1/operators",
                             headers={"X-Department-ID": str(target_department.id)},
                         )
-                        assert concealed.status_code == 404
-                        assert concealed.json()["error"]["code"] == "RESOURCE_NOT_FOUND"
+                        assert normal_ignored_cross_header.status_code == 200
+                        assert (
+                            normal_ignored_cross_header.json()["data"] == normal_own.json()["data"]
+                        )
 
                     document = app.openapi()
                     operation = document["paths"]["/api/v1/operators"]["get"]
-                    header = next(
-                        parameter
-                        for parameter in operation["parameters"]
-                        if parameter["in"] == "header" and parameter["name"] == "X-Department-ID"
+                    assert not any(
+                        parameter["in"] == "header" and parameter["name"] == "X-Department-ID"
+                        for parameter in operation.get("parameters", [])
                     )
-                    assert header["required"] is False
                     assert "OperatorPublic" in str(
                         operation["responses"]["200"]["content"]["application/json"]["schema"]
                     )

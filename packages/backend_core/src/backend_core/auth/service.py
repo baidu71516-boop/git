@@ -11,6 +11,7 @@ from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
 from backend_core.auth.authorization import (
     EffectiveAuthorizationContext,
+    ModuleKey,
     ResolvedDepartmentScope,
     role_is_within_department_ceiling,
 )
@@ -312,6 +313,22 @@ class AuthService:
             if target_department is None or target_department.status != DepartmentStatus.ACTIVE:
                 raise AuthError(404, "DEPARTMENT_NOT_FOUND", "Department not found")
 
+        # Super Admin is deliberately implicit-all.  Non-Super-Admin grants are
+        # read on every business request so an Operator-admin change takes
+        # effect without a Session refresh or an authorization snapshot.
+        authorized_modules = (
+            frozenset()
+            if operator.role is Role.SUPER_ADMIN
+            else frozenset(
+                module_key
+                for module_key in await self.repository.list_operator_module_grants(
+                    operator_id=operator.id,
+                    department_id=department.id,
+                )
+                if module_key is not ModuleKey.ADMIN
+            )
+        )
+
         return EffectiveAuthorizationContext(
             department=department,
             operator=operator,
@@ -322,6 +339,7 @@ class AuthService:
                 cross_department_override=target_department_id != department.id,
             ),
             auth_session=context.auth_session,
+            authorized_modules=authorized_modules,
         )
 
     def validate_csrf(self, context: AuthContext, csrf_token: str | None) -> None:
@@ -409,14 +427,14 @@ class AuthService:
 
     async def reset_department_password(
         self,
-        context: AuthContext,
+        context: AuthContext | EffectiveAuthorizationContext,
         *,
         department_id: UUID,
         new_password: str,
         ip: str,
         user_agent: str,
     ) -> int:
-        if context.role != Role.SUPER_ADMIN:
+        if context.effective_role is not Role.SUPER_ADMIN:
             raise AuthError(403, "PERMISSION_DENIED", "Super admin permission required")
         department = await self.repository.get_department(department_id)
         if department is None:

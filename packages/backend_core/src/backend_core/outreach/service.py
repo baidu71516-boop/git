@@ -14,9 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import OperatorStatus
 from backend_core.auth.repository import AuthRepository
-from backend_core.auth.service import AuthContext
 from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
 from backend_core.campaigns.channels import ChannelEnablementRegistry
 from backend_core.campaigns.errors import CampaignOutreachError

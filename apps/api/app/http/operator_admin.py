@@ -3,13 +3,13 @@
 from typing import Annotated, Any
 from uuid import UUID
 
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.auth.operator_admin_service import OperatorAdminService
 from backend_core.auth.schemas import (
     OperatorAdminCreateInput,
     OperatorAdminPublic,
     OperatorAdminUpdateInput,
 )
-from backend_core.auth.service import AuthContext
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,12 +17,20 @@ from app.http.dependencies import (
     get_client_ip,
     get_database_session,
     get_user_agent,
-    require_auth,
-    require_csrf_context,
+    require_module,
+    require_module_write,
 )
 from app.http.responses import SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/admin/operators", tags=["admin"])
+AdminReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.ADMIN))),
+]
+AdminWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.ADMIN))),
+]
 
 
 def get_operator_admin_service(
@@ -34,7 +42,7 @@ def get_operator_admin_service(
 @router.get("", response_model=SuccessEnvelope[list[OperatorAdminPublic]])
 async def list_operators(
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: AdminReadContext,
     service: Annotated[OperatorAdminService, Depends(get_operator_admin_service)],
 ) -> dict[str, Any]:
     return envelope(request, data=await service.list_operators(context))
@@ -44,7 +52,7 @@ async def list_operators(
 async def get_operator(
     operator_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: AdminReadContext,
     service: Annotated[OperatorAdminService, Depends(get_operator_admin_service)],
 ) -> dict[str, Any]:
     return envelope(request, data=await service.get_operator(context, operator_id=operator_id))
@@ -54,7 +62,7 @@ async def get_operator(
 async def create_operator(
     payload: OperatorAdminCreateInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
+    context: AdminWriteContext,
     service: Annotated[OperatorAdminService, Depends(get_operator_admin_service)],
 ) -> dict[str, Any]:
     operator = await service.create_operator(
@@ -71,7 +79,7 @@ async def update_operator(
     operator_id: UUID,
     payload: OperatorAdminUpdateInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_csrf_context)],
+    context: AdminWriteContext,
     service: Annotated[OperatorAdminService, Depends(get_operator_admin_service)],
 ) -> dict[str, Any]:
     operator = await service.update_operator(

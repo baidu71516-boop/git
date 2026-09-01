@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import ALL_OF, EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.campaigns.access import DepartmentScope
 from backend_core.campaigns.schemas import (
     CampaignCreateInput,
@@ -37,8 +37,8 @@ from app.http.dependencies import (
     get_client_ip,
     get_database_session,
     get_user_agent,
-    require_auth,
-    require_targeting_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.outreach import OutreachTargetCreateRequest, get_outreach_service
 from app.http.phase3a_http import (
@@ -54,6 +54,22 @@ from app.http.phase3a_scope import resolve_phase3a_department_scope
 from app.http.responses import SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/campaigns", tags=["campaigns"])
+CampaignsReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.CAMPAIGNS))),
+]
+CampaignsWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.CAMPAIGNS))),
+]
+CampaignsFromCandidateRunWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(
+        require_module_write(
+            ALL_OF(ModuleKey.CAMPAIGNS, ModuleKey.CANDIDATE_POOLS),
+        )
+    ),
+]
 
 CAMPAIGN_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
 CAMPAIGN_MEMBER_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit"})
@@ -184,7 +200,7 @@ def reject_campaign_member_list_query_parameters(request: Request) -> None:
 )
 async def list_campaigns(
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CampaignsReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[CampaignService, Depends(get_campaign_service)],
     cursor: Annotated[str | None, Query()] = None,
@@ -215,7 +231,7 @@ async def create_campaign(
     payload: CampaignCreateRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     response: Response,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
@@ -243,7 +259,7 @@ async def create_campaign(
 async def get_campaign(
     campaign_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CampaignsReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[CampaignService, Depends(get_campaign_service)],
 ) -> dict[str, Any]:
@@ -265,7 +281,7 @@ async def update_campaign(
     payload: CampaignUpdateRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
 ) -> dict[str, Any]:
     campaign = await service.update_campaign(
@@ -292,7 +308,7 @@ async def transition_campaign_lifecycle(
     payload: CampaignLifecycleRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
 ) -> dict[str, Any]:
     campaign = await service.transition_campaign_status(
@@ -318,7 +334,7 @@ async def transition_campaign_lifecycle(
 async def list_campaign_members(
     campaign_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CampaignsReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[CampaignService, Depends(get_campaign_service)],
     cursor: Annotated[str | None, Query()] = None,
@@ -350,7 +366,7 @@ async def bulk_add_campaign_members(
     payload: CampaignMemberBulkAddRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -379,7 +395,7 @@ async def bulk_add_campaign_members_from_candidate_run(
     payload: CampaignMemberFromCandidateRunRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsFromCandidateRunWriteContext,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -409,7 +425,7 @@ async def remove_campaign_member(
     payload: CampaignMemberRemoveRequest,
     request: Request,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[CampaignService, Depends(get_campaign_service)],
 ) -> dict[str, Any]:
     member = await service.remove_member(
@@ -439,7 +455,7 @@ async def create_campaign_outreach_target(
     request: Request,
     response: Response,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
-    context: Annotated[AuthContext, Depends(require_targeting_mutation)],
+    context: CampaignsWriteContext,
     service: Annotated[Any, Depends(get_outreach_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -468,7 +484,7 @@ async def get_campaign_member(
     campaign_id: UUID,
     member_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: CampaignsReadContext,
     scope: Annotated[DepartmentScope, Depends(resolve_phase3a_department_scope)],
     service: Annotated[CampaignService, Depends(get_campaign_service)],
 ) -> dict[str, Any]:

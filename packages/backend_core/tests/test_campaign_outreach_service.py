@@ -272,7 +272,7 @@ async def seed_context(session: AsyncSession, *, role: Role = Role.OPERATOR) -> 
     operator = Operator(
         department_id=department.id,
         name="Campaign Outreach Operator",
-        role=Role.OPERATOR,
+        role=role,
         status=OperatorStatus.ACTIVE,
     )
     session.add(operator)
@@ -759,10 +759,18 @@ async def test_campaign_member_projection_keeps_read_scope_and_viewer_boundary()
         await harness.session.commit()
         campaign_id = await create_campaign(harness)
         member = await add_member(harness, campaign_id, fixture)
+        viewer_operator = Operator(
+            department_id=harness.context.department.id,
+            name="Campaign viewer",
+            role=Role.VIEWER,
+            status=OperatorStatus.ACTIVE,
+        )
+        harness.session.add(viewer_operator)
+        await harness.session.flush()
         viewer = AuthContext(
             department=harness.context.department,
-            operator=None,
-            role=Role.VIEWER,
+            operator=viewer_operator,
+            role=Role.OPERATOR,
             auth_session=harness.context.auth_session,
         )
 
@@ -1127,6 +1135,7 @@ async def test_super_admin_cross_department_campaign_owner_projection_and_valida
         target_owner_id = target_owner.id
         replacement_owner_id = replacement_owner.id
         third_owner_id = third_owner.id
+        harness.context.operator.role = Role.SUPER_ADMIN
         super_context = AuthContext(
             department=harness.context.department,
             operator=harness.context.operator,
@@ -2453,10 +2462,18 @@ async def test_target_shared_replay_is_redacted_and_viewer_cannot_mutate() -> No
         assert error.value.code == "IDEMPOTENCY_KEY_REUSED"
         await refresh_context_after_rollback(harness)
 
+        viewer_operator = Operator(
+            department_id=harness.context.department.id,
+            name="Outreach target viewer",
+            role=Role.VIEWER,
+            status=OperatorStatus.ACTIVE,
+        )
+        harness.session.add(viewer_operator)
+        await harness.session.flush()
         viewer = AuthContext(
             department=harness.context.department,
-            operator=harness.context.operator,
-            role=Role.VIEWER,
+            operator=viewer_operator,
+            role=Role.OPERATOR,
             auth_session=harness.context.auth_session,
         )
         target = await harness.outreach_service.get_target(viewer, first.result.id)

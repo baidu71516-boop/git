@@ -7,9 +7,9 @@ from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
 from backend_core.auth.enums import Role
 from backend_core.auth.models import Operator
-from backend_core.auth.service import AuthContext
 from backend_core.content_activity.enums import (
     ContentActivityCoverageStatus,
     ContentActivityObservationStatus,
@@ -437,16 +437,18 @@ class InfluencerService:
         self._now_factory = now_factory or (lambda: datetime.now(UTC))
 
     @staticmethod
-    def _require_read(context: AuthContext) -> None:
-        if context.role not in READ_ROLES:
+    def _require_read(context: AuthContext) -> Role:
+        role = context.effective_role
+        if role not in READ_ROLES:
             raise InfluencerPermissionError
+        return role
 
     async def list_influencers(
         self,
         context: AuthContext,
         query: InfluencerListQuery,
     ) -> InfluencerListPage:
-        self._require_read(context)
+        role = self._require_read(context)
         as_of = self._now_factory()
         records, total = await self.repository.list_influencers(
             query,
@@ -454,7 +456,7 @@ class InfluencerService:
             policy=self.freshness_policy,
             content_activity_freshness_policy=self.content_activity_freshness_policy,
         )
-        items = [self._list_item(record, context.role, as_of) for record in records]
+        items = [self._list_item(record, role, as_of) for record in records]
         return InfluencerListPage(
             items=items,
             page=query.page,
@@ -467,7 +469,7 @@ class InfluencerService:
         context: AuthContext,
         influencer_id: UUID,
     ) -> InfluencerDetail:
-        self._require_read(context)
+        role = self._require_read(context)
         record = await self.repository.get_influencer_detail(influencer_id)
         if record is None:
             raise InfluencerNotFoundError
@@ -497,7 +499,7 @@ class InfluencerService:
                 )
                 for account in record.platform_accounts
             ],
-            contacts=[_contact_detail(contact, context.role) for contact in record.contacts],
+            contacts=[_contact_detail(contact, role) for contact in record.contacts],
             source_states=[_source_state_detail(state) for state in record.source_states],
             source_identities=[
                 _source_identity_detail(identity) for identity in record.source_identities

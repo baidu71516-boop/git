@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator, Awaitable
 from typing import Annotated, Any
 
-from backend_core.auth import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.config import get_settings
 from backend_core.content_activity.schemas import (
     DouyinRuntimeCaptureCreateInput,
@@ -28,7 +28,7 @@ from app.http.dependencies import (
     get_content_activity_task_dispatcher,
     get_database_session,
     get_user_agent,
-    require_super_admin,
+    require_module_write,
 )
 from app.http.errors import ApiError
 from app.http.phase3a_http import error_responses, require_single_idempotency_key
@@ -37,6 +37,10 @@ from app.http.responses import SuccessEnvelope, envelope
 router = APIRouter(prefix="/api/v1/admin/content-activity", tags=["content-activity"])
 settings = get_settings()
 logger = logging.getLogger(__name__)
+AdminWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.ADMIN))),
+]
 
 
 async def get_content_activity_service(
@@ -76,7 +80,7 @@ def _log_dispatch_failure(request_token: str) -> None:
 async def resolve_xiaohongshu_identity(
     payload: XhsIdentityResolutionInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_super_admin)],
+    context: AdminWriteContext,
     service: Annotated[ContentActivityService, Depends(get_content_activity_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:
@@ -105,7 +109,7 @@ async def resolve_xiaohongshu_identity(
 async def create_xiaohongshu_refreshes(
     payload: XhsRefreshCreateInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_super_admin)],
+    context: AdminWriteContext,
     service: Annotated[ContentActivityService, Depends(get_content_activity_service)],
     dispatcher: Annotated[
         ContentActivityTaskDispatcher,
@@ -144,7 +148,7 @@ async def create_xiaohongshu_refreshes(
 async def create_douyin_runtime_capture(
     payload: DouyinRuntimeCaptureCreateInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_super_admin)],
+    context: AdminWriteContext,
     service: Annotated[ContentActivityService, Depends(get_content_activity_service)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> dict[str, Any]:

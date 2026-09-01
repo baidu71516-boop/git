@@ -4,7 +4,7 @@ from collections.abc import Awaitable
 from typing import Annotated, Any
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.config import get_settings
 from backend_core.influencers.freshness import FreshnessPolicy
 from backend_core.refresh.schemas import (
@@ -25,14 +25,22 @@ from app.http.dependencies import (
     get_client_ip,
     get_database_session,
     get_user_agent,
-    require_auth,
-    require_refresh_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.errors import ApiError
 from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/refresh-queues", tags=["refresh-queues"])
 settings = get_settings()
+DataUpdatesReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.DATA_UPDATES))),
+]
+DataUpdatesWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.DATA_UPDATES))),
+]
 
 PAGINATION_QUERY_PARAMETERS = frozenset({"offset", "limit"})
 
@@ -152,7 +160,7 @@ async def _service_call[ResultT](awaitable: Awaitable[ResultT]) -> ResultT:
 async def create_refresh_queue(
     payload: RefreshQueueCreateInput,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_refresh_mutation)],
+    context: DataUpdatesWriteContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> dict[str, Any]:
     detail = await _service_call(
@@ -175,7 +183,7 @@ async def create_refresh_queue(
 async def list_refresh_queues(
     request: Request,
     query: Annotated[RefreshQueueListQuery, Depends(parse_queue_pagination)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: DataUpdatesReadContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> dict[str, Any]:
     page = await _service_call(service.list_queues(context, query))
@@ -190,7 +198,7 @@ async def list_refresh_queues(
 async def get_refresh_queue(
     refresh_queue_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: DataUpdatesReadContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> dict[str, Any]:
     detail = await _service_call(service.get_queue_detail(context, refresh_queue_id))
@@ -207,7 +215,7 @@ async def list_refresh_queue_items(
     refresh_queue_id: UUID,
     request: Request,
     query: Annotated[RefreshQueueItemListQuery, Depends(parse_item_pagination)],
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: DataUpdatesReadContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> dict[str, Any]:
     page = await _service_call(service.list_queue_items(context, refresh_queue_id, query))
@@ -228,7 +236,7 @@ async def list_refresh_queue_items(
 async def export_refresh_queue(
     refresh_queue_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_refresh_mutation)],
+    context: DataUpdatesWriteContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> Response:
     result = await _service_call(
@@ -254,7 +262,7 @@ async def export_refresh_queue(
 async def cancel_refresh_queue(
     refresh_queue_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_refresh_mutation)],
+    context: DataUpdatesWriteContext,
     service: Annotated[RefreshQueueService, Depends(get_refresh_queue_service)],
 ) -> dict[str, Any]:
     detail = await _service_call(

@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend_core.audit.enums import AuditAction, AuditResult
 from backend_core.audit.repository import AuditRepository
-from backend_core.auth import AuthContext, Role
-from backend_core.auth.enums import OperatorStatus
+from backend_core.auth import BusinessAuthorizationContext as AuthContext
+from backend_core.auth.enums import OperatorStatus, Role
 from backend_core.auth.repository import AuthRepository
 from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScope
 from backend_core.campaigns.errors import CampaignOutreachError
@@ -155,7 +155,7 @@ class CandidatePoolService:
     def _require_mutation(cls, context: AuthContext) -> UUID:
         if context.operator is None:
             raise TargetingError(409, "OPERATOR_REQUIRED", "Select an operator first")
-        if context.role is Role.VIEWER:
+        if context.effective_role is Role.VIEWER:
             raise TargetingError(403, "PERMISSION_DENIED", "Viewer role is read-only")
         return context.operator.id
 
@@ -1253,7 +1253,7 @@ class CandidatePoolService:
             limit=limit,
             result=result,
         )
-        viewer = context.role is Role.VIEWER
+        viewer = context.effective_role is Role.VIEWER
         return CandidatePoolRunMemberPage(
             items=tuple(self._member_public(item, viewer=viewer) for item in page.items),
             next_cursor=page.next_cursor,

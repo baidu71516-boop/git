@@ -3,7 +3,7 @@
 from typing import Annotated, Any
 from uuid import UUID
 
-from backend_core.auth.service import AuthContext
+from backend_core.auth import EXACT, EffectiveAuthorizationContext, ModuleKey
 from backend_core.imports.schemas import (
     CollectionJobCreate,
     CollectionJobPublic,
@@ -16,12 +16,20 @@ from app.http.dependencies import (
     get_client_ip,
     get_import_service,
     get_user_agent,
-    require_auth,
-    require_import_mutation,
+    require_module,
+    require_module_write,
 )
 from app.http.responses import ErrorEnvelope, SuccessEnvelope, envelope
 
 router = APIRouter(prefix="/api/v1/collection-jobs", tags=["collection-jobs"])
+DataCollectionReadContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module(EXACT(ModuleKey.DATA_COLLECTION))),
+]
+DataCollectionWriteContext = Annotated[
+    EffectiveAuthorizationContext,
+    Depends(require_module_write(EXACT(ModuleKey.DATA_COLLECTION))),
+]
 
 
 def _error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
@@ -40,7 +48,7 @@ def _error_responses(*status_codes: int) -> dict[int | str, dict[str, Any]]:
 async def create_collection_job(
     payload: CollectionJobCreate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.create_collection_job(context, payload)
@@ -54,7 +62,7 @@ async def create_collection_job(
 )
 async def list_collection_jobs(
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: DataCollectionReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     jobs = await service.list_collection_jobs(context)
@@ -73,7 +81,7 @@ async def update_collection_job_screening_rules(
     collection_job_id: UUID,
     payload: CollectionJobScreeningRulesUpdate,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_import_mutation)],
+    context: DataCollectionWriteContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.update_collection_job_screening_rules(
@@ -94,7 +102,7 @@ async def update_collection_job_screening_rules(
 async def get_collection_job(
     collection_job_id: UUID,
     request: Request,
-    context: Annotated[AuthContext, Depends(require_auth)],
+    context: DataCollectionReadContext,
     service: Annotated[ImportService, Depends(get_import_service)],
 ) -> dict[str, Any]:
     job = await service.get_collection_job(context, collection_job_id)

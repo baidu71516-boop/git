@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import UUID
 
@@ -17,7 +16,15 @@ from app.http.dependencies import (
     require_auth,
 )
 from app.main import app
-from backend_core.auth.enums import Role
+from backend_core.auth import (
+    AuthContext,
+    AuthError,
+    EffectiveAuthorizationContext,
+    ModuleKey,
+    ResolvedDepartmentScope,
+)
+from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import AuthSession, Department, Operator
 from backend_core.config import get_settings
 from backend_core.content_activity.schemas import (
     ContentActivityRefreshRequestPublic,
@@ -41,17 +48,74 @@ CAPTURE_REQUEST_ID = UUID("00000000-0000-4000-8000-000000000809")
 NOW = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
 
 
-def _context(role: Role = Role.SUPER_ADMIN) -> object:
-    """A minimal dependency value; routes only need stable scoped IDs and role."""
+def _context(role: Role = Role.SUPER_ADMIN) -> AuthContext:
+    """Build a selected Operator beneath an SA ceiling for guard regressions."""
 
-    return SimpleNamespace(
-        department=SimpleNamespace(id=DEPARTMENT_ID),
-        operator=SimpleNamespace(id=OPERATOR_ID),
+    department = Department(
+        id=DEPARTMENT_ID,
+        name="Content Activity HTTP",
+        password_hash="not-used",
+        status=DepartmentStatus.ACTIVE,
+        session_days=30,
+    )
+    operator = Operator(
+        id=OPERATOR_ID,
+        department_id=department.id,
+        name="Content Activity operator",
         role=role,
+        status=OperatorStatus.ACTIVE,
+    )
+    return AuthContext(
+        department=department,
+        operator=operator,
+        role=Role.SUPER_ADMIN,
+        auth_session=AuthSession(
+            id=UUID("00000000-0000-0000-0000-000000000899"),
+            department_id=department.id,
+            operator_id=operator.id,
+            token_hash="a" * 64,
+            csrf_token_hash="b" * 64,
+            ip="192.0.2.80",
+            user_agent="content-activity-http-test",
+            expires_at=NOW,
+            revoked_at=None,
+        ),
     )
 
 
 class FakeAuthService:
+    async def resolve_effective_authorization(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> EffectiveAuthorizationContext:
+        if context.operator is None or context.effective_role is None:
+            raise AuthError(409, "OPERATOR_REQUIRED", "Select an operator first")
+        target_department_id = department_id or context.department.id
+        if (
+            target_department_id != context.department.id
+            and context.effective_role is not Role.SUPER_ADMIN
+        ):
+            raise AuthError(404, "RESOURCE_NOT_FOUND", "Resource not found")
+        grants = (
+            frozenset()
+            if context.effective_role is Role.SUPER_ADMIN
+            else frozenset(module for module in ModuleKey if module is not ModuleKey.ADMIN)
+        )
+        return EffectiveAuthorizationContext(
+            department=context.department,
+            operator=context.operator,
+            department_role_ceiling=context.department_role_ceiling or context.role,
+            effective_role=context.effective_role,
+            department_scope=ResolvedDepartmentScope(
+                department_id=target_department_id,
+                cross_department_override=target_department_id != context.department.id,
+            ),
+            auth_session=context.auth_session,
+            authorized_modules=grants,
+        )
+
     def validate_csrf(self, _context: object, csrf_token: str | None) -> None:
         assert csrf_token == "content-activity-csrf"
 
@@ -139,7 +203,7 @@ class FakeDispatcher:
 
 def _install_overrides(
     *,
-    context: object,
+    context: AuthContext,
     service: FakeContentActivityService,
     dispatcher: FakeDispatcher,
 ) -> None:

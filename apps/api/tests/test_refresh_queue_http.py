@@ -13,8 +13,14 @@ from app.http.dependencies import get_database_session, get_redis
 from app.main import app
 from backend_core.audit.enums import AuditAction
 from backend_core.audit.models import AuditLog
-from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
-from backend_core.auth.models import AuthSession, Department, DepartmentPermission, Operator
+from backend_core.auth.enums import NON_ADMIN_MODULE_KEYS, DepartmentStatus, OperatorStatus, Role
+from backend_core.auth.models import (
+    AuthSession,
+    Department,
+    DepartmentPermission,
+    Operator,
+    OperatorModulePermission,
+)
 from backend_core.auth.security import hash_token
 from backend_core.config import get_settings
 from backend_core.db import models as database_models  # noqa: F401
@@ -89,6 +95,15 @@ async def _seed_credential(
             ),
         ]
     )
+    if role is not Role.SUPER_ADMIN:
+        session.add_all(
+            OperatorModulePermission(
+                operator_id=operator.id,
+                department_id=department.id,
+                module_key=module_key,
+            )
+            for module_key in NON_ADMIN_MODULE_KEYS
+        )
     await session.flush()
     return Credential(department_id=department.id, token=token, csrf=csrf)
 
