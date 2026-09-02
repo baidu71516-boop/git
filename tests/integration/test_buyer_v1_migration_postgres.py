@@ -1,4 +1,4 @@
-"""PostgreSQL 16 composition gate for the Buyer V1 production migration.
+"""PostgreSQL 16 composition gate for Buyer V1 and Market Prospect Rules V1.
 
 The target must be the explicitly disposable ``phase1b_test`` database. Each
 test uses an isolated random schema and removes it after verification.
@@ -26,7 +26,9 @@ ALEMBIC_INI = PROJECT_ROOT / "infrastructure" / "migrations" / "alembic.ini"
 MIGRATIONS = PROJECT_ROOT / "infrastructure" / "migrations"
 OPERATOR_AUTH_REVISION = "0011_operator_auth_p0"
 BUYER_REVISION = "0012_buyer_lead_tiers_v1"
+MARKET_PROSPECT_RULES_REVISION = "0013_market_prospect_rules_v1_provisional"
 BUYER_LEAD_TIER_VALUES = ["HIGH", "CHANGED", "RELATED", "SAME_CATEGORY", "UNKNOWN"]
+CANDIDATE_POOL_STATUS_VALUES = ["ACTIVE", "ARCHIVED", "DISABLED"]
 
 
 def _gated_test_database_url() -> URL:
@@ -58,6 +60,10 @@ class MigrationDatabase:
     def upgrade(self, revision: str) -> None:
         get_settings.cache_clear()
         command.upgrade(self.config, revision)
+
+    def downgrade(self, revision: str) -> None:
+        get_settings.cache_clear()
+        command.downgrade(self.config, revision)
 
 
 @pytest.fixture
@@ -114,9 +120,9 @@ def _enum_values(connection: Connection, enum_name: str) -> list[str]:
 def _assert_composed_schema(migration_database: MigrationDatabase) -> None:
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == BUYER_REVISION
+        assert _revision(connection) == MARKET_PROSPECT_RULES_REVISION
         assert ScriptDirectory.from_config(migration_database.config).get_heads() == [
-            BUYER_REVISION
+            MARKET_PROSPECT_RULES_REVISION
         ]
 
         inspector = inspect(connection)
@@ -132,6 +138,8 @@ def _assert_composed_schema(migration_database: MigrationDatabase) -> None:
             _enum_values(connection, "candidate_result")
         )
         assert connection.scalar(text("SELECT 'NOT_MATCH'::candidate_result::text")) == "NOT_MATCH"
+        assert _enum_values(connection, "candidate_pool_status") == CANDIDATE_POOL_STATUS_VALUES
+        assert connection.scalar(text("SELECT 'DISABLED'::candidate_pool_status::text")) == "DISABLED"
 
         operator_columns = {column["name"] for column in inspector.get_columns("operators")}
         session_columns = {column["name"] for column in inspector.get_columns("sessions")}
@@ -139,7 +147,7 @@ def _assert_composed_schema(migration_database: MigrationDatabase) -> None:
         assert "operator_credential_version" in session_columns
 
 
-def test_upgrade_from_operator_auth_to_buyer_head(
+def test_upgrade_from_operator_auth_to_market_prospect_rules_head(
     migration_database: MigrationDatabase,
 ) -> None:
     migration_database.upgrade(OPERATOR_AUTH_REVISION)
@@ -154,8 +162,34 @@ def test_upgrade_from_operator_auth_to_buyer_head(
     _assert_composed_schema(migration_database)
 
 
-def test_fresh_full_chain_reaches_single_buyer_head(
+def test_fresh_full_chain_reaches_single_market_prospect_rules_head(
     migration_database: MigrationDatabase,
 ) -> None:
     migration_database.upgrade("head")
     _assert_composed_schema(migration_database)
+
+
+def test_downgrade_to_buyer_preserves_disabled_status_and_reupgrades(
+    migration_database: MigrationDatabase,
+) -> None:
+    migration_database.upgrade("head")
+    with migration_database.engine.begin() as connection:
+        connection.execute(
+            text("CREATE TABLE market_prospect_status_probe (status candidate_pool_status NOT NULL)")
+        )
+        connection.execute(
+            text("INSERT INTO market_prospect_status_probe (status) VALUES ('DISABLED')")
+        )
+
+    # PostgreSQL enum labels are additive: the repository's approved downgrade
+    # policy leaves DISABLED available so an existing status value is preserved.
+    migration_database.downgrade(BUYER_REVISION)
+    with migration_database.engine.connect() as connection:
+        assert _revision(connection) == BUYER_REVISION
+        assert _enum_values(connection, "candidate_pool_status") == CANDIDATE_POOL_STATUS_VALUES
+        assert connection.scalar(text("SELECT status::text FROM market_prospect_status_probe")) == "DISABLED"
+
+    migration_database.upgrade("head")
+    _assert_composed_schema(migration_database)
+    with migration_database.engine.connect() as connection:
+        assert connection.scalar(text("SELECT status::text FROM market_prospect_status_probe")) == "DISABLED"

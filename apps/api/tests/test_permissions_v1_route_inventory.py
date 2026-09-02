@@ -152,6 +152,41 @@ def _frozen_task_4a_map() -> dict[Operation, GuardExpectation | None]:
             owner="candidate_pools",
         ),
         ("POST", "/api/v1/collection-jobs/{collection_job_id}/buyer-screening"),
+        ("POST", "/api/v1/buyer-prospects"),
+        ("PUT", "/api/v1/buyer-prospects/{pool_id}"),
+    )
+    _add(
+        expected,
+        _guard(
+            ModuleRequirementKind.ALL_OF,
+            ModuleKey.DATA_COLLECTION,
+            ModuleKey.CANDIDATE_POOLS,
+            write=False,
+            owner="candidate_pools",
+        ),
+        ("GET", "/api/v1/buyer-prospects/options"),
+    )
+    _add(
+        expected,
+        _guard(
+            ModuleRequirementKind.EXACT,
+            ModuleKey.CANDIDATE_POOLS,
+            write=True,
+            owner="candidate_pools",
+        ),
+        ("POST", "/api/v1/buyer-prospects/{pool_id}/lifecycle"),
+        ("POST", "/api/v1/buyer-prospects/{pool_id}/runs"),
+    )
+    _add(
+        expected,
+        _guard(
+            ModuleRequirementKind.EXACT,
+            ModuleKey.CANDIDATE_POOLS,
+            write=False,
+            owner="candidate_pools",
+        ),
+        ("GET", "/api/v1/buyer-prospects"),
+        ("GET", "/api/v1/buyer-prospects/{pool_id}"),
     )
 
     _add(
@@ -341,16 +376,16 @@ def test_mounted_api_matches_the_frozen_permissions_v1_task_4a_map() -> None:
     expected = _frozen_task_4a_map()
     actual = _mounted_operations()
 
-    assert len(expected) == 77
+    assert len(expected) == 84
     assert set(actual) == set(expected)
     exempt = {operation for operation, guard in expected.items() if guard is None}
     guarded = {operation: guard for operation, guard in expected.items() if guard is not None}
     assert len(exempt) == 9
-    assert len(guarded) == 68
+    assert len(guarded) == 75
     assert Counter(guard.owner for guard in guarded.values()) == {
         "admin": 9,
         "data_collection": 4,
-        "candidate_pools": 11,
+        "candidate_pools": 18,
         "campaigns": 14,
         "today_outreach": 4,
         "influencer_library": 4,

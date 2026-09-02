@@ -37,6 +37,7 @@ from backend_core.growth.targeting import (
     TaxonomyDefinition,
     TaxonomyRelation,
     evaluate_buyer,
+    evaluate_buyer_lead_tier,
     evaluate_buyer_prospect_rule,
     evaluate_seller,
     reduce_criterion_results,
@@ -1107,3 +1108,62 @@ def test_buyer_evaluator_uses_trustworthy_douyin_creator_classification() -> Non
 
     assert result.result is TargetingEvaluationResult.MATCH
     assert result.reason_codes == (TargetingReasonCode.CATEGORY_MISMATCH,)
+
+
+@pytest.mark.parametrize(
+    ("source_industry", "creator_categories", "expected_tier"),
+    [
+        ("影视", ("影视",), BuyerLeadTier.SAME_CATEGORY),
+        ("科技", ("数码",), BuyerLeadTier.RELATED),
+        ("科技", ("美食",), BuyerLeadTier.HIGH),
+        ("科技", ("科技", "美食"), BuyerLeadTier.CHANGED),
+        # Huitun's imported 分类 is the creator's own classification, not
+        # CollectionJob.industry. These different but known categories remain
+        # reliable Buyer evidence rather than being treated as missing.
+        ("影视", ("汽车",), BuyerLeadTier.CHANGED),
+        ("影视", ("科技",), BuyerLeadTier.CHANGED),
+    ],
+)
+def test_buyer_lead_tiers_keep_huitun_source_and_creator_categories_distinct(
+    source_industry: str,
+    creator_categories: tuple[str, ...],
+    expected_tier: BuyerLeadTier,
+) -> None:
+    source_collection_job_id = uuid4()
+
+    decision = evaluate_buyer_lead_tier(
+        BuyerTargetingPolicy(taxonomy=_reviewed_taxonomy()),
+        _market_facts(
+            source_collection_job_id,
+            collection_industry=source_industry,
+            creator_classification_tags=creator_categories,
+        ),
+    )
+
+    assert decision.tier is expected_tier
+    assert decision.relation_summary["status"] == "RELIABLE"
+
+
+@pytest.mark.parametrize(
+    "creator_categories",
+    [
+        (),
+        ("unmapped Huitun 分类",),
+    ],
+)
+def test_buyer_lead_tier_is_unknown_only_for_missing_or_unmapped_creator_evidence(
+    creator_categories: tuple[str, ...],
+) -> None:
+    source_collection_job_id = uuid4()
+
+    decision = evaluate_buyer_lead_tier(
+        BuyerTargetingPolicy(taxonomy=_reviewed_taxonomy()),
+        _market_facts(
+            source_collection_job_id,
+            collection_industry="影视",
+            creator_classification_tags=creator_categories,
+        ),
+    )
+
+    assert decision.tier is BuyerLeadTier.UNKNOWN
+    assert decision.relation_summary["status"] == "UNRELIABLE"
