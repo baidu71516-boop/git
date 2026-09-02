@@ -138,6 +138,21 @@ def parse_integer(value: str) -> int | None:
         return None
 
 
+def parse_huitun_integer(value: str) -> int | None:
+    """Parse a Huitun integer-domain metric, including Excel's trailing zeroes."""
+
+    cleaned = normalize_null(value)
+    if cleaned is None or DECIMAL_NUMBER.fullmatch(cleaned) is None:
+        return None
+    try:
+        parsed = Decimal(cleaned.replace(",", ""))
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite() or parsed != parsed.to_integral_value():
+        return None
+    return int(parsed)
+
+
 def parse_decimal(value: str) -> Decimal | None:
     cleaned = normalize_null(value)
     if cleaned is None or DECIMAL_NUMBER.fullmatch(cleaned) is None:
@@ -258,6 +273,7 @@ __all__ = [
     "normalize_xhs_profile_url",
     "parse_boolean",
     "parse_decimal",
+    "parse_huitun_integer",
     "parse_integer",
     "parse_labeled_percentages",
     "parse_percent",

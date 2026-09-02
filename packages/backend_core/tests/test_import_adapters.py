@@ -74,6 +74,45 @@ def test_huitun_adapter_maps_notes_7d_as_a_nonnegative_integer(
     assert adapted.record.metrics["notes_7d"] == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [("871798", 871798), ("871798.0", 871798), ("100.00", 100)],
+)
+def test_huitun_adapter_accepts_integral_decimal_integer_metrics(
+    raw_value: str, expected: int
+) -> None:
+    raw = huitun_row(**{"粉丝数": raw_value})
+    adapter = HuitunCsvAdapter()
+    adapter.mapping_for_headers(list(raw.values))
+
+    adapted = adapter.adapt(raw)
+
+    assert adapted.is_valid
+    assert adapted.record.metrics["followers_count"] == expected
+    assert not any(
+        warning.code == "INVALID_INTEGER" and warning.field == "followers_count"
+        for warning in adapted.warnings
+    )
+
+
+@pytest.mark.parametrize("raw_value", ["871798.5", "1.9", "abc", ""])
+def test_huitun_adapter_rejects_nonintegral_and_malformed_integer_metrics(
+    raw_value: str,
+) -> None:
+    raw = huitun_row(**{"粉丝数": raw_value})
+    adapter = HuitunCsvAdapter()
+    adapter.mapping_for_headers(list(raw.values))
+
+    adapted = adapter.adapt(raw)
+
+    assert adapted.is_valid
+    assert "followers_count" not in adapted.record.metrics
+    assert any(
+        warning.code == "INVALID_INTEGER" and warning.field == "followers_count"
+        for warning in adapted.warnings
+    ) == bool(raw_value)
+
+
 def test_huitun_adapter_keeps_missing_notes_7d_missing() -> None:
     raw = huitun_row(**{"近7天笔记数": "--"})
     adapter = HuitunCsvAdapter()

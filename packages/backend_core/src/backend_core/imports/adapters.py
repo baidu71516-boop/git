@@ -27,6 +27,7 @@ from backend_core.imports.normalizers import (
     normalize_xhs_profile_url,
     parse_boolean,
     parse_decimal,
+    parse_huitun_integer,
     parse_integer,
     parse_labeled_percentages,
     parse_percent,
@@ -66,6 +67,7 @@ class _MappedAdapter:
     source: DataSource
     profile_normalizer = staticmethod(normalize_xhs_profile_url)
     profile_platform_name = "Xiaohongshu"
+    integer_metric_parser = staticmethod(parse_integer)
 
     def __init__(self, field_mapping: Mapping[str, str]) -> None:
         self._field_mapping = dict(field_mapping)
@@ -246,7 +248,14 @@ class _MappedAdapter:
         warnings: list[RowIssue],
     ) -> None:
         for field in sorted(HUITUN_INTEGER_FIELDS):
-            self._parse_metric(values, output, warnings, field, parse_integer, "INVALID_INTEGER")
+            self._parse_metric(
+                values,
+                output,
+                warnings,
+                field,
+                self.integer_metric_parser,
+                "INVALID_INTEGER",
+            )
         for field in sorted(HUITUN_DECIMAL_FIELDS):
             self._parse_metric(values, output, warnings, field, parse_decimal, "INVALID_DECIMAL")
         for field in sorted(HUITUN_PERCENT_FIELDS):
@@ -331,6 +340,7 @@ class _MappedAdapter:
 
 class _HuitunXhsAdapter(_MappedAdapter):
     source = DataSource.HUITUN
+    integer_metric_parser = staticmethod(parse_huitun_integer)
 
     def __init__(self, field_mapping: Mapping[str, str] | None = None) -> None:
         self._explicit_mapping = dict(field_mapping) if field_mapping is not None else None
@@ -399,7 +409,7 @@ class _HuitunDouyinAdapter(_MappedAdapter):
             output,
             warnings,
             "followers_count",
-            parse_integer,
+            parse_huitun_integer,
             "INVALID_INTEGER",
         )
 
