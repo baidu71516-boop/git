@@ -25,6 +25,7 @@ from backend_core.growth.buyer_taxonomy_v1 import (
 )
 from backend_core.growth.enums import (
     BuyerLeadTier,
+    BuyerProspectOwnerFilter,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidatePoolStatus,
@@ -47,11 +48,20 @@ from backend_core.growth.models import (
     TargetingPolicy,
 )
 from backend_core.growth.repository import (
+    BuyerProspectRuleRecord,
     CandidatePoolMemberProjectionRecord,
     CandidatePoolOwnerRecord,
     CandidatePoolRepository,
 )
 from backend_core.growth.schemas import (
+    BuyerProspectRuleCreateInput,
+    BuyerProspectRuleLifecycleInput,
+    BuyerProspectRuleOperatorOption,
+    BuyerProspectRuleOptionsPublic,
+    BuyerProspectRulePage,
+    BuyerProspectRulePublic,
+    BuyerProspectRuleSourceOption,
+    BuyerProspectRuleUpdateInput,
     BuyerScreeningBootstrapPublic,
     CandidatePoolCreateInput,
     CandidatePoolMemberPublic,
@@ -70,6 +80,7 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.targeting import (
     BuyerLeadTierDecision,
+    BuyerProspectRuleTargetingPolicy,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     SellerTargetingPolicy,
@@ -80,6 +91,7 @@ from backend_core.growth.targeting import (
     evaluate_targeting,
     parse_targeting_policy,
 )
+from backend_core.imports.enums import CollectionJobStatus
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
 from backend_core.influencers.enums import Platform
 from backend_core.influencers.freshness import (
@@ -214,7 +226,7 @@ class CandidatePoolService:
     def _typed_policy(
         pool: CandidatePool,
         policy: TargetingPolicy,
-    ) -> SellerTargetingPolicy | BuyerTargetingPolicy:
+    ) -> SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy:
         try:
             definition = parse_targeting_policy(policy.definition)
         except (TypeError, ValidationError, ValueError) as error:
@@ -231,7 +243,7 @@ class CandidatePoolService:
         ):
             return definition
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER and isinstance(
-            definition, BuyerTargetingPolicy
+            definition, (BuyerTargetingPolicy, BuyerProspectRuleTargetingPolicy)
         ):
             return definition
         raise TargetingError(
@@ -240,13 +252,13 @@ class CandidatePoolService:
 
     @staticmethod
     def _require_reviewed_buyer_taxonomy(
-        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         *,
         status_code: int,
     ) -> None:
         """Require the exact server-owned Buyer V1 artifact for active runs."""
 
-        if not isinstance(definition, BuyerTargetingPolicy):
+        if not isinstance(definition, (BuyerTargetingPolicy, BuyerProspectRuleTargetingPolicy)):
             return
         if not definition.taxonomy.reviewed:
             raise TargetingError(
@@ -379,7 +391,7 @@ class CandidatePoolService:
         *,
         kind: CandidatePoolKind,
         source_collection_job_id: UUID | None,
-        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     ) -> None:
         CandidatePoolService._require_reviewed_buyer_taxonomy(definition, status_code=422)
         if kind is CandidatePoolKind.POTENTIAL_SELLER and not isinstance(
@@ -389,7 +401,7 @@ class CandidatePoolService:
                 422, "POLICY_KIND_MISMATCH", "Seller pool requires SELLER_V1 policy"
             )
         if kind is CandidatePoolKind.POTENTIAL_BUYER and not isinstance(
-            definition, BuyerTargetingPolicy
+            definition, (BuyerTargetingPolicy, BuyerProspectRuleTargetingPolicy)
         ):
             raise TargetingError(422, "POLICY_KIND_MISMATCH", "Buyer pool requires BUYER_V1 policy")
         if kind is CandidatePoolKind.POTENTIAL_BUYER and source_collection_job_id is None:
@@ -397,6 +409,15 @@ class CandidatePoolService:
                 422,
                 "SOURCE_COLLECTION_REQUIRED",
                 "Buyer Candidate Pools require source_collection_job_id",
+            )
+        if (
+            isinstance(definition, BuyerProspectRuleTargetingPolicy)
+            and definition.source_collection_job_id != source_collection_job_id
+        ):
+            raise TargetingError(
+                422,
+                "SOURCE_COLLECTION_MISMATCH",
+                "Market Prospect Rule source must match its Candidate Pool source",
             )
 
     @staticmethod
@@ -490,6 +511,102 @@ class CandidatePoolService:
             # another Department or is merely inactive.
             raise TargetingError(404, "OPERATOR_NOT_FOUND", "Owner operator not found")
         return owner.id
+
+    @staticmethod
+    def _market_prospect_definition(
+        payload: BuyerProspectRuleCreateInput | BuyerProspectRuleUpdateInput,
+    ) -> BuyerProspectRuleTargetingPolicy:
+        try:
+            return BuyerProspectRuleTargetingPolicy(
+                taxonomy=resolve_buyer_taxonomy_v1(),
+                category_ids=payload.category_ids,
+                follower_min=payload.follower_min,
+                follower_max=payload.follower_max,
+                buyer_lead_tiers=payload.buyer_lead_tiers,
+                source_collection_job_id=payload.source_collection_job_id,
+                recent_collection_window=payload.recent_collection_window,
+                prospect_owner_filter=payload.prospect_owner_filter,
+                prospect_owner_operator_id=payload.prospect_owner_operator_id,
+                exclude_contacted=payload.exclude_contacted,
+            )
+        except ValidationError as error:
+            raise TargetingError(
+                422,
+                "MARKET_PROSPECT_RULE_INVALID",
+                "Market Prospect Rule is invalid",
+            ) from error
+
+    async def _validate_market_prospect_source(
+        self,
+        *,
+        department_id: UUID,
+        source_collection_job_id: UUID,
+    ) -> None:
+        collection = await self.repository.get_collection_job(
+            source_collection_job_id,
+            department_id=department_id,
+        )
+        if collection is None:
+            raise TargetingError(404, "COLLECTION_JOB_NOT_FOUND", "Collection Job not found")
+        if collection.status not in {CollectionJobStatus.ACTIVE, CollectionJobStatus.COMPLETED}:
+            raise TargetingError(
+                409,
+                "COLLECTION_JOB_INELIGIBLE",
+                "Collection Job is not eligible for Market Prospect Rules",
+            )
+        taxonomy = resolve_buyer_taxonomy_v1()
+        if any(
+            label is not None and taxonomy.normalize(label) is None
+            for label in (collection.industry, collection.subdirection)
+        ):
+            raise TargetingError(
+                409,
+                "BUYER_CLIENT_CATEGORY_UNMAPPED",
+                "Collection Job client category is not mapped by Buyer Taxonomy V1",
+            )
+        if not await self.repository.has_committed_buyer_source_candidates(
+            collection_job_id=collection.id
+        ):
+            raise TargetingError(
+                409,
+                "BUYER_SOURCE_PROVENANCE_INCOMPLETE",
+                "Collection Job has no completed committed source provenance for Buyer screening",
+            )
+
+    async def _validate_market_prospect_owner_filter(
+        self,
+        *,
+        scope: DepartmentScope,
+        policy: BuyerProspectRuleTargetingPolicy,
+    ) -> None:
+        if policy.prospect_owner_filter is not BuyerProspectOwnerFilter.OPERATOR:
+            return
+        assert policy.prospect_owner_operator_id is not None
+        operator = await self.auth_repository.get_operator(policy.prospect_owner_operator_id)
+        if (
+            operator is None
+            or operator.department_id != scope.department_id
+            or operator.status is not OperatorStatus.ACTIVE
+        ):
+            raise TargetingError(404, "OPERATOR_NOT_FOUND", "Owner operator not found")
+
+    @staticmethod
+    def _market_prospect_audit_after(
+        *,
+        pool: CandidatePool,
+        policy: BuyerProspectRuleTargetingPolicy,
+        operation: str,
+    ) -> dict[str, Any]:
+        # Keep the log compact: immutable policy hash/version are audited by
+        # the policy event, while this record identifies the employee action.
+        return {
+            "market_prospect_rule_operation": operation,
+            "owner_operator_id": str(pool.owner_operator_id),
+            "status": pool.status.value,
+            "pool_version": pool.version,
+            "policy_type": policy.policy_type,
+            "source_collection_job_id": str(policy.source_collection_job_id),
+        }
 
     async def create_pool(
         self,
@@ -818,6 +935,356 @@ class CandidatePoolService:
             await self.session.rollback()
             raise
 
+    async def create_buyer_prospect_rule(
+        self,
+        context: AuthContext,
+        payload: BuyerProspectRuleCreateInput,
+        *,
+        department_id: UUID | None = None,
+        idempotency_key: str,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> BuyerProspectRulePublic:
+        """Create one closed Market Prospect Rule backed by a Buyer Pool."""
+
+        scope, _operator_id = await self._resolve_mutation_scope(context, department_id)
+        policy = self._market_prospect_definition(payload)
+        try:
+            await self._validate_market_prospect_source(
+                department_id=scope.department_id,
+                source_collection_job_id=policy.source_collection_job_id,
+            )
+            await self._validate_market_prospect_owner_filter(scope=scope, policy=policy)
+            created = await self.create_pool(
+                context,
+                CandidatePoolCreateInput(
+                    name=payload.name,
+                    kind=CandidatePoolKind.POTENTIAL_BUYER,
+                    source_collection_job_id=policy.source_collection_job_id,
+                    owner_operator_id=payload.owner_operator_id,
+                    policy=policy,
+                ),
+                department_id=scope.department_id,
+                idempotency_key=idempotency_key,
+                ip=ip,
+                user_agent=user_agent,
+            )
+            return await self.get_buyer_prospect_rule(
+                context,
+                pool_id=created.id,
+                department_id=scope.department_id,
+            )
+        except TargetingError:
+            await self.session.rollback()
+            raise
+
+    async def list_buyer_prospect_rules(
+        self,
+        context: AuthContext,
+        *,
+        cursor: UUID | None,
+        limit: int,
+        include_archived: bool,
+        department_id: UUID | None = None,
+    ) -> BuyerProspectRulePage:
+        scope = await self._resolve_read_scope(context, department_id)
+        records, next_cursor = await self.repository.list_buyer_prospect_rules(
+            department_id=scope.department_id,
+            cursor=cursor,
+            limit=limit,
+            include_archived=include_archived,
+        )
+        return BuyerProspectRulePage(
+            items=tuple(self._buyer_prospect_rule_public(record) for record in records),
+            next_cursor=next_cursor,
+        )
+
+    async def get_buyer_prospect_rule(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        department_id: UUID | None = None,
+    ) -> BuyerProspectRulePublic:
+        scope = await self._resolve_read_scope(context, department_id)
+        record = await self.repository.get_buyer_prospect_rule(
+            pool_id=pool_id,
+            department_id=scope.department_id,
+        )
+        if record is None:
+            raise TargetingError(404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found")
+        return self._buyer_prospect_rule_public(record)
+
+    async def buyer_prospect_rule_options(
+        self,
+        context: AuthContext,
+        *,
+        department_id: UUID | None = None,
+    ) -> BuyerProspectRuleOptionsPublic:
+        scope = await self._resolve_read_scope(context, department_id)
+        collections = await self.repository.list_buyer_prospect_source_collection_jobs(
+            department_id=scope.department_id
+        )
+        operators = await self.auth_repository.list_active_operators(scope.department_id)
+        taxonomy = resolve_buyer_taxonomy_v1()
+        eligible_collections = tuple(
+            collection
+            for collection in collections
+            if all(
+                label is None or taxonomy.normalize(label) is not None
+                for label in (collection.industry, collection.subdirection)
+            )
+        )
+        return BuyerProspectRuleOptionsPublic(
+            taxonomy_category_ids=taxonomy.categories,
+            source_collection_jobs=tuple(
+                BuyerProspectRuleSourceOption(
+                    id=collection.id,
+                    name=collection.name,
+                    industry=collection.industry,
+                    subdirection=collection.subdirection,
+                )
+                for collection in eligible_collections
+            ),
+            operators=tuple(
+                BuyerProspectRuleOperatorOption(id=operator.id, name=operator.name)
+                for operator in operators
+            ),
+        )
+
+    async def update_buyer_prospect_rule(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        payload: BuyerProspectRuleUpdateInput,
+        department_id: UUID | None = None,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> BuyerProspectRulePublic:
+        scope, operator_id = await self._resolve_mutation_scope(context, department_id)
+        next_definition = self._market_prospect_definition(payload)
+        mutation_started = False
+        try:
+            record = await self.repository.get_buyer_prospect_rule(
+                pool_id=pool_id,
+                department_id=scope.department_id,
+                for_update=True,
+            )
+            if record is None:
+                raise TargetingError(
+                    404,
+                    "BUYER_PROSPECT_RULE_NOT_FOUND",
+                    "Market Prospect Rule not found",
+                )
+            pool = record.pool
+            if pool.version != payload.expected_pool_version:
+                raise TargetingError(
+                    409,
+                    "VERSION_CONFLICT",
+                    "Market Prospect Rule changed; refresh before saving",
+                )
+            current_definition = self._typed_policy(pool, record.policy)
+            if not isinstance(current_definition, BuyerProspectRuleTargetingPolicy):
+                raise TargetingError(
+                    409,
+                    "POLICY_KIND_MISMATCH",
+                    "Candidate Pool is not a Market Prospect Rule",
+                )
+            await self._validate_market_prospect_source(
+                department_id=scope.department_id,
+                source_collection_job_id=next_definition.source_collection_job_id,
+            )
+            await self._validate_market_prospect_owner_filter(
+                scope=scope,
+                policy=next_definition,
+            )
+            owner_operator_id = await self._owner_operator_id(
+                scope=scope,
+                context=context,
+                actor_id=operator_id,
+                requested_owner_id=payload.owner_operator_id,
+            )
+            functional_change = next_definition.canonical_hash != current_definition.canonical_hash
+            metadata_change = (
+                pool.name != payload.name
+                or pool.owner_operator_id != owner_operator_id
+            )
+            if not functional_change and not metadata_change:
+                await self.session.commit()
+                return self._buyer_prospect_rule_public(record)
+
+            before = self._pool_audit_after(pool)
+            mutation_started = True
+            pool.name = payload.name
+            pool.owner_operator_id = owner_operator_id
+            if functional_change:
+                pool.source_collection_job_id = next_definition.source_collection_job_id
+                policy_record = await self._append_policy_locked(
+                    pool,
+                    operator_id,
+                    next_definition,
+                )
+            else:
+                policy_record = record.policy
+                pool.version += 1
+                await self.session.flush()
+            self.audit.add(
+                action=AuditAction.CANDIDATE_POOL_UPDATED,
+                result=AuditResult.SUCCESS,
+                department_id=pool.department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="candidate_pool",
+                entity_id=pool.id,
+                before=before,
+                after=self._audit_after_with_scope(
+                    self._market_prospect_audit_after(
+                        pool=pool,
+                        policy=next_definition,
+                        operation=("functional_edit" if functional_change else "metadata_edit"),
+                    ),
+                    scope,
+                ),
+            )
+            if functional_change:
+                self.audit.add(
+                    action=AuditAction.TARGETING_POLICY_CREATED,
+                    result=AuditResult.SUCCESS,
+                    department_id=pool.department_id,
+                    operator_id=operator_id,
+                    ip=ip,
+                    user_agent=user_agent,
+                    entity_type="targeting_policy",
+                    entity_id=policy_record.id,
+                    after=self._audit_after_with_scope(
+                        self._policy_audit_after(policy_record), scope
+                    ),
+                )
+            await self.session.commit()
+            updated = await self.repository.get_buyer_prospect_rule(
+                pool_id=pool.id,
+                department_id=scope.department_id,
+            )
+            if updated is None:
+                raise TargetingError(
+                    500,
+                    "BUYER_PROSPECT_RULE_PROJECTION_INVALID",
+                    "Market Prospect Rule projection is invalid",
+                )
+            return self._buyer_prospect_rule_public(updated)
+        except TargetingError:
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def set_buyer_prospect_rule_lifecycle(
+        self,
+        context: AuthContext,
+        *,
+        pool_id: UUID,
+        payload: BuyerProspectRuleLifecycleInput,
+        department_id: UUID | None = None,
+        ip: str = "unknown",
+        user_agent: str = "unknown",
+    ) -> BuyerProspectRulePublic:
+        scope, operator_id = await self._resolve_mutation_scope(context, department_id)
+        mutation_started = False
+        try:
+            record = await self.repository.get_buyer_prospect_rule(
+                pool_id=pool_id,
+                department_id=scope.department_id,
+                for_update=True,
+            )
+            if record is None:
+                raise TargetingError(
+                    404,
+                    "BUYER_PROSPECT_RULE_NOT_FOUND",
+                    "Market Prospect Rule not found",
+                )
+            pool = record.pool
+            policy = self._typed_policy(pool, record.policy)
+            if not isinstance(policy, BuyerProspectRuleTargetingPolicy):
+                raise TargetingError(
+                    409,
+                    "POLICY_KIND_MISMATCH",
+                    "Candidate Pool is not a Market Prospect Rule",
+                )
+            if pool.version != payload.expected_pool_version:
+                raise TargetingError(
+                    409,
+                    "VERSION_CONFLICT",
+                    "Market Prospect Rule changed; refresh before updating status",
+                )
+            if pool.status is CandidatePoolStatus.ARCHIVED and payload.status is not CandidatePoolStatus.ARCHIVED:
+                raise TargetingError(
+                    409,
+                    "CANDIDATE_POOL_ARCHIVED",
+                    "Archived Market Prospect Rules cannot be re-enabled",
+                )
+            if pool.status is payload.status:
+                await self.session.commit()
+                return self._buyer_prospect_rule_public(record)
+            before = self._pool_audit_after(pool)
+            mutation_started = True
+            pool.status = payload.status
+            pool.version += 1
+            await self.session.flush()
+            self.audit.add(
+                action=AuditAction.CANDIDATE_POOL_UPDATED,
+                result=AuditResult.SUCCESS,
+                department_id=pool.department_id,
+                operator_id=operator_id,
+                ip=ip,
+                user_agent=user_agent,
+                entity_type="candidate_pool",
+                entity_id=pool.id,
+                before=before,
+                after=self._audit_after_with_scope(
+                    self._market_prospect_audit_after(
+                        pool=pool,
+                        policy=policy,
+                        operation=(
+                            "enabled"
+                            if payload.status is CandidatePoolStatus.ACTIVE
+                            else (
+                                "disabled"
+                                if payload.status is CandidatePoolStatus.DISABLED
+                                else "archived"
+                            )
+                        ),
+                    ),
+                    scope,
+                ),
+            )
+            await self.session.commit()
+            updated = await self.repository.get_buyer_prospect_rule(
+                pool_id=pool.id,
+                department_id=scope.department_id,
+            )
+            if updated is None:
+                raise TargetingError(
+                    500,
+                    "BUYER_PROSPECT_RULE_PROJECTION_INVALID",
+                    "Market Prospect Rule projection is invalid",
+                )
+            return self._buyer_prospect_rule_public(updated)
+        except TargetingError:
+            if mutation_started:
+                await self.session.rollback()
+            else:
+                await self.session.commit()
+            raise
+        except BaseException:
+            await self.session.rollback()
+            raise
+
     async def append_policy(
         self,
         context: AuthContext,
@@ -937,7 +1404,7 @@ class CandidatePoolService:
         self,
         pool: CandidatePool,
         operator_id: UUID,
-        definition: SellerTargetingPolicy | BuyerTargetingPolicy,
+        definition: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     ) -> TargetingPolicy:
         typed_definition = parse_targeting_policy(definition)
         self._validate_policy_for_pool(
@@ -1117,7 +1584,7 @@ class CandidatePoolService:
         *,
         pool: CandidatePool,
         policy_record: TargetingPolicy,
-        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         operator_id: UUID,
         scope: DepartmentScope,
         idempotency_key: str,
@@ -1291,7 +1758,7 @@ class CandidatePoolService:
                         self._policy_audit_after(policy_record), scope
                     ),
                 )
-                policy: SellerTargetingPolicy | BuyerTargetingPolicy = requested_policy
+                policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy = requested_policy
             else:
                 if request.is_current_policy_run or request.is_long_inactivity_current_policy_run:
                     selected_policy_record = await self.repository.get_current_policy(
@@ -1463,6 +1930,52 @@ class CandidatePoolService:
             owner=CampaignOwnerSummary.model_validate(record.owner),
         )
 
+    def _buyer_prospect_rule_public(
+        self,
+        record: BuyerProspectRuleRecord,
+    ) -> BuyerProspectRulePublic:
+        """Project only the current immutable Market policy for employee views."""
+
+        pool = record.pool
+        definition = self._typed_policy(pool, record.policy)
+        if (
+            not isinstance(definition, BuyerProspectRuleTargetingPolicy)
+            or pool.current_policy_id != record.policy.id
+            or pool.source_collection_job_id != definition.source_collection_job_id
+        ):
+            raise TargetingError(
+                500,
+                "BUYER_PROSPECT_RULE_PROJECTION_INVALID",
+                "Market Prospect Rule projection is invalid",
+            )
+        return BuyerProspectRulePublic(
+            id=pool.id,
+            department_id=pool.department_id,
+            owner_operator_id=pool.owner_operator_id,
+            owner=CampaignOwnerSummary.model_validate(record.owner),
+            name=pool.name,
+            status=pool.status,
+            version=pool.version,
+            current_policy_id=record.policy.id,
+            current_policy_version=record.policy.version,
+            category_ids=definition.category_ids,
+            follower_min=definition.follower_min,
+            follower_max=definition.follower_max,
+            buyer_lead_tiers=definition.buyer_lead_tiers,
+            source_collection_job_id=definition.source_collection_job_id,
+            recent_collection_window=definition.recent_collection_window,
+            prospect_owner_filter=definition.prospect_owner_filter,
+            prospect_owner_operator_id=definition.prospect_owner_operator_id,
+            exclude_contacted=definition.exclude_contacted,
+            latest_run=(
+                CandidatePoolRunPublic.model_validate(record.latest_run)
+                if record.latest_run is not None
+                else None
+            ),
+            created_at=pool.created_at,
+            updated_at=pool.updated_at,
+        )
+
     @staticmethod
     def _member_public(
         record: CandidatePoolMemberProjectionRecord,
@@ -1542,7 +2055,7 @@ class CandidatePoolService:
 
     def _evaluate_targeting(
         self,
-        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         facts: CandidateFactBundle,
         *,
         as_of: datetime,
@@ -1557,12 +2070,26 @@ class CandidatePoolService:
 
     def _evaluation_record(
         self,
-        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         facts: CandidateFactBundle,
         *,
         as_of: datetime,
     ) -> tuple[CandidateFactBundle, TargetingEvaluation, BuyerLeadTierDecision | None]:
         evaluation = self._evaluate_targeting(policy, facts, as_of=as_of)
+        if isinstance(policy, BuyerProspectRuleTargetingPolicy):
+            # Market rules store only selected matches and insufficient rows.
+            # Excluded rows remain counted on the Run but never leak into the
+            # employee result view as an apparent prospect list.
+            decision = evaluate_buyer_lead_tier(policy.buyer_tier_policy(), facts)
+            return (
+                facts,
+                evaluation,
+                (
+                    decision
+                    if evaluation.result is not TargetingEvaluationResult.NOT_MATCH
+                    else None
+                ),
+            )
         return (
             facts,
             evaluation,
@@ -1755,6 +2282,7 @@ class CandidatePoolService:
         await self.session.flush()
         collection_context = self.repository.collection_context_snapshot(
             pool=pool,
+            policy=policy,
             input_watermark=run.input_watermark,
         )
         try:

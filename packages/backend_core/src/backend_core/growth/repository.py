@@ -44,6 +44,7 @@ from backend_core.growth.models import (
 )
 from backend_core.growth.targeting import (
     BuyerLeadTierDecision,
+    BuyerProspectRuleTargetingPolicy,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
@@ -53,6 +54,7 @@ from backend_core.growth.targeting import (
     TargetingEvaluation,
 )
 from backend_core.imports.enums import (
+    CollectionJobStatus,
     ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
@@ -65,9 +67,12 @@ from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
     InfluencerCurrentMetrics,
+    InfluencerMetricSnapshot,
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
+from backend_core.outreach.enums import OutreachEventType
+from backend_core.outreach.models import OutreachEvent
 from backend_core.influencers.repository import (
     eligible_huitun_freshness,
     visible_influencer_criteria,
@@ -104,6 +109,16 @@ class CandidatePoolOwnerRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BuyerProspectRuleRecord:
+    """One closed Market Prospect Rule with its current immutable policy."""
+
+    pool: CandidatePool
+    owner: Operator
+    policy: TargetingPolicy
+    latest_run: CandidatePoolRun | None
+
+
+@dataclass(frozen=True, slots=True)
 class CandidatePoolMemberProjectionRecord:
     """One historical Candidate Member with safe current canonical identity."""
 
@@ -122,7 +137,7 @@ def _utc(value: datetime | None) -> datetime | None:
 
 def _committed_provenance_predicate(
     account_id: ColumnElement[UUID],
-    collection_job_id: UUID,
+    collection_job_id: UUID | ColumnElement[UUID],
 ) -> ColumnElement[bool]:
     committed_actions = (
         ImportRowAction.CREATE,
@@ -154,6 +169,57 @@ def _committed_provenance_predicate(
             )
         ),
     )
+
+
+def _committed_provenance_as_of_predicate(
+    account_id: ColumnElement[UUID],
+    collection_job_id: UUID,
+    as_of: datetime,
+) -> ColumnElement[bool]:
+    """Bound Buyer Prospect source membership to the durable Run clock."""
+
+    committed_actions = (
+        ImportRowAction.CREATE,
+        ImportRowAction.UPDATE,
+        ImportRowAction.NO_CHANGE,
+    )
+    return cast(
+        ColumnElement[bool],
+        exists(
+            select(1)
+            .select_from(ImportRow)
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .join(
+                ImportJobFile,
+                and_(
+                    ImportJobFile.id == ImportRow.import_job_file_id,
+                    ImportJobFile.import_job_id == ImportRow.import_job_id,
+                ),
+            )
+            .where(
+                ImportRow.matched_platform_account_id == account_id,
+                ImportRow.committed_at.is_not(None),
+                ImportRow.committed_at <= as_of,
+                ImportRow.committed_action.in_(committed_actions),
+                ImportJob.collection_job_id == collection_job_id,
+                ImportJob.status == ImportJobStatus.COMPLETED,
+                ImportJob.confirmed_revision.is_not(None),
+                ImportRow.preview_revision == ImportJob.confirmed_revision,
+                ImportJobFile.status == ImportJobFileStatus.READY,
+            )
+        ),
+    )
+
+
+def _source_collection_job_id_for_policy(
+    pool: CandidatePool,
+    policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
+) -> UUID | None:
+    """Keep a historical Market run bound to its immutable policy source."""
+
+    if isinstance(policy, BuyerProspectRuleTargetingPolicy):
+        return policy.source_collection_job_id
+    return pool.source_collection_job_id
 
 
 class CandidatePoolRepository:
@@ -250,6 +316,145 @@ class CandidatePoolRepository:
             items=items,
             next_cursor=items[-1].pool.id if len(rows) > limit and items else None,
         )
+
+    async def get_buyer_prospect_rule(
+        self,
+        *,
+        pool_id: UUID,
+        department_id: UUID,
+        for_update: bool = False,
+    ) -> BuyerProspectRuleRecord | None:
+        statement = (
+            select(CandidatePool, Operator, TargetingPolicy)
+            .join(
+                Operator,
+                and_(
+                    Operator.id == CandidatePool.owner_operator_id,
+                    Operator.department_id == CandidatePool.department_id,
+                ),
+            )
+            .join(
+                TargetingPolicy,
+                and_(
+                    TargetingPolicy.id == CandidatePool.current_policy_id,
+                    TargetingPolicy.pool_id == CandidatePool.id,
+                ),
+            )
+            .where(
+                CandidatePool.id == pool_id,
+                CandidatePool.department_id == department_id,
+                CandidatePool.kind == CandidatePoolKind.POTENTIAL_BUYER,
+                TargetingPolicy.definition["policy_type"].as_string()
+                == BuyerProspectRuleTargetingPolicy.model_fields["policy_type"].default,
+            )
+        )
+        if for_update:
+            statement = statement.execution_options(populate_existing=True).with_for_update()
+        row = (await self.session.execute(statement)).first()
+        if row is None:
+            return None
+        pool, owner, policy = row
+        latest_run = await self.get_latest_run_for_policy(pool_id=pool.id, policy_id=policy.id)
+        return BuyerProspectRuleRecord(
+            pool=pool,
+            owner=owner,
+            policy=policy,
+            latest_run=latest_run,
+        )
+
+    async def list_buyer_prospect_rules(
+        self,
+        *,
+        department_id: UUID,
+        cursor: UUID | None,
+        limit: int,
+        include_archived: bool,
+    ) -> tuple[tuple[BuyerProspectRuleRecord, ...], UUID | None]:
+        statement = (
+            select(CandidatePool, Operator, TargetingPolicy)
+            .join(
+                Operator,
+                and_(
+                    Operator.id == CandidatePool.owner_operator_id,
+                    Operator.department_id == CandidatePool.department_id,
+                ),
+            )
+            .join(
+                TargetingPolicy,
+                and_(
+                    TargetingPolicy.id == CandidatePool.current_policy_id,
+                    TargetingPolicy.pool_id == CandidatePool.id,
+                ),
+            )
+            .where(
+                CandidatePool.department_id == department_id,
+                CandidatePool.kind == CandidatePoolKind.POTENTIAL_BUYER,
+                TargetingPolicy.definition["policy_type"].as_string()
+                == BuyerProspectRuleTargetingPolicy.model_fields["policy_type"].default,
+            )
+        )
+        if not include_archived:
+            statement = statement.where(CandidatePool.status != CandidatePoolStatus.ARCHIVED)
+        if cursor is not None:
+            statement = statement.where(CandidatePool.id > cursor)
+        statement = statement.order_by(CandidatePool.id).limit(limit + 1)
+        rows = tuple((await self.session.execute(statement)).all())
+        visible_rows = rows[:limit]
+        latest_runs = await self.latest_runs_for_policy_ids(
+            policy_ids=tuple(policy.id for _pool, _owner, policy in visible_rows)
+        )
+        items = tuple(
+            BuyerProspectRuleRecord(
+                pool=pool,
+                owner=owner,
+                policy=policy,
+                latest_run=latest_runs.get(policy.id),
+            )
+            for pool, owner, policy in visible_rows
+        )
+        return (
+            items,
+            items[-1].pool.id if len(rows) > limit and items else None,
+        )
+
+    async def list_buyer_prospect_source_collection_jobs(
+        self,
+        *,
+        department_id: UUID,
+    ) -> tuple[CollectionJob, ...]:
+        """Return only same-Department jobs with durable Buyer source evidence.
+
+        Category mapping remains a frozen service concern, but a chooser must
+        never advertise a CollectionJob that cannot supply a committed Buyer
+        candidate at all.  This mirrors the exact provenance predicate used by
+        run materialization without doing one query per job.
+        """
+
+        eligible_source = exists(
+            select(1)
+            .select_from(InfluencerPlatformAccount)
+            .join(Influencer, Influencer.id == InfluencerPlatformAccount.influencer_id)
+            .where(
+                InfluencerPlatformAccount.is_active.is_(True),
+                *visible_influencer_criteria(),
+                _committed_provenance_predicate(
+                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                    cast(ColumnElement[UUID], CollectionJob.id),
+                ),
+            )
+        )
+        jobs = await self.session.scalars(
+            select(CollectionJob)
+            .where(
+                CollectionJob.department_id == department_id,
+                CollectionJob.status.in_(
+                    (CollectionJobStatus.ACTIVE, CollectionJobStatus.COMPLETED)
+                ),
+                eligible_source,
+            )
+            .order_by(CollectionJob.name, CollectionJob.id)
+        )
+        return tuple(jobs)
 
     async def get_policy(
         self,
@@ -501,12 +706,62 @@ class CandidatePoolRepository:
         )
         return (await self.session.execute(statement)).scalar_one_or_none()
 
+    async def get_latest_run_for_policy(
+        self,
+        *,
+        pool_id: UUID,
+        policy_id: UUID,
+    ) -> CandidatePoolRun | None:
+        return cast(
+            CandidatePoolRun | None,
+            await self.session.scalar(
+                select(CandidatePoolRun)
+                .where(
+                    CandidatePoolRun.pool_id == pool_id,
+                    CandidatePoolRun.policy_id == policy_id,
+                )
+                .order_by(CandidatePoolRun.created_at.desc(), CandidatePoolRun.id.desc())
+                .limit(1)
+            ),
+        )
+
+    async def latest_runs_for_policy_ids(
+        self,
+        *,
+        policy_ids: tuple[UUID, ...],
+    ) -> dict[UUID, CandidatePoolRun]:
+        if not policy_ids:
+            return {}
+        ranked = (
+            select(
+                CandidatePoolRun.id.label("run_id"),
+                CandidatePoolRun.policy_id.label("policy_id"),
+                func.row_number()
+                .over(
+                    partition_by=CandidatePoolRun.policy_id,
+                    order_by=(CandidatePoolRun.created_at.desc(), CandidatePoolRun.id.desc()),
+                )
+                .label("row_rank"),
+            )
+            .where(CandidatePoolRun.policy_id.in_(policy_ids))
+            .subquery()
+        )
+        runs = tuple(
+            await self.session.scalars(
+                select(CandidatePoolRun)
+                .join(ranked, CandidatePoolRun.id == ranked.c.run_id)
+                .where(ranked.c.row_rank == 1)
+            )
+        )
+        return {run.policy_id: run for run in runs}
+
     async def capture_input_watermark(
         self,
         *,
         pool: CandidatePool,
-        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     ) -> dict[str, object]:
+        source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
         current_contacts = (
             select(
                 InfluencerContact.influencer_id.label("influencer_id"),
@@ -546,11 +801,11 @@ class CandidatePoolRepository:
             )
         )
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            assert pool.source_collection_job_id is not None
+            assert source_collection_job_id is not None
             statement = statement.where(
                 _committed_provenance_predicate(
                     cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    pool.source_collection_job_id,
+                    source_collection_job_id,
                 )
             )
         count, account_updated, metrics_updated, source_updated, contacts_updated = (
@@ -566,9 +821,9 @@ class CandidatePoolRepository:
             "policy_version": None,
             "policy_hash": policy.canonical_hash,
         }
-        if pool.source_collection_job_id is not None:
+        if source_collection_job_id is not None:
             collection = await self.get_collection_job(
-                pool.source_collection_job_id,
+                source_collection_job_id,
                 department_id=pool.department_id,
             )
             if collection is not None:
@@ -586,13 +841,15 @@ class CandidatePoolRepository:
     def collection_context_snapshot(
         *,
         pool: CandidatePool,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         input_watermark: dict[str, object] | None,
     ) -> CollectionContextSnapshot | None:
         """Read reservation-time Buyer context without consulting live CollectionJob state."""
 
         if pool.kind is not CandidatePoolKind.POTENTIAL_BUYER:
             return None
-        if pool.source_collection_job_id is None or input_watermark is None:
+        source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
+        if source_collection_job_id is None or input_watermark is None:
             return None
         raw_snapshot = input_watermark.get("collection_context")
         if not isinstance(raw_snapshot, dict):
@@ -601,7 +858,7 @@ class CandidatePoolRepository:
             snapshot = CollectionContextSnapshot.model_validate(raw_snapshot)
         except ValueError:
             return None
-        if snapshot.source_collection_job_id != pool.source_collection_job_id:
+        if snapshot.source_collection_job_id != source_collection_job_id:
             return None
         return snapshot
 
@@ -609,7 +866,7 @@ class CandidatePoolRepository:
         self,
         *,
         pool: CandidatePool,
-        policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+        policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
         as_of: datetime,
         freshness_policy: FreshnessPolicy,
         collection_context: CollectionContextSnapshot | None,
@@ -620,8 +877,9 @@ class CandidatePoolRepository:
         if not 1 <= batch_size <= MAX_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
         cursor: UUID | None = None
+        source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            if pool.source_collection_job_id is None:
+            if source_collection_job_id is None:
                 raise ValueError("Buyer pools require source_collection_job_id")
 
         while True:
@@ -629,6 +887,9 @@ class CandidatePoolRepository:
                 pool=pool,
                 cursor=cursor,
                 batch_size=batch_size,
+                as_of=as_of,
+                market_prospect_rule=isinstance(policy, BuyerProspectRuleTargetingPolicy),
+                source_collection_job_id=source_collection_job_id,
             )
             if not accounts:
                 return
@@ -636,8 +897,10 @@ class CandidatePoolRepository:
             facts = await self._hydrate_fact_batch(
                 accounts=accounts,
                 collection_context=collection_context,
-                source_collection_job_id=pool.source_collection_job_id,
+                source_collection_job_id=source_collection_job_id,
                 buyer=pool.kind is CandidatePoolKind.POTENTIAL_BUYER,
+                market_prospect_rule=isinstance(policy, BuyerProspectRuleTargetingPolicy),
+                department_id=pool.department_id,
                 as_of=as_of,
                 freshness_policy=freshness_policy,
                 include_content_activity=(
@@ -653,6 +916,9 @@ class CandidatePoolRepository:
         pool: CandidatePool,
         cursor: UUID | None,
         batch_size: int,
+        as_of: datetime,
+        market_prospect_rule: bool,
+        source_collection_job_id: UUID | None,
     ) -> tuple[InfluencerPlatformAccount, ...]:
         statement = (
             select(InfluencerPlatformAccount)
@@ -665,12 +931,20 @@ class CandidatePoolRepository:
         if cursor is not None:
             statement = statement.where(InfluencerPlatformAccount.id > cursor)
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            if pool.source_collection_job_id is None:
+            if source_collection_job_id is None:
                 return ()
             statement = statement.where(
-                _committed_provenance_predicate(
-                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    pool.source_collection_job_id,
+                (
+                    _committed_provenance_as_of_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_collection_job_id,
+                        as_of,
+                    )
+                    if market_prospect_rule
+                    else _committed_provenance_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_collection_job_id,
+                    )
                 )
             )
         statement = statement.order_by(InfluencerPlatformAccount.id).limit(batch_size)
@@ -683,6 +957,8 @@ class CandidatePoolRepository:
         collection_context: CollectionContextSnapshot | None,
         source_collection_job_id: UUID | None,
         buyer: bool,
+        market_prospect_rule: bool,
+        department_id: UUID,
         as_of: datetime,
         freshness_policy: FreshnessPolicy,
         include_content_activity: bool = False,
@@ -725,12 +1001,20 @@ class CandidatePoolRepository:
         state_rows = tuple(
             (
                 await self.session.execute(
-                    select(InfluencerSourceState, ImportRow)
+                    select(InfluencerSourceState, ImportRow, ImportJob, ImportJobFile)
                     .outerjoin(
                         ImportRow,
                         and_(
                             ImportRow.id == InfluencerSourceState.last_import_row_id,
                             ImportRow.import_job_id == InfluencerSourceState.last_import_job_id,
+                        ),
+                    )
+                    .outerjoin(ImportJob, ImportJob.id == ImportRow.import_job_id)
+                    .outerjoin(
+                        ImportJobFile,
+                        and_(
+                            ImportJobFile.id == ImportRow.import_job_file_id,
+                            ImportJobFile.import_job_id == ImportRow.import_job_id,
                         ),
                     )
                     .where(InfluencerSourceState.platform_account_id.in_(account_ids))
@@ -748,6 +1032,43 @@ class CandidatePoolRepository:
         provenance = (
             await self._buyer_provenance(account_ids, source_collection_job_id) if buyer else {}
         )
+        metric_snapshots = (
+            await self._latest_metric_snapshots_as_of(account_ids=account_ids, as_of=as_of)
+            if market_prospect_rule
+            else {}
+        )
+        buyer_source_provenance = (
+            await self._buyer_source_provenance_as_of(
+                account_ids=account_ids,
+                source_collection_job_id=source_collection_job_id,
+                as_of=as_of,
+            )
+            if market_prospect_rule
+            else {}
+        )
+        owner_by_influencer = (
+            {
+                influencer_id: owner_operator_id
+                for influencer_id, owner_operator_id in (
+                    await self.session.execute(
+                        select(Influencer.id, Influencer.owner_operator_id).where(
+                            Influencer.id.in_(influencer_ids)
+                        )
+                    )
+                ).all()
+            }
+            if market_prospect_rule
+            else {}
+        )
+        contacted_by_influencer = (
+            await self._contacted_outreach_events_as_of(
+                influencer_ids=influencer_ids,
+                department_id=department_id,
+                as_of=as_of,
+            )
+            if market_prospect_rule
+            else {}
+        )
 
         account_sources = {account.id: account.source for account in accounts}
         metrics_by_account = {
@@ -759,8 +1080,8 @@ class CandidatePoolRepository:
         for influencer_id, contact_type in contacts:
             contacts_by_influencer[influencer_id].add(contact_type)
         state_by_account = {
-            state.platform_account_id: (state, import_row)
-            for state, import_row in state_rows
+            state.platform_account_id: (state, import_row, import_job, import_file)
+            for state, import_row, import_job, import_file in state_rows
             if account_sources.get(state.platform_account_id) == state.source
         }
 
@@ -771,12 +1092,20 @@ class CandidatePoolRepository:
             metric_import_row = metric_context[1] if metric_context is not None else None
             metric_import_job = metric_context[2] if metric_context is not None else None
             metric_import_file = metric_context[3] if metric_context is not None else None
-            state, state_import_row = state_by_account.get(account.id, (None, None))
+            state, state_import_row, state_import_job, state_import_file = state_by_account.get(
+                account.id, (None, None, None, None)
+            )
             metric_values = metric.metrics if metric is not None else {}
+            metric_snapshot = metric_snapshots.get(account.id)
+            snapshot_values = metric_snapshot.metrics if metric_snapshot is not None else {}
+            source_provenance = buyer_source_provenance.get(account.id)
+            contacted_event = contacted_by_influencer.get(account.influencer_id)
             creator_tags, creator_import_job_ids = self._creator_classification(
                 account,
                 state,
                 state_import_row,
+                state_import_job,
+                state_import_file,
             )
             last_observed = freshness.get(account.id)
             freshness_status = (
@@ -791,7 +1120,26 @@ class CandidatePoolRepository:
                     platform=account.platform,
                     source=account.source,
                     current_contact_types=tuple(contacts_by_influencer[account.influencer_id]),
-                    followers_count=self._strict_metric(metric_values.get("followers_count")),
+                    followers_count=(
+                        self._strict_metric(snapshot_values.get("followers_count"))
+                        if market_prospect_rule
+                        else self._strict_metric(metric_values.get("followers_count"))
+                    ),
+                    follower_metric_snapshot_id=(
+                        metric_snapshot.id if metric_snapshot is not None else None
+                    ),
+                    follower_metric_snapshot_hash=(
+                        metric_snapshot.metrics_hash if metric_snapshot is not None else None
+                    ),
+                    follower_metric_snapshot_import_job_id=(
+                        metric_snapshot.import_job_id if metric_snapshot is not None else None
+                    ),
+                    follower_metric_snapshot_import_row_id=(
+                        metric_snapshot.import_row_id if metric_snapshot is not None else None
+                    ),
+                    follower_metric_snapshot_captured_at=(
+                        _utc(metric_snapshot.captured_at) if metric_snapshot is not None else None
+                    ),
                     notes_7d=self._strict_metric(metric_values.get("notes_7d")),
                     notes_60d=self._strict_metric(metric_values.get("notes_60d")),
                     source_tags=account.source_tags,
@@ -807,6 +1155,18 @@ class CandidatePoolRepository:
                         import_file=metric_import_file,
                     ),
                     source_collection_job_id=source_collection_job_id,
+                    buyer_source_import_job_file_id=(
+                        source_provenance[0] if source_provenance is not None else None
+                    ),
+                    buyer_source_import_job_id=(
+                        source_provenance[1] if source_provenance is not None else None
+                    ),
+                    buyer_source_import_row_id=(
+                        source_provenance[2] if source_provenance is not None else None
+                    ),
+                    buyer_source_acquired_at=(
+                        source_provenance[3] if source_provenance is not None else None
+                    ),
                     collection_industry=(
                         collection_context.industry if collection_context else None
                     ),
@@ -816,9 +1176,182 @@ class CandidatePoolRepository:
                     creator_classification_tags=creator_tags,
                     source_collection_import_job_ids=tuple(provenance.get(account.id, ())),
                     creator_classification_import_job_ids=creator_import_job_ids,
+                    owner_operator_id=owner_by_influencer.get(account.influencer_id),
+                    contacted_outreach_event_id=(
+                        contacted_event[0] if contacted_event is not None else None
+                    ),
+                    contacted_outreach_occurred_at=(
+                        contacted_event[1] if contacted_event is not None else None
+                    ),
                 )
             )
         return tuple(result)
+
+    async def _latest_metric_snapshots_as_of(
+        self,
+        *,
+        account_ids: tuple[UUID, ...],
+        as_of: datetime,
+    ) -> dict[UUID, InfluencerMetricSnapshot]:
+        """Resolve the latest immutable metric snapshot visible to one Run."""
+
+        if not account_ids:
+            return {}
+        ranked = (
+            select(
+                InfluencerMetricSnapshot.id.label("snapshot_id"),
+                func.row_number()
+                .over(
+                    partition_by=InfluencerMetricSnapshot.platform_account_id,
+                    order_by=(
+                        InfluencerMetricSnapshot.captured_at.desc(),
+                        InfluencerMetricSnapshot.id.desc(),
+                    ),
+                )
+                .label("row_rank"),
+            )
+            .where(
+                InfluencerMetricSnapshot.platform_account_id.in_(account_ids),
+                InfluencerMetricSnapshot.captured_at <= as_of,
+            )
+            .subquery()
+        )
+        snapshots = tuple(
+            await self.session.scalars(
+                select(InfluencerMetricSnapshot)
+                .join(
+                    ranked,
+                    InfluencerMetricSnapshot.id == ranked.c.snapshot_id,
+                )
+                .where(ranked.c.row_rank == 1)
+            )
+        )
+        return {snapshot.platform_account_id: snapshot for snapshot in snapshots}
+
+    async def _buyer_source_provenance_as_of(
+        self,
+        *,
+        account_ids: tuple[UUID, ...],
+        source_collection_job_id: UUID | None,
+        as_of: datetime,
+    ) -> dict[UUID, tuple[UUID, UUID, UUID, datetime | None]]:
+        """Return one source-file lineage record per account for Market rules.
+
+        Finite windows rely only on a trusted, known ``source_acquired_at``;
+        the ALL choice still retains the committed READY-file provenance even
+        when historical acquisition time is unavailable.
+        """
+
+        if not account_ids or source_collection_job_id is None:
+            return {}
+        committed_actions = (
+            ImportRowAction.CREATE,
+            ImportRowAction.UPDATE,
+            ImportRowAction.NO_CHANGE,
+        )
+        rows = (
+            await self.session.execute(
+                select(
+                    ImportRow.matched_platform_account_id,
+                    ImportJobFile.id,
+                    ImportJob.id,
+                    ImportRow.id,
+                    ImportJobFile.source_acquired_at,
+                    ImportJobFile.source_acquired_at_confirmation_required,
+                )
+                .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+                .join(
+                    ImportJobFile,
+                    and_(
+                        ImportJobFile.id == ImportRow.import_job_file_id,
+                        ImportJobFile.import_job_id == ImportRow.import_job_id,
+                    ),
+                )
+                .where(
+                    ImportRow.matched_platform_account_id.in_(account_ids),
+                    ImportRow.committed_at.is_not(None),
+                    ImportRow.committed_at <= as_of,
+                    ImportRow.committed_action.in_(committed_actions),
+                    ImportJob.collection_job_id == source_collection_job_id,
+                    ImportJob.status == ImportJobStatus.COMPLETED,
+                    ImportJob.confirmed_revision.is_not(None),
+                    ImportRow.preview_revision == ImportJob.confirmed_revision,
+                    ImportJobFile.status == ImportJobFileStatus.READY,
+                )
+            )
+        ).all()
+        grouped: dict[
+            UUID, list[tuple[UUID, UUID, UUID, datetime | None, bool]]
+        ] = defaultdict(list)
+        for account_id, file_id, job_id, row_id, acquired_at, confirmation_required in rows:
+            if account_id is not None:
+                grouped[account_id].append(
+                    (
+                        file_id,
+                        job_id,
+                        row_id,
+                        _utc(acquired_at),
+                        bool(confirmation_required),
+                    )
+                )
+
+        result: dict[UUID, tuple[UUID, UUID, UUID, datetime | None]] = {}
+        for account_id, candidates in grouped.items():
+            trusted_as_of = [
+                item
+                for item in candidates
+                if item[3] is not None and not item[4] and item[3] <= as_of
+            ]
+            if trusted_as_of:
+                selected = max(trusted_as_of, key=lambda item: (item[3], item[0]))
+            else:
+                selected = max(
+                    candidates,
+                    key=lambda item: (
+                        item[3] is not None,
+                        item[3] or datetime.min.replace(tzinfo=UTC),
+                        item[0],
+                    ),
+                )
+            result[account_id] = (
+                selected[0],
+                selected[1],
+                selected[2],
+                None if selected[4] else selected[3],
+            )
+        return result
+
+    async def _contacted_outreach_events_as_of(
+        self,
+        *,
+        influencer_ids: tuple[UUID, ...],
+        department_id: UUID,
+        as_of: datetime,
+    ) -> dict[UUID, tuple[UUID, datetime]]:
+        """Resolve the latest same-Department OUTREACH_SENT event at Run time."""
+
+        if not influencer_ids:
+            return {}
+        events = tuple(
+            await self.session.scalars(
+                select(OutreachEvent)
+                .where(
+                    OutreachEvent.influencer_id.in_(influencer_ids),
+                    OutreachEvent.department_id == department_id,
+                    OutreachEvent.event_type == OutreachEventType.OUTREACH_SENT,
+                    OutreachEvent.occurred_at <= as_of,
+                )
+                .order_by(
+                    OutreachEvent.influencer_id,
+                    OutreachEvent.occurred_at.desc(),
+                    OutreachEvent.id.desc(),
+                )
+            )
+        )
+        result: dict[UUID, tuple[UUID, datetime]] = {}
+        for event in events:
+            result.setdefault(event.influencer_id, (event.id, _utc(event.occurred_at) or as_of))
+        return result
 
     @classmethod
     def _grey_dolphin_activity_fact(
@@ -1245,15 +1778,19 @@ class CandidatePoolRepository:
         account: InfluencerPlatformAccount,
         state: InfluencerSourceState | None,
         state_import_row: ImportRow | None,
+        state_import_job: ImportJob | None,
+        state_import_file: ImportJobFile | None,
     ) -> tuple[tuple[str, ...] | None, tuple[UUID, ...]]:
-        """Return XHS tags only when the exact tag snapshot has import provenance.
+        """Return the source-specific creator classification with exact provenance.
 
-        Source-state fields are merged by Import and may retain tags from an
-        older row after a newer tagless update.  ``last_import_job_id`` alone
-        therefore cannot prove which import supplied the classification.
+        XHS retains its established ``creator_tags`` proof. Huitun Douyin's
+        creator ``分类`` lives in the immutable imported row, while CollectionJob
+        ``industry`` is source context and ``内容标签``/``带货类目`` must never stand
+        in for either category. Both branches fail closed if their exact row
+        lineage cannot be proven.
         """
 
-        if account.platform is not Platform.XIAOHONGSHU:
+        if account.platform not in {Platform.XIAOHONGSHU, Platform.DOUYIN}:
             return (), ()
         if state is None or state_import_row is None:
             return None, ()
@@ -1269,6 +1806,31 @@ class CandidatePoolRepository:
             }
         ):
             return None, ()
+
+        if account.platform is Platform.DOUYIN:
+            if (
+                account.source is not DataSource.HUITUN
+                or state.source is not DataSource.HUITUN
+                or state_import_job is None
+                or state_import_file is None
+                or state_import_job.id != state.last_import_job_id
+                or state_import_job.status is not ImportJobStatus.COMPLETED
+                or state_import_job.confirmed_revision is None
+                or state_import_job.source_type is not ImportSourceType.MANUAL_HUITUN_EXPORT
+                or state_import_row.preview_revision != state_import_job.confirmed_revision
+                or state_import_file.id != state_import_row.import_job_file_id
+                or state_import_file.import_job_id != state_import_job.id
+                or state_import_file.status is not ImportJobFileStatus.READY
+            ):
+                return None, ()
+            raw_data = state_import_row.raw_data
+            category = raw_data.get("分类") if isinstance(raw_data, dict) else None
+            if type(category) is not str or not category.strip():
+                return None, ()
+            # Do not split or infer from free text. Huitun's 分类 is one
+            # primary self-classification, normalized later by the frozen
+            # taxonomy; content tags and commerce category stay unused here.
+            return (category.strip(),), (state.last_import_job_id,)
 
         state_tags = CandidatePoolRepository._tag_values(
             state.source_data.get("creator_tags") if isinstance(state.source_data, dict) else None
@@ -1403,6 +1965,7 @@ class CandidatePoolRepository:
 
 
 __all__ = [
+    "BuyerProspectRuleRecord",
     "CandidatePoolPage",
     "CandidatePoolRepository",
     "CandidateRunMemberPage",

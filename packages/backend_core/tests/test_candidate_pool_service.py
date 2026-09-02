@@ -42,13 +42,21 @@ from backend_core.growth.buyer_taxonomy_v1 import (
 )
 from backend_core.growth.enums import (
     BuyerLeadTier,
+    BuyerProspectOwnerFilter,
+    BuyerProspectRecentCollectionWindow,
+    CampaignReviewMode,
+    CampaignStatus,
     CandidatePoolKind,
     CandidatePoolRunStatus,
+    CandidatePoolStatus,
     CandidateResult,
+    DuplicateHistoryPolicy,
     Phase3AOperationScope,
 )
 from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import (
+    Campaign,
+    CampaignMember,
     CandidatePool,
     CandidatePoolMember,
     CandidatePoolRun,
@@ -56,6 +64,9 @@ from backend_core.growth.models import (
 )
 from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import (
+    BuyerProspectRuleCreateInput,
+    BuyerProspectRuleLifecycleInput,
+    BuyerProspectRuleUpdateInput,
     CandidatePoolCreateInput,
     CandidatePoolRunRequest,
     LongInactivityEnrichmentRequest,
@@ -63,6 +74,7 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
+    BuyerProspectRuleTargetingPolicy,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
@@ -104,9 +116,20 @@ from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
     InfluencerCurrentMetrics,
+    InfluencerMetricSnapshot,
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
+from backend_core.outreach.enums import (
+    OutreachActorType,
+    OutreachChannel,
+    OutreachEventType,
+    OutreachPriority,
+    OutreachPrioritySource,
+    OutreachTaskKind,
+    OutreachTaskState,
+)
+from backend_core.outreach.models import OutreachEvent, OutreachTarget, OutreachTask
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,
@@ -161,6 +184,7 @@ async def _account(
     owner: Operator,
     source_tags: list[str] | None = None,
     source: DataSource = DataSource.GENERIC,
+    platform: Platform = Platform.XIAOHONGSHU,
 ) -> InfluencerPlatformAccount:
     influencer = Influencer(
         display_name="Targeting Candidate",
@@ -173,7 +197,7 @@ async def _account(
     await session.flush()
     account = InfluencerPlatformAccount(
         influencer_id=influencer.id,
-        platform=Platform.XIAOHONGSHU,
+        platform=platform,
         platform_account_id=f"candidate-{uuid4().hex}",
         account_name="Targeting Candidate",
         account_handle="targeting-candidate",
@@ -305,6 +329,8 @@ async def _committed_import(
     collection: CollectionJob,
     account: InfluencerPlatformAccount,
     creator_tags: list[str] | None,
+    raw_data: dict[str, object] | None = None,
+    source_acquired_at: datetime | None = None,
 ) -> ImportJob:
     """Seed committed canonical import provenance for one account."""
 
@@ -336,8 +362,12 @@ async def _committed_import(
         position=1,
         original_filename="targeting.csv",
         status=ImportJobFileStatus.READY,
-        source_acquired_at=None,
-        source_acquired_at_origin=SourceAcquiredAtOrigin.LEGACY_UNKNOWN,
+        source_acquired_at=source_acquired_at,
+        source_acquired_at_origin=(
+            SourceAcquiredAtOrigin.USER_CONFIRMED
+            if source_acquired_at is not None
+            else SourceAcquiredAtOrigin.LEGACY_UNKNOWN
+        ),
         source_acquired_at_confirmation_required=False,
     )
     session.add(file)
@@ -346,7 +376,7 @@ async def _committed_import(
         import_job_id=job.id,
         import_job_file_id=file.id,
         row_number=2,
-        raw_data={},
+        raw_data=raw_data or {},
         normalized_data={
             "source": account.source.value,
             "public_profile": ({"creator_tags": creator_tags} if creator_tags is not None else {}),
@@ -451,6 +481,8 @@ def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_histor
                     collection_context=None,
                     source_collection_job_id=None,
                     buyer=False,
+                    market_prospect_rule=False,
+                    department_id=context.department.id,
                     as_of=NOW,
                     freshness_policy=FreshnessPolicy(),
                     include_content_activity=True,
@@ -573,6 +605,8 @@ def test_grey_dolphin_activity_fact_requires_one_confirmed_coherent_metric_snaps
                         collection_context=None,
                         source_collection_job_id=None,
                         buyer=False,
+                        market_prospect_rule=False,
+                        department_id=context.department.id,
                         as_of=NOW,
                         freshness_policy=FreshnessPolicy(),
                         include_content_activity=True,

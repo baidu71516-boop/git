@@ -10,6 +10,7 @@ class CandidatePoolKind(StrEnum):
 
 class CandidatePoolStatus(StrEnum):
     ACTIVE = "ACTIVE"
+    DISABLED = "DISABLED"
     ARCHIVED = "ARCHIVED"
 
 
@@ -34,6 +35,28 @@ class BuyerLeadTier(StrEnum):
     RELATED = "RELATED"
     SAME_CATEGORY = "SAME_CATEGORY"
     UNKNOWN = "UNKNOWN"
+
+
+class BuyerProspectRecentCollectionWindow(StrEnum):
+    """Closed Market Prospect Rule V1 collection-age choices."""
+
+    DAYS_7 = "7"
+    DAYS_30 = "30"
+    DAYS_60 = "60"
+    DAYS_90 = "90"
+    ALL = "ALL"
+
+    @property
+    def days(self) -> int | None:
+        return None if self is BuyerProspectRecentCollectionWindow.ALL else int(self.value)
+
+
+class BuyerProspectOwnerFilter(StrEnum):
+    """Closed ownership selector for Market Prospect Rule V1."""
+
+    ANY = "ANY"
+    UNASSIGNED = "UNASSIGNED"
+    OPERATOR = "OPERATOR"
 
 
 class CampaignStatus(StrEnum):

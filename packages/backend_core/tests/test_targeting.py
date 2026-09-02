@@ -13,7 +13,14 @@ from backend_core.content_activity.enums import (
     ContentActivityResult,
 )
 from backend_core.growth.buyer_taxonomy_v1 import resolve_buyer_taxonomy_v1
+from backend_core.growth.enums import (
+    BuyerLeadTier,
+    BuyerProspectOwnerFilter,
+    BuyerProspectRecentCollectionWindow,
+)
+from backend_core.growth.schemas import BuyerProspectRuleCreateInput
 from backend_core.growth.targeting import (
+    BuyerProspectRuleTargetingPolicy,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
@@ -30,11 +37,12 @@ from backend_core.growth.targeting import (
     TaxonomyDefinition,
     TaxonomyRelation,
     evaluate_buyer,
+    evaluate_buyer_prospect_rule,
     evaluate_seller,
     reduce_criterion_results,
 )
 from backend_core.imports.hashing import hash_document
-from backend_core.influencers.enums import ContactFilter, ContactType, Platform
+from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
 from backend_core.influencers.freshness import (
     ContentActivityFreshnessPolicy,
     GreyDolphinActivityFreshnessPolicy,
@@ -862,3 +870,240 @@ def test_buyer_missing_collection_context_is_unknown() -> None:
 
     assert result.result is TargetingEvaluationResult.UNKNOWN
     assert result.reason_codes == ("COLLECTION_CONTEXT_MISSING",)
+
+
+def _market_policy(
+    source_collection_job_id: object,
+    **changes: object,
+) -> BuyerProspectRuleTargetingPolicy:
+    values: dict[str, object] = {
+        "taxonomy": _reviewed_taxonomy(),
+        "category_ids": ("FOOD",),
+        "follower_min": 100,
+        "follower_max": 200,
+        "buyer_lead_tiers": (BuyerLeadTier.HIGH,),
+        "source_collection_job_id": source_collection_job_id,
+        "recent_collection_window": BuyerProspectRecentCollectionWindow.ALL,
+        "prospect_owner_filter": BuyerProspectOwnerFilter.ANY,
+        "exclude_contacted": False,
+    }
+    values.update(changes)
+    return BuyerProspectRuleTargetingPolicy.model_validate(values)
+
+
+def _market_facts(source_collection_job_id: object, **changes: object) -> CandidateFactBundle:
+    values: dict[str, object] = {
+        "platform": Platform.DOUYIN,
+        "source": DataSource.HUITUN,
+        "collection_industry": "科技",
+        "creator_classification_tags": ("美食",),
+        "source_collection_job_id": source_collection_job_id,
+        "source_collection_import_job_ids": (uuid4(),),
+        "creator_classification_import_job_ids": (uuid4(),),
+        "followers_count": 100,
+        "follower_metric_snapshot_id": uuid4(),
+        "buyer_source_import_job_file_id": uuid4(),
+        "buyer_source_import_job_id": uuid4(),
+        "buyer_source_import_row_id": uuid4(),
+        "buyer_source_acquired_at": CONTENT_ACTIVITY_AS_OF - timedelta(days=7),
+    }
+    values.update(changes)
+    return _facts(**values)
+
+
+def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
+    source_collection_job_id = uuid4()
+    operator_id = uuid4()
+    valid = BuyerProspectRuleCreateInput(
+        name="Market prospects",
+        category_ids=("FOOD", "BEAUTY"),
+        follower_min=100,
+        follower_max=200,
+        buyer_lead_tiers=(BuyerLeadTier.UNKNOWN, BuyerLeadTier.HIGH),
+        source_collection_job_id=source_collection_job_id,
+        recent_collection_window=BuyerProspectRecentCollectionWindow.DAYS_30,
+        prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+        prospect_owner_operator_id=operator_id,
+        exclude_contacted=True,
+    )
+
+    assert valid.category_ids == ("BEAUTY", "FOOD")
+    assert valid.buyer_lead_tiers == (BuyerLeadTier.HIGH, BuyerLeadTier.UNKNOWN)
+    with pytest.raises(ValidationError):
+        BuyerProspectRuleCreateInput(
+            name="Invalid follower range",
+            follower_min=201,
+            follower_max=200,
+            buyer_lead_tiers=(BuyerLeadTier.HIGH,),
+            source_collection_job_id=source_collection_job_id,
+            recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
+        )
+    with pytest.raises(ValidationError):
+        BuyerProspectRuleCreateInput(
+            name="Missing selected owner",
+            buyer_lead_tiers=(BuyerLeadTier.HIGH,),
+            source_collection_job_id=source_collection_job_id,
+            recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
+            prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+        )
+    with pytest.raises(ValidationError):
+        _market_policy(source_collection_job_id, category_ids=("NOT_A_CATEGORY",))
+
+
+@pytest.mark.parametrize(
+    ("followers_count", "snapshot_id", "expected"),
+    [
+        (99, uuid4(), TargetingEvaluationResult.NOT_MATCH),
+        (100, uuid4(), TargetingEvaluationResult.MATCH),
+        (200, uuid4(), TargetingEvaluationResult.MATCH),
+        (201, uuid4(), TargetingEvaluationResult.NOT_MATCH),
+        (None, None, TargetingEvaluationResult.UNKNOWN),
+    ],
+)
+def test_market_prospect_rule_category_tier_and_follower_filters(
+    followers_count: int | None,
+    snapshot_id: object,
+    expected: TargetingEvaluationResult,
+) -> None:
+    source_collection_job_id = uuid4()
+    policy = _market_policy(source_collection_job_id)
+    result = evaluate_buyer_prospect_rule(
+        policy,
+        _market_facts(
+            source_collection_job_id,
+            followers_count=followers_count,
+            follower_metric_snapshot_id=snapshot_id,
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is expected
+    followers = next(
+        item
+        for item in result.redacted_evidence["criteria"]
+        if item["criterion"] == "followers"
+    )
+    assert followers["result"] == expected.value
+
+    category_not_selected = evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id, category_ids=("BEAUTY",)),
+        _market_facts(source_collection_job_id),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+    tier_not_selected = evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            buyer_lead_tiers=(BuyerLeadTier.SAME_CATEGORY,),
+        ),
+        _market_facts(source_collection_job_id),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+    assert category_not_selected.result is TargetingEvaluationResult.NOT_MATCH
+    assert tier_not_selected.result is TargetingEvaluationResult.NOT_MATCH
+
+
+@pytest.mark.parametrize(
+    ("window", "age_days", "expected"),
+    [
+        (BuyerProspectRecentCollectionWindow.DAYS_7, 7, TargetingEvaluationResult.MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_7, 8, TargetingEvaluationResult.NOT_MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_30, 30, TargetingEvaluationResult.MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_30, 31, TargetingEvaluationResult.NOT_MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_60, 60, TargetingEvaluationResult.MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_60, 61, TargetingEvaluationResult.NOT_MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_90, 90, TargetingEvaluationResult.MATCH),
+        (BuyerProspectRecentCollectionWindow.DAYS_90, 91, TargetingEvaluationResult.NOT_MATCH),
+        (BuyerProspectRecentCollectionWindow.ALL, 365, TargetingEvaluationResult.MATCH),
+    ],
+)
+def test_market_prospect_rule_collection_windows_are_inclusive(
+    window: BuyerProspectRecentCollectionWindow,
+    age_days: int,
+    expected: TargetingEvaluationResult,
+) -> None:
+    source_collection_job_id = uuid4()
+    result = evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id, recent_collection_window=window),
+        _market_facts(
+            source_collection_job_id,
+            buyer_source_acquired_at=CONTENT_ACTIVITY_AS_OF - timedelta(days=age_days),
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is expected
+
+
+def test_market_prospect_rule_owner_and_contacted_filters_are_evidence_based() -> None:
+    source_collection_job_id = uuid4()
+    owner_id = uuid4()
+    other_owner_id = uuid4()
+    facts = _market_facts(source_collection_job_id, owner_operator_id=owner_id)
+
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id), facts, as_of=CONTENT_ACTIVITY_AS_OF
+    ).result is TargetingEvaluationResult.MATCH
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.NOT_MATCH
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+            prospect_owner_operator_id=owner_id,
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.MATCH
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+            prospect_owner_operator_id=other_owner_id,
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.NOT_MATCH
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
+        ),
+        _market_facts(source_collection_job_id, owner_operator_id=None),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.MATCH
+
+    contact_only = _market_facts(
+        source_collection_job_id,
+        current_contact_types=(ContactType.EMAIL,),
+    )
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id, exclude_contacted=True),
+        contact_only,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.MATCH
+    assert evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id, exclude_contacted=True),
+        _market_facts(
+            source_collection_job_id,
+            contacted_outreach_event_id=uuid4(),
+            contacted_outreach_occurred_at=CONTENT_ACTIVITY_AS_OF,
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    ).result is TargetingEvaluationResult.NOT_MATCH
+
+
+def test_buyer_evaluator_uses_trustworthy_douyin_creator_classification() -> None:
+    source_collection_job_id = uuid4()
+    result = evaluate_buyer(
+        BuyerTargetingPolicy(taxonomy=_reviewed_taxonomy()),
+        _market_facts(source_collection_job_id),
+    )
+
+    assert result.result is TargetingEvaluationResult.MATCH
+    assert result.reason_codes == (TargetingReasonCode.CATEGORY_MISMATCH,)

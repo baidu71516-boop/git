@@ -15,6 +15,7 @@ from redis.asyncio import Redis
 
 from app.http.admin import router as admin_router
 from app.http.auth import router as auth_router
+from app.http.buyer_prospects import router as buyer_prospects_router
 from app.http.campaigns import router as campaigns_router
 from app.http.candidate_pools import router as candidate_pools_router
 from app.http.collection_jobs import router as collection_jobs_router
@@ -82,6 +83,7 @@ app.include_router(operator_admin_router)
 app.include_router(content_activity_router)
 app.include_router(collection_jobs_router)
 app.include_router(candidate_pools_router)
+app.include_router(buyer_prospects_router)
 app.include_router(campaigns_router)
 app.include_router(import_jobs_router)
 app.include_router(influencers_router)

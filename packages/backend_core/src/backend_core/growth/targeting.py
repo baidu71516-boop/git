@@ -30,7 +30,11 @@ from backend_core.content_activity.enums import (
     ContentActivityObservationStatus,
     ContentActivityResult,
 )
-from backend_core.growth.enums import BuyerLeadTier
+from backend_core.growth.enums import (
+    BuyerLeadTier,
+    BuyerProspectOwnerFilter,
+    BuyerProspectRecentCollectionWindow,
+)
 from backend_core.imports.hashing import canonical_value, hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
 from backend_core.influencers.freshness import (
@@ -67,6 +71,17 @@ class TargetingReasonCode(StrEnum):
 
     ACTIVITY_MISSING = "ACTIVITY_MISSING"
     AMBIGUOUS_CLASSIFICATION = "AMBIGUOUS_CLASSIFICATION"
+    BUYER_LEAD_TIER_MATCH = "BUYER_LEAD_TIER_MATCH"
+    BUYER_LEAD_TIER_NOT_SELECTED = "BUYER_LEAD_TIER_NOT_SELECTED"
+    BUYER_PROSPECT_CATEGORY_MATCH = "BUYER_PROSPECT_CATEGORY_MATCH"
+    BUYER_PROSPECT_CATEGORY_MISSING = "BUYER_PROSPECT_CATEGORY_MISSING"
+    BUYER_PROSPECT_CATEGORY_NOT_MATCH = "BUYER_PROSPECT_CATEGORY_NOT_MATCH"
+    BUYER_SOURCE_ACQUIRED_AT_AFTER_RUN = "BUYER_SOURCE_ACQUIRED_AT_AFTER_RUN"
+    BUYER_SOURCE_ACQUIRED_AT_MISSING = "BUYER_SOURCE_ACQUIRED_AT_MISSING"
+    BUYER_SOURCE_COLLECTION_MISMATCH = "BUYER_SOURCE_COLLECTION_MISMATCH"
+    BUYER_SOURCE_PROVENANCE_MISSING = "BUYER_SOURCE_PROVENANCE_MISSING"
+    BUYER_SOURCE_WINDOW_MATCH = "BUYER_SOURCE_WINDOW_MATCH"
+    BUYER_SOURCE_WINDOW_NOT_MATCH = "BUYER_SOURCE_WINDOW_NOT_MATCH"
     CATEGORY_ALIGNED = "CATEGORY_ALIGNED"
     CATEGORY_MISMATCH = "CATEGORY_MISMATCH"
     CLASSIFICATION_STALE = "CLASSIFICATION_STALE"
@@ -77,6 +92,7 @@ class TargetingReasonCode(StrEnum):
     COLLECTION_CONTEXT_MISSING = "COLLECTION_CONTEXT_MISSING"
     CONTACT_AVAILABLE = "CONTACT_AVAILABLE"
     CONTACT_EVIDENCE_REDACTED = "CONTACT_EVIDENCE_REDACTED"
+    CONTACTED_EXCLUDED = "CONTACTED_EXCLUDED"
     CONTENT_ACTIVITY_INCOMPLETE = "CONTENT_ACTIVITY_INCOMPLETE"
     CONTENT_ACTIVITY_MATCH = "CONTENT_ACTIVITY_MATCH"
     CONTENT_ACTIVITY_MISSING = "CONTENT_ACTIVITY_MISSING"
@@ -111,6 +127,8 @@ class TargetingReasonCode(StrEnum):
     NOTES_60D_OUT_OF_RANGE = "NOTES_60D_OUT_OF_RANGE"
     NOTES_7D_IN_RANGE = "NOTES_7D_IN_RANGE"
     NOTES_7D_OUT_OF_RANGE = "NOTES_7D_OUT_OF_RANGE"
+    OWNER_MATCH = "OWNER_MATCH"
+    OWNER_NOT_MATCH = "OWNER_NOT_MATCH"
     PLATFORM_MATCH = "PLATFORM_MATCH"
     PLATFORM_MISSING = "PLATFORM_MISSING"
     PLATFORM_NOT_MATCH = "PLATFORM_NOT_MATCH"
@@ -521,6 +539,69 @@ class BuyerTargetingPolicy(FrozenTargetingContract):
         return hash_document(self.model_dump(mode="json"))
 
 
+class BuyerProspectRuleTargetingPolicy(FrozenTargetingContract):
+    """The closed, server-constructed Market Prospect Rule V1 document.
+
+    It deliberately snapshots the approved Buyer taxonomy alongside every
+    functional filter.  The employee-facing API never accepts this document
+    directly: the service validates a smaller request and constructs it.
+    """
+
+    schema_version: Literal[1] = 1
+    policy_type: Literal["BUYER_PROSPECT_RULE_V1"] = "BUYER_PROSPECT_RULE_V1"
+    taxonomy: TaxonomyDefinition
+    category_ids: tuple[str, ...] = Field(min_length=1)
+    follower_min: StrictInt | None = Field(default=None, ge=0)
+    follower_max: StrictInt | None = Field(default=None, ge=0)
+    buyer_lead_tiers: tuple[BuyerLeadTier, ...]
+    source_collection_job_id: UUID
+    recent_collection_window: BuyerProspectRecentCollectionWindow
+    prospect_owner_filter: BuyerProspectOwnerFilter = BuyerProspectOwnerFilter.ANY
+    prospect_owner_operator_id: UUID | None = None
+    exclude_contacted: StrictBool = False
+
+    @field_validator("category_ids", mode="before")
+    @classmethod
+    def validate_category_ids(cls, value: object) -> tuple[str, ...]:
+        return _normalized_strings(value, field_name="category_ids")
+
+    @field_validator("buyer_lead_tiers")
+    @classmethod
+    def validate_buyer_lead_tiers(
+        cls, value: tuple[BuyerLeadTier, ...]
+    ) -> tuple[BuyerLeadTier, ...]:
+        if not value:
+            raise ValueError("buyer_lead_tiers must contain at least one value")
+        if len(value) != len(set(value)):
+            raise ValueError("buyer_lead_tiers must not contain duplicates")
+        order = {tier: index for index, tier in enumerate(BuyerLeadTier)}
+        return tuple(sorted(value, key=lambda tier: order[tier]))
+
+    @model_validator(mode="after")
+    def validate_market_prospect_rule(self) -> BuyerProspectRuleTargetingPolicy:
+        if self.follower_min is not None and self.follower_max is not None:
+            if self.follower_min > self.follower_max:
+                raise ValueError("follower_min must not exceed follower_max")
+        unknown_categories = set(self.category_ids) - set(self.taxonomy.categories)
+        if unknown_categories:
+            raise ValueError("category_ids must contain frozen taxonomy canonical IDs")
+        if self.prospect_owner_filter is BuyerProspectOwnerFilter.OPERATOR:
+            if self.prospect_owner_operator_id is None:
+                raise ValueError("prospect_owner_operator_id is required for OPERATOR")
+        elif self.prospect_owner_operator_id is not None:
+            raise ValueError("prospect_owner_operator_id requires OPERATOR")
+        return self
+
+    @property
+    def canonical_hash(self) -> str:
+        return hash_document(self.model_dump(mode="json"))
+
+    def buyer_tier_policy(self) -> BuyerTargetingPolicy:
+        """Reuse the frozen Buyer evaluator without changing its semantics."""
+
+        return BuyerTargetingPolicy(taxonomy=self.taxonomy)
+
+
 class CollectionContextSnapshot(FrozenTargetingContract):
     """Immutable CollectionJob context captured when a Buyer run is reserved."""
 
@@ -555,17 +636,17 @@ class CollectionContextSnapshot(FrozenTargetingContract):
 
 
 TargetingPolicyDefinition = Annotated[
-    SellerTargetingPolicy | BuyerTargetingPolicy,
+    SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     Field(discriminator="policy_type"),
 ]
-_POLICY_DEFINITION_ADAPTER: TypeAdapter[SellerTargetingPolicy | BuyerTargetingPolicy] = TypeAdapter(
-    TargetingPolicyDefinition
-)
+_POLICY_DEFINITION_ADAPTER: TypeAdapter[
+    SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy
+] = TypeAdapter(TargetingPolicyDefinition)
 
 
 def parse_targeting_policy(
     value: object,
-) -> SellerTargetingPolicy | BuyerTargetingPolicy:
+) -> SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy:
     """Validate one closed persisted/API policy definition."""
 
     return _POLICY_DEFINITION_ADAPTER.validate_python(value)
@@ -581,6 +662,11 @@ class CandidateFactBundle(FrozenTargetingContract):
     source: DataSource | None = None
     current_contact_types: tuple[ContactType, ...] = ()
     followers_count: StrictInt | None = Field(default=None, ge=0)
+    follower_metric_snapshot_id: UUID | None = None
+    follower_metric_snapshot_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    follower_metric_snapshot_import_job_id: UUID | None = None
+    follower_metric_snapshot_import_row_id: UUID | None = None
+    follower_metric_snapshot_captured_at: datetime | None = None
     notes_7d: StrictInt | None = Field(default=None, ge=0)
     notes_60d: StrictInt | None = Field(default=None, ge=0)
     source_tags: tuple[str, ...] | None = ()
@@ -590,12 +676,19 @@ class CandidateFactBundle(FrozenTargetingContract):
     content_activity: ContentActivityFact | None = None
     grey_dolphin_activity: GreyDolphinActivityFact | None = None
     source_collection_job_id: UUID | None = None
+    buyer_source_import_job_file_id: UUID | None = None
+    buyer_source_import_job_id: UUID | None = None
+    buyer_source_import_row_id: UUID | None = None
+    buyer_source_acquired_at: datetime | None = None
     collection_industry: str | None = Field(default=None, max_length=160)
     collection_subdirection: str | None = Field(default=None, max_length=200)
     creator_classification_tags: tuple[str, ...] | None = ()
     creator_classification_ambiguous: StrictBool = False
     source_collection_import_job_ids: tuple[UUID, ...] = ()
     creator_classification_import_job_ids: tuple[UUID, ...] = ()
+    owner_operator_id: UUID | None = None
+    contacted_outreach_event_id: UUID | None = None
+    contacted_outreach_occurred_at: datetime | None = None
     account_signals: tuple[AccountSignalFact, ...] = ()
 
     @field_validator("current_contact_types")
@@ -628,7 +721,13 @@ class CandidateFactBundle(FrozenTargetingContract):
             raise ValueError("classification provenance import job IDs must be unique")
         return tuple(sorted(value, key=str))
 
-    @field_validator("freshness_observed_at", "source_updated_at")
+    @field_validator(
+        "freshness_observed_at",
+        "source_updated_at",
+        "follower_metric_snapshot_captured_at",
+        "buyer_source_acquired_at",
+        "contacted_outreach_occurred_at",
+    )
     @classmethod
     def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
@@ -1645,7 +1744,7 @@ def evaluate_buyer(
 ) -> TargetingEvaluation:
     """Evaluate explicit category relations without AI or free-text inference."""
 
-    if facts.platform is not Platform.XIAOHONGSHU:
+    if facts.platform not in {Platform.XIAOHONGSHU, Platform.DOUYIN}:
         return _buyer_unknown(policy, facts, TargetingReasonCode.CREATOR_CLASSIFICATION_MISSING)
     if policy.freshness is not None:
         freshness = _freshness_evaluation(facts, policy.freshness)
@@ -1825,8 +1924,297 @@ def evaluate_buyer_lead_tier(
     )
 
 
+def _market_prospect_criterion(
+    *,
+    criterion: str,
+    result: TargetingEvaluationResult,
+    reason_code: TargetingReasonCode,
+    configured: dict[str, Any],
+    observed: dict[str, Any],
+) -> dict[str, Any]:
+    return CriterionEvaluation(
+        criterion=criterion,
+        result=result,
+        reason_code=reason_code,
+        configured=configured,
+        observed=observed,
+    ).model_dump(mode="json")
+
+
+def _market_prospect_evaluation(
+    *,
+    policy: BuyerProspectRuleTargetingPolicy,
+    base_evaluation: TargetingEvaluation,
+    tier_decision: BuyerLeadTierDecision,
+    criteria: list[dict[str, Any]],
+) -> TargetingEvaluation:
+    """Create one redacted, replayable result from the frozen Buyer baseline."""
+
+    evidence = dict(base_evaluation.redacted_evidence)
+    evidence.update(
+        {
+            "schema_version": 1,
+            "policy_type": policy.policy_type,
+            "buyer_base_evaluation": {
+                "result": base_evaluation.result.value,
+                "reason_codes": [reason.value for reason in base_evaluation.reason_codes],
+            },
+            "buyer_lead_tier": tier_decision.tier.value,
+            "buyer_relation_summary": tier_decision.relation_summary,
+            "market_prospect_rule": {
+                "source_collection_job_id": policy.source_collection_job_id,
+                "taxonomy": {
+                    "taxonomy_id": policy.taxonomy.taxonomy_id,
+                    "taxonomy_version": policy.taxonomy.taxonomy_version,
+                    "artifact_hash": policy.taxonomy.artifact_hash,
+                },
+            },
+            "criteria": criteria,
+        }
+    )
+    criterion_results = tuple(TargetingEvaluationResult(item["result"]) for item in criteria)
+    reason_codes = tuple(
+        dict.fromkeys(TargetingReasonCode(item["reason_code"]) for item in criteria)
+    )
+    return TargetingEvaluation(
+        result=reduce_criterion_results(criterion_results),
+        reason_codes=reason_codes,
+        redacted_evidence=_redacted(evidence),
+    )
+
+
+def evaluate_buyer_prospect_rule(
+    policy: BuyerProspectRuleTargetingPolicy,
+    facts: CandidateFactBundle,
+    *,
+    as_of: datetime,
+) -> TargetingEvaluation:
+    """Apply Market Prospect V1 filters after the frozen Buyer tier evaluator.
+
+    The legacy Buyer evaluator remains the authority for the tier and all
+    category relation evidence. Market filters only narrow its output; absent
+    required evidence is visibly ``UNKNOWN`` and never promoted to a match.
+    """
+
+    base_policy = policy.buyer_tier_policy()
+    base_evaluation = evaluate_buyer(base_policy, facts)
+    tier_decision = evaluate_buyer_lead_tier(base_policy, facts)
+    reliable_tier = tier_decision.relation_summary.get("status") == "RELIABLE"
+    if not reliable_tier:
+        reason_code = (
+            base_evaluation.reason_codes[0]
+            if base_evaluation.reason_codes
+            else TargetingReasonCode.NO_COMPARISON_RULE
+        )
+        criteria = [
+            _market_prospect_criterion(
+                criterion="buyer_lead_tier",
+                result=TargetingEvaluationResult.UNKNOWN,
+                reason_code=reason_code,
+                configured={"allowed": [tier.value for tier in policy.buyer_lead_tiers]},
+                observed={"tier": tier_decision.tier.value, "reliable": False},
+            )
+        ]
+        return _market_prospect_evaluation(
+            policy=policy,
+            base_evaluation=base_evaluation,
+            tier_decision=tier_decision,
+            criteria=criteria,
+        )
+
+    criteria: list[dict[str, Any]] = []
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="buyer_lead_tier",
+            result=(
+                TargetingEvaluationResult.MATCH
+                if tier_decision.tier in policy.buyer_lead_tiers
+                else TargetingEvaluationResult.NOT_MATCH
+            ),
+            reason_code=(
+                TargetingReasonCode.BUYER_LEAD_TIER_MATCH
+                if tier_decision.tier in policy.buyer_lead_tiers
+                else TargetingReasonCode.BUYER_LEAD_TIER_NOT_SELECTED
+            ),
+            configured={"allowed": [tier.value for tier in policy.buyer_lead_tiers]},
+            observed={"tier": tier_decision.tier.value, "reliable": True},
+        )
+    )
+
+    raw_creator_categories = tier_decision.relation_summary.get("creator_categories")
+    creator_categories = (
+        tuple(item for item in raw_creator_categories if isinstance(item, str))
+        if isinstance(raw_creator_categories, list)
+        else ()
+    )
+    if not policy.category_ids:
+        category_result = TargetingEvaluationResult.MATCH
+        category_reason = TargetingReasonCode.BUYER_PROSPECT_CATEGORY_MATCH
+    elif not creator_categories:
+        category_result = TargetingEvaluationResult.UNKNOWN
+        category_reason = TargetingReasonCode.BUYER_PROSPECT_CATEGORY_MISSING
+    elif set(policy.category_ids).intersection(creator_categories):
+        category_result = TargetingEvaluationResult.MATCH
+        category_reason = TargetingReasonCode.BUYER_PROSPECT_CATEGORY_MATCH
+    else:
+        category_result = TargetingEvaluationResult.NOT_MATCH
+        category_reason = TargetingReasonCode.BUYER_PROSPECT_CATEGORY_NOT_MATCH
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="category_ids",
+            result=category_result,
+            reason_code=category_reason,
+            configured={"category_ids": list(policy.category_ids)},
+            observed={"creator_category_ids": list(creator_categories)},
+        )
+    )
+
+    follower_filter_configured = policy.follower_min is not None or policy.follower_max is not None
+    follower_observed = {
+        "value": facts.followers_count,
+        "snapshot_id": facts.follower_metric_snapshot_id,
+        "metrics_hash": facts.follower_metric_snapshot_hash,
+        "import_job_id": facts.follower_metric_snapshot_import_job_id,
+        "import_row_id": facts.follower_metric_snapshot_import_row_id,
+        "captured_at": facts.follower_metric_snapshot_captured_at,
+    }
+    if not follower_filter_configured:
+        follower_result = TargetingEvaluationResult.MATCH
+        follower_reason = TargetingReasonCode.FOLLOWERS_IN_RANGE
+    elif facts.follower_metric_snapshot_id is None or facts.followers_count is None:
+        follower_result = TargetingEvaluationResult.UNKNOWN
+        follower_reason = TargetingReasonCode.FOLLOWERS_MISSING
+    elif (
+        (policy.follower_min is not None and facts.followers_count < policy.follower_min)
+        or (policy.follower_max is not None and facts.followers_count > policy.follower_max)
+    ):
+        follower_result = TargetingEvaluationResult.NOT_MATCH
+        follower_reason = TargetingReasonCode.FOLLOWERS_OUT_OF_RANGE
+    else:
+        follower_result = TargetingEvaluationResult.MATCH
+        follower_reason = TargetingReasonCode.FOLLOWERS_IN_RANGE
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="followers",
+            result=follower_result,
+            reason_code=follower_reason,
+            configured={"minimum": policy.follower_min, "maximum": policy.follower_max},
+            observed=follower_observed,
+        )
+    )
+
+    source_observed = {
+        "source_collection_job_id": facts.source_collection_job_id,
+        "import_job_file_id": facts.buyer_source_import_job_file_id,
+        "import_job_id": facts.buyer_source_import_job_id,
+        "import_row_id": facts.buyer_source_import_row_id,
+        "source_acquired_at": facts.buyer_source_acquired_at,
+    }
+    if facts.source_collection_job_id != policy.source_collection_job_id:
+        source_result = TargetingEvaluationResult.UNKNOWN
+        source_reason = TargetingReasonCode.BUYER_SOURCE_COLLECTION_MISMATCH
+    elif facts.buyer_source_import_job_file_id is None:
+        source_result = TargetingEvaluationResult.UNKNOWN
+        source_reason = TargetingReasonCode.BUYER_SOURCE_PROVENANCE_MISSING
+    elif policy.recent_collection_window is BuyerProspectRecentCollectionWindow.ALL:
+        source_result = TargetingEvaluationResult.MATCH
+        source_reason = TargetingReasonCode.BUYER_SOURCE_WINDOW_MATCH
+    elif facts.buyer_source_acquired_at is None:
+        source_result = TargetingEvaluationResult.UNKNOWN
+        source_reason = TargetingReasonCode.BUYER_SOURCE_ACQUIRED_AT_MISSING
+    elif facts.buyer_source_acquired_at > as_of:
+        source_result = TargetingEvaluationResult.UNKNOWN
+        source_reason = TargetingReasonCode.BUYER_SOURCE_ACQUIRED_AT_AFTER_RUN
+    elif facts.buyer_source_acquired_at < as_of - timedelta(
+        days=policy.recent_collection_window.days or 0
+    ):
+        source_result = TargetingEvaluationResult.NOT_MATCH
+        source_reason = TargetingReasonCode.BUYER_SOURCE_WINDOW_NOT_MATCH
+    else:
+        source_result = TargetingEvaluationResult.MATCH
+        source_reason = TargetingReasonCode.BUYER_SOURCE_WINDOW_MATCH
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="recent_collection_window",
+            result=source_result,
+            reason_code=source_reason,
+            configured={"window": policy.recent_collection_window.value},
+            observed=source_observed,
+        )
+    )
+
+    owner_observed = {"owner_operator_id": facts.owner_operator_id}
+    if policy.prospect_owner_filter is BuyerProspectOwnerFilter.ANY:
+        owner_result = TargetingEvaluationResult.MATCH
+        owner_reason = TargetingReasonCode.OWNER_MATCH
+    elif policy.prospect_owner_filter is BuyerProspectOwnerFilter.UNASSIGNED:
+        owner_result = (
+            TargetingEvaluationResult.MATCH
+            if facts.owner_operator_id is None
+            else TargetingEvaluationResult.NOT_MATCH
+        )
+        owner_reason = (
+            TargetingReasonCode.OWNER_MATCH
+            if owner_result is TargetingEvaluationResult.MATCH
+            else TargetingReasonCode.OWNER_NOT_MATCH
+        )
+    else:
+        owner_result = (
+            TargetingEvaluationResult.MATCH
+            if facts.owner_operator_id == policy.prospect_owner_operator_id
+            else TargetingEvaluationResult.NOT_MATCH
+        )
+        owner_reason = (
+            TargetingReasonCode.OWNER_MATCH
+            if owner_result is TargetingEvaluationResult.MATCH
+            else TargetingReasonCode.OWNER_NOT_MATCH
+        )
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="prospect_owner",
+            result=owner_result,
+            reason_code=owner_reason,
+            configured={
+                "filter": policy.prospect_owner_filter.value,
+                "operator_id": policy.prospect_owner_operator_id,
+            },
+            observed=owner_observed,
+        )
+    )
+
+    contacted_observed = {
+        "outreach_event_id": facts.contacted_outreach_event_id,
+        "occurred_at": facts.contacted_outreach_occurred_at,
+    }
+    if not policy.exclude_contacted:
+        contacted_result = TargetingEvaluationResult.MATCH
+        contacted_reason = TargetingReasonCode.SOURCE_MATCH
+    elif facts.contacted_outreach_event_id is not None:
+        contacted_result = TargetingEvaluationResult.NOT_MATCH
+        contacted_reason = TargetingReasonCode.CONTACTED_EXCLUDED
+    else:
+        contacted_result = TargetingEvaluationResult.MATCH
+        contacted_reason = TargetingReasonCode.SOURCE_MATCH
+    criteria.append(
+        _market_prospect_criterion(
+            criterion="exclude_contacted",
+            result=contacted_result,
+            reason_code=contacted_reason,
+            configured={"exclude_contacted": policy.exclude_contacted},
+            observed=contacted_observed,
+        )
+    )
+
+    return _market_prospect_evaluation(
+        policy=policy,
+        base_evaluation=base_evaluation,
+        tier_decision=tier_decision,
+        criteria=criteria,
+    )
+
+
 def evaluate_targeting(
-    policy: SellerTargetingPolicy | BuyerTargetingPolicy,
+    policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     facts: CandidateFactBundle,
     *,
     as_of: datetime | None = None,
@@ -1841,6 +2229,10 @@ def evaluate_targeting(
             content_activity_freshness_policy=content_activity_freshness_policy,
             grey_dolphin_activity_freshness_policy=grey_dolphin_activity_freshness_policy,
         )
+    if isinstance(policy, BuyerProspectRuleTargetingPolicy):
+        if as_of is None:
+            raise ValueError("Market Prospect Rule V1 requires run as_of")
+        return evaluate_buyer_prospect_rule(policy, facts, as_of=as_of)
     return evaluate_buyer(policy, facts)
 
 
@@ -1849,6 +2241,7 @@ __all__ = [
     "AccountSignalValueState",
     "BuyerCategoryRelation",
     "BuyerLeadTierDecision",
+    "BuyerProspectRuleTargetingPolicy",
     "BuyerTargetingPolicy",
     "ContentActivityConstraint",
     "ContentActivityFact",
@@ -1870,6 +2263,7 @@ __all__ = [
     "TaxonomyRelation",
     "evaluate_buyer",
     "evaluate_buyer_lead_tier",
+    "evaluate_buyer_prospect_rule",
     "evaluate_seller",
     "evaluate_targeting",
     "parse_targeting_policy",

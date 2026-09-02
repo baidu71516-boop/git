@@ -7,11 +7,22 @@ from datetime import datetime
 from typing import Any, Self, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.enums import (
     BuyerLeadTier,
+    BuyerProspectOwnerFilter,
+    BuyerProspectRecentCollectionWindow,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidatePoolStatus,
@@ -42,6 +53,78 @@ class CandidatePoolCreateInput(TargetingWriteContract):
     source_collection_job_id: UUID | None = None
     owner_operator_id: UUID | None = None
     policy: TargetingPolicyDefinition
+
+
+class BuyerProspectRuleFiltersInput(TargetingWriteContract):
+    """Closed employee-facing fields; server constructs the policy JSON."""
+
+    category_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    follower_min: StrictInt | None = Field(default=None, ge=0)
+    follower_max: StrictInt | None = Field(default=None, ge=0)
+    buyer_lead_tiers: tuple[BuyerLeadTier, ...] = Field(min_length=1)
+    source_collection_job_id: UUID
+    recent_collection_window: BuyerProspectRecentCollectionWindow
+    prospect_owner_filter: BuyerProspectOwnerFilter = BuyerProspectOwnerFilter.ANY
+    prospect_owner_operator_id: UUID | None = None
+    exclude_contacted: StrictBool = False
+
+    @field_validator("category_ids")
+    @classmethod
+    def normalize_category_ids(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(sorted(item.strip() for item in value))
+        if any(not item for item in normalized):
+            raise ValueError("category_ids must not contain blank values")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("category_ids must not contain duplicates")
+        return normalized
+
+    @field_validator("buyer_lead_tiers")
+    @classmethod
+    def normalize_buyer_lead_tiers(
+        cls, value: tuple[BuyerLeadTier, ...]
+    ) -> tuple[BuyerLeadTier, ...]:
+        if len(value) != len(set(value)):
+            raise ValueError("buyer_lead_tiers must not contain duplicates")
+        order = {tier: index for index, tier in enumerate(BuyerLeadTier)}
+        return tuple(sorted(value, key=lambda tier: order[tier]))
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> Self:
+        if self.follower_min is not None and self.follower_max is not None:
+            if self.follower_min > self.follower_max:
+                raise ValueError("follower_min must not exceed follower_max")
+        if self.prospect_owner_filter is BuyerProspectOwnerFilter.OPERATOR:
+            if self.prospect_owner_operator_id is None:
+                raise ValueError("prospect_owner_operator_id is required for OPERATOR")
+        elif self.prospect_owner_operator_id is not None:
+            raise ValueError("prospect_owner_operator_id requires OPERATOR")
+        return self
+
+
+class BuyerProspectRuleCreateInput(BuyerProspectRuleFiltersInput):
+    name: StrictStr = Field(min_length=1, max_length=200)
+    owner_operator_id: UUID | None = None
+
+
+class BuyerProspectRuleUpdateInput(BuyerProspectRuleFiltersInput):
+    expected_pool_version: StrictInt = Field(ge=1)
+    name: StrictStr = Field(min_length=1, max_length=200)
+    owner_operator_id: UUID
+
+
+class BuyerProspectRuleLifecycleInput(TargetingWriteContract):
+    expected_pool_version: StrictInt = Field(ge=1)
+    status: CandidatePoolStatus
+
+    @model_validator(mode="after")
+    def require_supported_status(self) -> Self:
+        if self.status not in {
+            CandidatePoolStatus.ACTIVE,
+            CandidatePoolStatus.DISABLED,
+            CandidatePoolStatus.ARCHIVED,
+        }:
+            raise ValueError("status is invalid")
+        return self
 
 
 class TargetingPolicyCreateInput(TargetingWriteContract):
@@ -153,6 +236,61 @@ class CandidatePoolPublic(TargetingReadContract):
         """Enrich v1 create replays with live canonical owner identity."""
 
         return cls.model_validate({**payload, "owner": owner})
+
+
+class BuyerProspectRulePublic(TargetingReadContract):
+    """Employee-facing projection with no CandidatePool or policy internals."""
+
+    id: UUID
+    department_id: UUID
+    owner_operator_id: UUID
+    owner: CampaignOwnerSummary
+    name: str
+    status: CandidatePoolStatus
+    version: int
+    current_policy_id: UUID
+    current_policy_version: int
+    category_ids: tuple[str, ...]
+    follower_min: int | None
+    follower_max: int | None
+    buyer_lead_tiers: tuple[BuyerLeadTier, ...]
+    source_collection_job_id: UUID
+    recent_collection_window: BuyerProspectRecentCollectionWindow
+    prospect_owner_filter: BuyerProspectOwnerFilter
+    prospect_owner_operator_id: UUID | None
+    exclude_contacted: bool
+    latest_run: CandidatePoolRunPublic | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def require_matching_owner_projection(self) -> Self:
+        if self.owner.id != self.owner_operator_id:
+            raise ValueError("owner.id must match owner_operator_id")
+        return self
+
+
+class BuyerProspectRulePage(TargetingReadContract):
+    items: tuple[BuyerProspectRulePublic, ...]
+    next_cursor: UUID | None = None
+
+
+class BuyerProspectRuleSourceOption(TargetingReadContract):
+    id: UUID
+    name: str
+    industry: str
+    subdirection: str | None
+
+
+class BuyerProspectRuleOperatorOption(TargetingReadContract):
+    id: UUID
+    name: str
+
+
+class BuyerProspectRuleOptionsPublic(TargetingReadContract):
+    taxonomy_category_ids: tuple[str, ...]
+    source_collection_jobs: tuple[BuyerProspectRuleSourceOption, ...]
+    operators: tuple[BuyerProspectRuleOperatorOption, ...]
 
 
 class TargetingPolicyPublic(TargetingReadContract):
@@ -322,7 +460,22 @@ def viewer_redacted_reason_codes(
     )
 
 
+# BuyerProspectRulePublic is declared before the shared run DTO to keep the
+# employee-facing contracts together; resolve its delayed reference once this
+# module is fully initialized.
+BuyerProspectRulePublic.model_rebuild()
+
+
 __all__ = [
+    "BuyerProspectRuleCreateInput",
+    "BuyerProspectRuleFiltersInput",
+    "BuyerProspectRuleLifecycleInput",
+    "BuyerProspectRuleOperatorOption",
+    "BuyerProspectRuleOptionsPublic",
+    "BuyerProspectRulePage",
+    "BuyerProspectRulePublic",
+    "BuyerProspectRuleSourceOption",
+    "BuyerProspectRuleUpdateInput",
     "BuyerScreeningBootstrapPublic",
     "CandidatePoolCreateInput",
     "CandidatePoolMemberPublic",
