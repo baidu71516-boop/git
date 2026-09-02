@@ -59,6 +59,10 @@ def test_artifact_hash_is_deterministic_and_snapshot_is_immutable() -> None:
     assert document["taxonomy_id"] == BUYER_TAXONOMY_V1_ID
     assert document["taxonomy_version"] == BUYER_TAXONOMY_V1_VERSION
     assert hash_document(document) == BUYER_TAXONOMY_V1_HASH
+    labels = {node["id"]: node["display_name"] for node in document["nodes"]}
+    assert labels["AUTO"] == "汽车"
+    assert labels["BEAUTY"] == "美妆"
+    assert labels["AI_SHORT_DRAMA"] == "AI短剧"
     with pytest.raises(TypeError):
         document["taxonomy_id"] = "tampered"  # type: ignore[index]
     with pytest.raises(ValidationError):

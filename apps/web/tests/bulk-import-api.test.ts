@@ -7,6 +7,7 @@ import { ApiClientError } from "@/lib/api/client";
 import {
   bootstrapBuyerScreening,
   bulkImportApiPaths,
+  cancelBulkImport,
   confirmBulkImport,
   createBulkImportJob,
   createCollectionJob,
@@ -148,6 +149,9 @@ describe("Bulk import API contract", () => {
     );
     expect(bulkImportApiPaths.confirm("job/id")).toBe(
       "/import-jobs/job%2Fid/confirm",
+    );
+    expect(bulkImportApiPaths.cancel("job/id")).toBe(
+      "/import-jobs/job%2Fid/cancel",
     );
   });
 
@@ -434,6 +438,20 @@ describe("Bulk import API contract", () => {
       "offset",
       "limit",
     ]);
+  });
+
+  it("cancels through the existing Import Job endpoint", async () => {
+    const cancelled = { id: "job/id", status: "cancelled" };
+    apiRequestMock.mockResolvedValue(success(cancelled));
+
+    await expect(cancelBulkImport("job/id")).resolves.toEqual(cancelled);
+
+    expect(apiRequestMock).toHaveBeenCalledWith(
+      "/import-jobs/job%2Fid/cancel",
+      {
+        method: "POST",
+      },
+    );
   });
 
   it("confirms only the requested revision and accepts new or idempotent dispatch data", async () => {

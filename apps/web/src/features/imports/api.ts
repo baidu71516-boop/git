@@ -50,6 +50,8 @@ export const bulkImportApiPaths = {
   rows: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/rows`,
   confirm: (importJobId: string) =>
     `/import-jobs/${encoded(importJobId)}/confirm`,
+  cancel: (importJobId: string) =>
+    `/import-jobs/${encoded(importJobId)}/cancel`,
   retry: (importJobId: string) => `/import-jobs/${encoded(importJobId)}/retry`,
 } as const;
 
@@ -270,6 +272,16 @@ export async function confirmBulkImport({
     },
   );
   return requireData(response.data, "确认导入");
+}
+
+export async function cancelBulkImport(
+  importJobId: string,
+): Promise<ImportJobPublic> {
+  const response = await apiRequest<ImportJobPublic>(
+    bulkImportApiPaths.cancel(importJobId),
+    { method: "POST" },
+  );
+  return requireData(response.data, "取消导入");
 }
 
 export async function retryBulkImportJob(

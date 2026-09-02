@@ -32,8 +32,12 @@ from backend_core.growth.enums import (
 from backend_core.growth.schemas import (
     BuyerProspectRuleCreateInput,
     BuyerProspectRuleLifecycleInput,
+    BuyerProspectRuleOperatorOption,
+    BuyerProspectRuleOptionsPublic,
     BuyerProspectRulePage,
     BuyerProspectRulePublic,
+    BuyerProspectRuleSourceOption,
+    BuyerProspectRuleTaxonomyOption,
     BuyerProspectRuleUpdateInput,
     CandidatePoolRunPublic,
 )
@@ -242,6 +246,35 @@ class FakeCandidatePoolService:
         self.calls.append(("list", (cursor, limit, include_archived, department_id)))
         return BuyerProspectRulePage(items=(_rule(self.context),), next_cursor=None)
 
+    async def buyer_prospect_rule_options(
+        self,
+        _context: AuthContext,
+        *,
+        department_id: UUID,
+    ) -> BuyerProspectRuleOptionsPublic:
+        self.calls.append(("options", department_id))
+        return BuyerProspectRuleOptionsPublic(
+            taxonomy_category_ids=("AUTO", "BEAUTY"),
+            taxonomy_categories=(
+                BuyerProspectRuleTaxonomyOption(id="AUTO", label="汽车"),
+                BuyerProspectRuleTaxonomyOption(id="BEAUTY", label="美妆"),
+            ),
+            source_collection_jobs=(
+                BuyerProspectRuleSourceOption(
+                    id=SOURCE_ID,
+                    name="影视批次",
+                    industry="影视",
+                    subdirection="剧情 / 娱乐",
+                ),
+            ),
+            operators=(
+                BuyerProspectRuleOperatorOption(
+                    id=self.context.operator.id,
+                    name="操作人",
+                ),
+            ),
+        )
+
     async def get_buyer_prospect_rule(
         self,
         _context: AuthContext,
@@ -393,6 +426,37 @@ def test_buyer_prospect_list_and_get_adapt_closed_service_contracts() -> None:
     asyncio.run(scenario())
 
 
+def test_buyer_prospect_options_expose_trusted_labels_and_source_context() -> None:
+    async def scenario() -> None:
+        context = _context()
+        service = FakeCandidatePoolService(context)
+        _install_overrides(context, service)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.get("/api/v1/buyer-prospects/options")
+                assert response.status_code == 200
+                data = response.json()["data"]
+                assert data["taxonomy_categories"] == [
+                    {"id": "AUTO", "label": "汽车"},
+                    {"id": "BEAUTY", "label": "美妆"},
+                ]
+                assert data["source_collection_jobs"] == [
+                    {
+                        "id": str(SOURCE_ID),
+                        "name": "影视批次",
+                        "industry": "影视",
+                        "subdirection": "剧情 / 娱乐",
+                    }
+                ]
+                assert service.calls == [("options", context.department.id)]
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
 def test_buyer_prospect_create_accepts_valid_closed_rule() -> None:
     async def scenario() -> None:
         context = _context()
@@ -418,6 +482,31 @@ def test_buyer_prospect_create_accepts_valid_closed_rule() -> None:
                     "198.51.100.91",
                     "buyer-prospect-http-test",
                 )
+        finally:
+            app.dependency_overrides.clear()
+
+    asyncio.run(scenario())
+
+
+def test_buyer_prospect_create_accepts_empty_secondary_category_filter() -> None:
+    async def scenario() -> None:
+        context = _context()
+        service = FakeCandidatePoolService(context)
+        _install_overrides(context, service)
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                _set_csrf_cookie(client)
+                created = await client.post(
+                    "/api/v1/buyer-prospects",
+                    json={**_create_payload(), "category_ids": []},
+                    headers=_mutation_headers("buyer-rule-empty-categories"),
+                )
+                assert created.status_code == 201
+                create_call = service.calls[-1]
+                assert create_call[0] == "create"
+                assert create_call[1][0]["category_ids"] == []
         finally:
             app.dependency_overrides.clear()
 

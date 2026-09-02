@@ -4,6 +4,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  Descriptions,
   Form,
   Input,
   InputNumber,
@@ -84,6 +85,10 @@ export function BuyerProspectRuleForm({
   const [form] = Form.useForm<RuleFormValues>();
   const submitIntent = useRef<BuyerProspectRuleSubmitIntent>("save");
   const ownerFilter = Form.useWatch("prospect_owner_filter", form);
+  const sourceCollectionJobId = Form.useWatch("source_collection_job_id", form);
+  const selectedSource = options.source_collection_jobs.find(
+    (job) => job.id === sourceCollectionJobId,
+  );
 
   useEffect(() => {
     form.setFieldsValue(initialValues(rule));
@@ -112,18 +117,16 @@ export function BuyerProspectRuleForm({
       >
         <Input maxLength={200} placeholder="例如：影视赛道跨类目潜客" />
       </Form.Item>
-      <Form.Item
-        label="领域 / 赛道"
-        name="category_ids"
-        rules={[{ required: true, message: "请选择至少一个规范类目" }]}
-      >
+      <Form.Item label="当前达人类目（可选）" name="category_ids">
         <Select
           mode="multiple"
           allowClear
-          placeholder="选择规范类目"
-          options={options.taxonomy_category_ids.map((categoryId) => ({
-            label: categoryId,
-            value: categoryId,
+          showSearch
+          optionFilterProp="label"
+          placeholder="不限当前达人类目"
+          options={options.taxonomy_categories.map((category) => ({
+            label: category.label,
+            value: category.id,
           }))}
         />
       </Form.Item>
@@ -157,6 +160,22 @@ export function BuyerProspectRuleForm({
           }))}
         />
       </Form.Item>
+      {selectedSource ? (
+        <Descriptions
+          bordered
+          column={1}
+          size="small"
+          title="来源上下文"
+          className="buyer-prospect-source-context"
+        >
+          <Descriptions.Item label="来源行业">
+            {selectedSource.industry}
+          </Descriptions.Item>
+          <Descriptions.Item label="来源赛道">
+            {selectedSource.subdirection ?? "—"}
+          </Descriptions.Item>
+        </Descriptions>
+      ) : null}
       <Form.Item
         label="最近采集范围"
         name="recent_collection_window"

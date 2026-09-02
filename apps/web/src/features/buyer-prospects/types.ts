@@ -21,8 +21,14 @@ export type BuyerProspectOperator = {
   name: string;
 };
 
+export type BuyerProspectTaxonomyCategory = {
+  id: string;
+  label: string;
+};
+
 export type BuyerProspectRuleOptions = {
   taxonomy_category_ids: string[];
+  taxonomy_categories: BuyerProspectTaxonomyCategory[];
   source_collection_jobs: BuyerProspectSourceCollectionJob[];
   operators: BuyerProspectOperator[];
 };

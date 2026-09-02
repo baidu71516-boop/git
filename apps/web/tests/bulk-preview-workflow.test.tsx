@@ -28,6 +28,10 @@ import type { RefreshQueueDetail } from "@/features/refresh-queues/types";
 
 const bulkPreviewPresentationMode = vi.hoisted(() => ({ compact: false }));
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 vi.mock(
   "@/features/imports/components/bulk-preview-table",
   async (importOriginal) => {

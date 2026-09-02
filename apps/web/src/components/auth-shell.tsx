@@ -398,7 +398,9 @@ export function AuthShell({
           <InfluencerWorkspace />
         )
       ) : workspace === "import-jobs" ? (
-        <ImportJobHistory />
+        auth.effective_role ? (
+          <ImportJobHistory role={auth.effective_role} />
+        ) : null
       ) : workspace === "refresh-queues" ? (
         auth.effective_role ? (
           refreshQueueId ? (

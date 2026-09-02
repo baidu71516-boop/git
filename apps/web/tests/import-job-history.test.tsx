@@ -94,7 +94,7 @@ function job(
   };
 }
 
-function renderHistory() {
+function renderHistory(role: "operator" | "viewer" = "viewer") {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -103,7 +103,7 @@ function renderHistory() {
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   }
-  return render(<ImportJobHistory />, { wrapper: Wrapper });
+  return render(<ImportJobHistory role={role} />, { wrapper: Wrapper });
 }
 
 afterEach(() => {
@@ -113,6 +113,116 @@ afterEach(() => {
 });
 
 describe("Import Job history", () => {
+  it("shows preview-ready confirm and cancel actions, then confirms through the existing API", async () => {
+    const ready = job("preview_ready", {
+      id: "job-ready",
+      preview_revision: 5,
+    });
+    let current = ready;
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/import-jobs?offset=0&limit=50")) {
+          return envelope({ items: [current], total: 1, offset: 0, limit: 50 });
+        }
+        if (url.endsWith("/import-jobs/job-ready") && !init?.method) {
+          return envelope(current);
+        }
+        if (
+          url.endsWith("/import-jobs/job-ready/confirm") &&
+          init?.method === "POST"
+        ) {
+          current = { ...current, status: "completed" };
+          return envelope(
+            {
+              import_job_id: current.id,
+              status: "confirm_queued",
+              preview_revision: current.preview_revision,
+              task_id: "task-1",
+              idempotent: false,
+            },
+            202,
+          );
+        }
+        throw new Error(`Unexpected request: ${url} ${init?.method ?? "GET"}`);
+      });
+
+    renderHistory("operator");
+    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+
+    expect(
+      await screen.findByRole("button", { name: "确认导入" }),
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "取消导入" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+    expect(await screen.findByText("确认导入这批数据？")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getAllByRole("button", { name: "确认导入" }).at(-1)!,
+    );
+
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(
+          ([input, init]) =>
+            String(input).endsWith("/import-jobs/job-ready/confirm") &&
+            init?.method === "POST" &&
+            init.body === JSON.stringify({ preview_revision: 5 }),
+        ),
+      ).toBe(true),
+    );
+    expect((await screen.findAllByText("导入完成")).length).toBeGreaterThan(0);
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/import-jobs?offset=0&limit=50"),
+      ).length,
+    ).toBeGreaterThanOrEqual(2);
+  }, 10_000);
+
+  it("keeps preview-ready actions unavailable to Viewer and terminal states", async () => {
+    const ready = job("preview_ready", { id: "job-ready" });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/import-jobs?offset=0&limit=50")) {
+        return envelope({ items: [ready], total: 1, offset: 0, limit: 50 });
+      }
+      if (url.endsWith("/import-jobs/job-ready")) return envelope(ready);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const rendered = renderHistory("viewer");
+    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+    await screen.findByText("job-ready");
+    expect(
+      screen.queryByRole("button", { name: "确认导入" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "取消导入" }),
+    ).not.toBeInTheDocument();
+
+    rendered.unmount();
+    vi.restoreAllMocks();
+    const completed = job("completed", { id: "job-completed-terminal" });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/import-jobs?offset=0&limit=50")) {
+        return envelope({ items: [completed], total: 1, offset: 0, limit: 50 });
+      }
+      if (url.endsWith("/import-jobs/job-completed-terminal"))
+        return envelope(completed);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    renderHistory("operator");
+    fireEvent.click(await screen.findByRole("button", { name: "查看详情" }));
+    await screen.findByText("job-completed-terminal");
+    expect(
+      screen.queryByRole("button", { name: "确认导入" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "取消导入" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the exact read-only table and only persisted completed results", async () => {
     const completed = job("completed");
     const importing = job("importing");

@@ -58,7 +58,7 @@ class CandidatePoolCreateInput(TargetingWriteContract):
 class BuyerProspectRuleFiltersInput(TargetingWriteContract):
     """Closed employee-facing fields; server constructs the policy JSON."""
 
-    category_ids: tuple[StrictStr, ...] = Field(min_length=1)
+    category_ids: tuple[StrictStr, ...] = ()
     follower_min: StrictInt | None = Field(default=None, ge=0)
     follower_max: StrictInt | None = Field(default=None, ge=0)
     buyer_lead_tiers: tuple[BuyerLeadTier, ...] = Field(min_length=1)
@@ -282,6 +282,13 @@ class BuyerProspectRuleSourceOption(TargetingReadContract):
     subdirection: str | None
 
 
+class BuyerProspectRuleTaxonomyOption(TargetingReadContract):
+    """One server-owned canonical ID with its trusted employee label."""
+
+    id: str
+    label: str
+
+
 class BuyerProspectRuleOperatorOption(TargetingReadContract):
     id: UUID
     name: str
@@ -289,6 +296,7 @@ class BuyerProspectRuleOperatorOption(TargetingReadContract):
 
 class BuyerProspectRuleOptionsPublic(TargetingReadContract):
     taxonomy_category_ids: tuple[str, ...]
+    taxonomy_categories: tuple[BuyerProspectRuleTaxonomyOption, ...]
     source_collection_jobs: tuple[BuyerProspectRuleSourceOption, ...]
     operators: tuple[BuyerProspectRuleOperatorOption, ...]
 
@@ -475,6 +483,7 @@ __all__ = [
     "BuyerProspectRulePage",
     "BuyerProspectRulePublic",
     "BuyerProspectRuleSourceOption",
+    "BuyerProspectRuleTaxonomyOption",
     "BuyerProspectRuleUpdateInput",
     "BuyerScreeningBootstrapPublic",
     "CandidatePoolCreateInput",

@@ -47,7 +47,7 @@ vi.mock("antd", async (importOriginal) => {
 
 const submittedValues: BuyerProspectRuleCreateRequest = {
   name: "新建潜客规则",
-  category_ids: ["美妆"],
+  category_ids: ["BEAUTY"],
   follower_min: 1000,
   follower_max: 9000,
   buyer_lead_tiers: ["HIGH"],
@@ -94,7 +94,11 @@ function response(data: unknown) {
 }
 
 const options = {
-  taxonomy_category_ids: ["美妆", "母婴"],
+  taxonomy_category_ids: ["BEAUTY", "PARENTING"],
+  taxonomy_categories: [
+    { id: "BEAUTY", label: "美妆" },
+    { id: "PARENTING", label: "亲子" },
+  ],
   source_collection_jobs: [
     { id: "collection-1", name: "美妆采集", industry: "美妆", subdirection: null },
   ],
@@ -111,7 +115,7 @@ const rule = {
   version: 3,
   current_policy_id: "policy-1",
   current_policy_version: 3,
-  category_ids: ["美妆", "母婴"],
+  category_ids: ["BEAUTY", "PARENTING"],
   follower_min: 1000,
   follower_max: 10000,
   buyer_lead_tiers: ["HIGH", "RELATED"] as const,
@@ -175,7 +179,7 @@ describe("Buyer prospect workspace", () => {
     renderWorkspace();
 
     expect(await screen.findByText("美妆跨类目潜客")).toBeInTheDocument();
-    expect(screen.getByText("类目：美妆、母婴")).toBeInTheDocument();
+    expect(screen.getByText("当前达人类目：美妆、亲子")).toBeInTheDocument();
     expect(screen.getByText("粉丝数：1000 - 10000")).toBeInTheDocument();
     expect(screen.getByText("潜客等级：强潜客、相关潜客")).toBeInTheDocument();
     expect(screen.getByText("数据来源：美妆采集")).toBeInTheDocument();

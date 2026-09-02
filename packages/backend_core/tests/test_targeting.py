@@ -930,6 +930,13 @@ def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
 
     assert valid.category_ids == ("BEAUTY", "FOOD")
     assert valid.buyer_lead_tiers == (BuyerLeadTier.HIGH, BuyerLeadTier.UNKNOWN)
+    unrestricted = BuyerProspectRuleCreateInput(
+        name="Unrestricted current categories",
+        buyer_lead_tiers=(BuyerLeadTier.CHANGED,),
+        source_collection_job_id=source_collection_job_id,
+        recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
+    )
+    assert unrestricted.category_ids == ()
     with pytest.raises(ValidationError):
         BuyerProspectRuleCreateInput(
             name="Invalid follower range",
@@ -999,6 +1006,57 @@ def test_market_prospect_rule_category_tier_and_follower_filters(
     )
     assert category_not_selected.result is TargetingEvaluationResult.NOT_MATCH
     assert tier_not_selected.result is TargetingEvaluationResult.NOT_MATCH
+
+
+def test_market_prospect_category_filter_is_optional_secondary_current_category_filter() -> None:
+    source_collection_job_id = uuid4()
+    facts = _market_facts(
+        source_collection_job_id,
+        collection_industry="影视",
+        creator_classification_tags=("汽车",),
+    )
+
+    unrestricted = evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            category_ids=(),
+            buyer_lead_tiers=(BuyerLeadTier.CHANGED,),
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+    narrowed = evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            category_ids=("AUTO",),
+            buyer_lead_tiers=(BuyerLeadTier.CHANGED,),
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+    excluded = evaluate_buyer_prospect_rule(
+        _market_policy(
+            source_collection_job_id,
+            category_ids=("TECHNOLOGY",),
+            buyer_lead_tiers=(BuyerLeadTier.CHANGED,),
+        ),
+        facts,
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert unrestricted.result is TargetingEvaluationResult.MATCH
+    assert narrowed.result is TargetingEvaluationResult.MATCH
+    assert excluded.result is TargetingEvaluationResult.NOT_MATCH
+    criterion = next(
+        item
+        for item in unrestricted.redacted_evidence["criteria"]
+        if item["criterion"] == "category_ids"
+    )
+    assert criterion["configured"] == {"category_ids": []}
+    assert criterion["observed"] == {"creator_category_ids": ["AUTO"]}
+    relation_summary = unrestricted.redacted_evidence["buyer_relation_summary"]
+    assert relation_summary["client_categories"] == ["FILM_TV"]
+    assert relation_summary["creator_categories"] == ["AUTO"]
 
 
 @pytest.mark.parametrize(

@@ -550,7 +550,10 @@ class BuyerProspectRuleTargetingPolicy(FrozenTargetingContract):
     schema_version: Literal[1] = 1
     policy_type: Literal["BUYER_PROSPECT_RULE_V1"] = "BUYER_PROSPECT_RULE_V1"
     taxonomy: TaxonomyDefinition
-    category_ids: tuple[str, ...] = Field(min_length=1)
+    # Empty means no secondary current-creator-category filter. The Buyer
+    # evaluator still compares CollectionJob source context to the creator's
+    # trusted current classification for every eligible candidate.
+    category_ids: tuple[str, ...] = ()
     follower_min: StrictInt | None = Field(default=None, ge=0)
     follower_max: StrictInt | None = Field(default=None, ge=0)
     buyer_lead_tiers: tuple[BuyerLeadTier, ...]

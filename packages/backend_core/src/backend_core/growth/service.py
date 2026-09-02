@@ -20,6 +20,7 @@ from backend_core.campaigns.access import CampaignOutreachAccess, DepartmentScop
 from backend_core.campaigns.errors import CampaignOutreachError
 from backend_core.campaigns.schemas import CampaignOwnerSummary
 from backend_core.growth.buyer_taxonomy_v1 import (
+    buyer_taxonomy_v1_document,
     is_trusted_buyer_taxonomy_v1,
     resolve_buyer_taxonomy_v1,
 )
@@ -61,6 +62,7 @@ from backend_core.growth.schemas import (
     BuyerProspectRulePage,
     BuyerProspectRulePublic,
     BuyerProspectRuleSourceOption,
+    BuyerProspectRuleTaxonomyOption,
     BuyerProspectRuleUpdateInput,
     BuyerScreeningBootstrapPublic,
     CandidatePoolCreateInput,
@@ -1037,8 +1039,13 @@ class CandidatePoolService:
                 for label in (collection.industry, collection.subdirection)
             )
         )
+        taxonomy_categories = tuple(
+            BuyerProspectRuleTaxonomyOption(id=node["id"], label=node["display_name"])
+            for node in buyer_taxonomy_v1_document()["nodes"]
+        )
         return BuyerProspectRuleOptionsPublic(
             taxonomy_category_ids=taxonomy.categories,
+            taxonomy_categories=taxonomy_categories,
             source_collection_jobs=tuple(
                 BuyerProspectRuleSourceOption(
                     id=collection.id,

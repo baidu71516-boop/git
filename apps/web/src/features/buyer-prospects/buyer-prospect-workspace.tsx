@@ -171,6 +171,16 @@ export function BuyerProspectWorkspace({
       ),
     [optionsQuery.data],
   );
+  const taxonomyLabels = useMemo(
+    () =>
+      new Map(
+        (optionsQuery.data?.taxonomy_categories ?? []).map((category) => [
+          category.id,
+          category.label,
+        ]),
+      ),
+    [optionsQuery.data],
+  );
   const canWrite = role !== "viewer";
   const canMutate = canWrite && hasSelectedOperator;
   const formOpen = editingRule !== null;
@@ -296,7 +306,12 @@ export function BuyerProspectWorkspace({
       key: "conditions",
       render: (_: unknown, rule: BuyerProspectRule) => (
         <Space direction="vertical" size={2}>
-          <span>类目：{rule.category_ids.join("、") || "—"}</span>
+          <span>
+            当前达人类目：
+            {rule.category_ids
+              .map((categoryId) => taxonomyLabels.get(categoryId) ?? "未识别类目")
+              .join("、") || "不限"}
+          </span>
           <span>粉丝数：{followerRangeLabel(rule)}</span>
           <span>
             潜客等级：

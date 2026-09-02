@@ -7,6 +7,7 @@ import {
   Descriptions,
   Drawer,
   Empty,
+  Popconfirm,
   Skeleton,
   Space,
   Table,
@@ -19,7 +20,7 @@ import { useState } from "react";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusBadge } from "@/components/ui/status-badge";
 
-import { formatBulkDateTime } from "./formatters";
+import { formatBulkDateTime, getBulkErrorMessage } from "./formatters";
 import {
   formatImportCount,
   formatPersistedImportResult,
@@ -29,6 +30,8 @@ import {
   importResultFields,
 } from "./import-job-history-presenters";
 import {
+  useCancelImportJobHistoryMutation,
+  useConfirmImportJobHistoryMutation,
   useImportJobHistory,
   useImportJobHistoryDetail,
 } from "./import-job-history-queries";
@@ -166,15 +169,46 @@ function ImportResultStatistics({ job }: { job: ImportJobPublic }) {
 function ImportJobDetailDrawer({
   importJobId,
   onClose,
+  role,
 }: {
   importJobId: string | null;
   onClose: () => void;
+  role: "super_admin" | "manager" | "operator" | "viewer";
 }) {
+  const [actionError, setActionError] = useState<string | null>(null);
   const detailQuery = useImportJobHistoryDetail(
     importJobId ?? "",
     importJobId !== null,
   );
+  const confirmMutation = useConfirmImportJobHistoryMutation();
+  const cancelMutation = useCancelImportJobHistoryMutation();
   const job = detailQuery.data;
+  const previewReady = job?.status === "preview_ready";
+  const canMutate = role !== "viewer";
+  const actionBusy = confirmMutation.isPending || cancelMutation.isPending;
+
+  async function confirmImport() {
+    if (!job || !previewReady || !canMutate) return;
+    setActionError(null);
+    try {
+      await confirmMutation.mutateAsync({
+        importJobId: job.id,
+        previewRevision: job.preview_revision,
+      });
+    } catch (caught) {
+      setActionError(getBulkErrorMessage(caught, "确认导入失败，请稍后重试。"));
+    }
+  }
+
+  async function cancelImport() {
+    if (!job || !previewReady || !canMutate) return;
+    setActionError(null);
+    try {
+      await cancelMutation.mutateAsync(job.id);
+    } catch (caught) {
+      setActionError(getBulkErrorMessage(caught, "取消导入失败，请稍后重试。"));
+    }
+  }
 
   return (
     <Drawer
@@ -214,6 +248,55 @@ function ImportJobDetailDrawer({
             </Descriptions.Item>
           </Descriptions>
 
+          {previewReady && canMutate ? (
+            <section
+              className="import-job-drawer-section"
+              aria-label="导入操作"
+            >
+              <Space wrap>
+                <Popconfirm
+                  title="确认导入这批数据？"
+                  description="系统将按当前预览版本进入导入流程。"
+                  okText="确认导入"
+                  cancelText="返回"
+                  onConfirm={() => void confirmImport()}
+                >
+                  <Button
+                    type="primary"
+                    loading={confirmMutation.isPending}
+                    disabled={actionBusy}
+                  >
+                    确认导入
+                  </Button>
+                </Popconfirm>
+                <Popconfirm
+                  title="取消当前导入任务？"
+                  description="取消后不能继续使用当前预览导入。"
+                  okText="取消导入"
+                  cancelText="返回"
+                  okButtonProps={{ danger: true }}
+                  onConfirm={() => void cancelImport()}
+                >
+                  <Button
+                    danger
+                    loading={cancelMutation.isPending}
+                    disabled={actionBusy}
+                  >
+                    取消导入
+                  </Button>
+                </Popconfirm>
+              </Space>
+              {actionError ? (
+                <Alert
+                  className="import-job-action-error"
+                  type="error"
+                  showIcon
+                  title={actionError}
+                />
+              ) : null}
+            </section>
+          ) : null}
+
           <section className="import-job-drawer-section" aria-label="处理统计">
             <Title level={5}>处理结果</Title>
             <ImportResultStatistics job={job} />
@@ -250,7 +333,11 @@ function ImportJobDetailDrawer({
   );
 }
 
-export function ImportJobHistory() {
+export function ImportJobHistory({
+  role = "viewer",
+}: {
+  role?: "super_admin" | "manager" | "operator" | "viewer";
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const offset = parseImportJobHistoryOffset(searchParams.get("offset"));
@@ -352,6 +439,7 @@ export function ImportJobHistory() {
       <ImportJobDetailDrawer
         importJobId={selectedJobId}
         onClose={() => setSelectedJobId(null)}
+        role={role}
       />
     </section>
   );
