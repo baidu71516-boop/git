@@ -16,6 +16,7 @@ from backend_core.auth.enums import DepartmentStatus, OperatorStatus, Role
 from backend_core.auth.models import Department, Operator
 from backend_core.db import models as database_models  # noqa: F401
 from backend_core.db.base import Base
+from backend_core.imports.contracts import CanonicalInfluencerRecord
 from backend_core.imports.enums import (
     CollectionJobStatus,
     ImportJobFailedStage,
@@ -27,6 +28,7 @@ from backend_core.imports.enums import (
     StoredFileType,
 )
 from backend_core.imports.errors import ImportDomainError
+from backend_core.imports.hashing import hash_document
 from backend_core.imports.mappings import HUITUN_DOUYIN_FIELD_MAPPING, HUITUN_FIELD_MAPPING
 from backend_core.imports.models import (
     CollectionJob,
@@ -36,6 +38,7 @@ from backend_core.imports.models import (
     StoredImportFile,
 )
 from backend_core.imports.parsers import ParserLimits
+from backend_core.imports.planner import metric_snapshot_key
 from backend_core.imports.processor import ImportProcessor
 from backend_core.imports.storage import LocalStorageAdapter
 from backend_core.influencers.enums import DataSource, Platform
@@ -53,6 +56,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 SANITIZED_HUITUN_FIXTURE = (
     Path(__file__).parents[3] / "tests" / "fixtures" / "huitun_sanitized_37_columns.csv"
+)
+HUITUN_DOUYIN_METRIC_PROJECTION_FIXTURE = (
+    Path(__file__).parents[3] / "tests" / "fixtures" / "huitun_douyin_metric_projection.csv"
 )
 LEGACY_HUITUN_HEADERS = [header for header in HUITUN_FIELD_MAPPING if header != "近7天笔记数"]
 LEGACY_HUITUN_FIELD_MAPPING = {
@@ -418,6 +424,160 @@ def test_huitun_douyin_creator_classification_survives_normalization_and_commit(
             assert (collection.industry, collection.subdirection) == ("影视", "剧评")
             assert "industry" not in state.source_data
             assert "subdirection" not in state.source_data
+
+    asyncio.run(scenario())
+
+
+def test_huitun_douyin_confirm_projects_metrics_with_source_state_and_replays() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            job = await seed_import_job(
+                session,
+                storage,
+                HUITUN_DOUYIN_METRIC_PROJECTION_FIXTURE.read_bytes(),
+                filename="huitun-douyin-metric-projection.csv",
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+
+            assert (await processor.parse_and_preview(job.id))["status"] == (
+                ImportJobStatus.PREVIEW_READY.value
+            )
+            row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
+            assert row is not None
+            assert row.normalized_data["public_profile"]["creator_classification_tags"] == ["舞蹈"]
+            assert row.normalized_data["metrics"] == {"followers_count": 871798}
+
+            await queue_confirm(session, job.id, 1)
+            result = await processor.confirm(job.id, 1)
+            assert result["created_rows"] == 1
+
+            influencer = await session.scalar(select(Influencer))
+            account = await session.scalar(select(InfluencerPlatformAccount))
+            state = await session.scalar(select(InfluencerSourceState))
+            snapshot = await session.scalar(select(InfluencerMetricSnapshot))
+            assert influencer is not None
+            assert account is not None
+            assert state is not None
+            assert snapshot is not None
+            assert account.influencer_id == influencer.id
+            assert account.platform is Platform.DOUYIN
+            assert account.platform_account_id == "metric-projection-token"
+            assert state.influencer_id == influencer.id
+            assert state.platform_account_id == account.id
+            assert state.source is DataSource.HUITUN
+            assert state.last_import_job_id == job.id
+            assert state.last_import_row_id == row.id
+            assert state.source_data["creator_classification_tags"] == ["舞蹈"]
+            assert state.source_data["creator_tags"] == ["舞蹈", "生活"]
+            assert state.source_data["mcn_name"] == "脱敏MCN"
+
+            record = CanonicalInfluencerRecord.model_validate(row.normalized_data)
+            assert snapshot.influencer_id == influencer.id
+            assert snapshot.platform_account_id == account.id
+            assert snapshot.source is DataSource.HUITUN
+            assert snapshot.source_updated_at is None
+            assert snapshot.import_job_id == job.id
+            assert snapshot.import_row_id == row.id
+            assert snapshot.captured_at.replace(tzinfo=UTC) == job.completed_at
+            assert snapshot.metrics == {"followers_count": 871798}
+            assert snapshot.metrics_hash == hash_document(snapshot.metrics)
+            assert snapshot.snapshot_key == metric_snapshot_key(record)
+
+            assert (await processor.confirm(job.id, 1)) == result
+            assert (
+                await session.scalar(select(func.count()).select_from(InfluencerMetricSnapshot))
+                == 1
+            )
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("raw_followers", ["871798.5", "not-a-number"])
+def test_huitun_douyin_confirm_does_not_project_invalid_metrics(raw_followers: str) -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            content = HUITUN_DOUYIN_METRIC_PROJECTION_FIXTURE.read_bytes()
+            invalid_content = content.replace(b"871798.0", raw_followers.encode(), 1)
+            assert invalid_content != content
+            job = await seed_import_job(
+                session,
+                storage,
+                invalid_content,
+                filename="huitun-douyin-invalid-metric.csv",
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+
+            assert (await processor.parse_and_preview(job.id))["status"] == (
+                ImportJobStatus.PREVIEW_READY.value
+            )
+            row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
+            assert row is not None
+            assert row.normalized_data["metrics"] == {}
+            assert any(
+                warning["code"] == "INVALID_INTEGER" and warning["field"] == "followers_count"
+                for warning in row.warnings
+            )
+
+            await queue_confirm(session, job.id, 1)
+            assert (await processor.confirm(job.id, 1))["created_rows"] == 1
+            assert (
+                await session.scalar(select(func.count()).select_from(InfluencerMetricSnapshot))
+                == 0
+            )
+
+    asyncio.run(scenario())
+
+
+def test_huitun_xhs_confirm_projects_every_normalized_metric_to_snapshots() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            job = await seed_import_job(
+                session,
+                storage,
+                SANITIZED_HUITUN_FIXTURE.read_bytes(),
+                filename="huitun-xhs-metric-projection.csv",
+            )
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+
+            assert (await processor.parse_and_preview(job.id))["status"] == (
+                ImportJobStatus.PREVIEW_READY.value
+            )
+            rows = list(
+                await session.scalars(
+                    select(ImportRow)
+                    .where(ImportRow.import_job_id == job.id)
+                    .order_by(ImportRow.row_number)
+                )
+            )
+            assert all(row.normalized_data["metrics"] for row in rows)
+
+            await queue_confirm(session, job.id, 1)
+            result = await processor.confirm(job.id, 1)
+            assert result["created_rows"] == len(rows)
+
+            snapshots = list(await session.scalars(select(InfluencerMetricSnapshot)))
+            accounts = {
+                account.id: account
+                for account in await session.scalars(select(InfluencerPlatformAccount))
+            }
+            assert len(snapshots) == len(rows)
+            expected_by_row = {row.id: row for row in rows}
+            for snapshot in snapshots:
+                row = expected_by_row[snapshot.import_row_id]
+                account = accounts[snapshot.platform_account_id]
+                record = CanonicalInfluencerRecord.model_validate(row.normalized_data)
+                assert snapshot.influencer_id == account.influencer_id
+                assert snapshot.source is DataSource.HUITUN
+                assert snapshot.import_job_id == job.id
+                assert snapshot.captured_at.replace(tzinfo=UTC) == job.completed_at
+                assert snapshot.metrics == row.normalized_data["metrics"]
+                assert snapshot.metrics_hash == hash_document(snapshot.metrics)
+                assert snapshot.snapshot_key == metric_snapshot_key(record)
+
+            assert (await processor.confirm(job.id, 1)) == result
+            assert await session.scalar(
+                select(func.count()).select_from(InfluencerMetricSnapshot)
+            ) == len(rows)
 
     asyncio.run(scenario())
 
