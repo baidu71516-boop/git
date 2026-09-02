@@ -1782,7 +1782,8 @@ class CandidatePoolRepository:
         """Return the source-specific creator classification with exact provenance.
 
         XHS retains its established ``creator_tags`` proof. Huitun Douyin's
-        creator ``分类`` lives in the immutable imported row, while CollectionJob
+        creator ``分类`` is persisted as ``creator_classification_tags`` in both
+        the current source state and immutable normalized ImportRow. CollectionJob
         ``industry`` is source context and ``内容标签``/``带货类目`` must never stand
         in for either category. Both branches fail closed if their exact row
         lineage cannot be proven.
@@ -1821,14 +1822,33 @@ class CandidatePoolRepository:
                 or state_import_file.status is not ImportJobFileStatus.READY
             ):
                 return None, ()
-            raw_data = state_import_row.raw_data
-            category = raw_data.get("分类") if isinstance(raw_data, dict) else None
-            if type(category) is not str or not category.strip():
+            state_classification = CandidatePoolRepository._tag_values(
+                state.source_data.get("creator_classification_tags")
+                if isinstance(state.source_data, dict)
+                else None
+            )
+            normalized_data = state_import_row.normalized_data
+            public_profile = (
+                normalized_data.get("public_profile") if isinstance(normalized_data, dict) else None
+            )
+            import_classification = CandidatePoolRepository._tag_values(
+                public_profile.get("creator_classification_tags")
+                if isinstance(public_profile, dict)
+                else None
+            )
+            if (
+                state_classification is None
+                or import_classification is None
+                or state_classification != import_classification
+            ):
                 return None, ()
             # Do not split or infer from free text. Huitun's 分类 is one
             # primary self-classification, normalized later by the frozen
             # taxonomy; content tags and commerce category stay unused here.
-            return (category.strip(),), (state.last_import_job_id,)
+            return (
+                state_classification,
+                (state.last_import_job_id,) if state_classification else (),
+            )
 
         state_tags = CandidatePoolRepository._tag_values(
             state.source_data.get("creator_tags") if isinstance(state.source_data, dict) else None

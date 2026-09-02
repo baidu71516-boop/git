@@ -1244,3 +1244,6 @@ def test_buyer_lead_tier_is_unknown_only_for_missing_or_unmapped_creator_evidenc
 
     assert decision.tier is BuyerLeadTier.UNKNOWN
     assert decision.relation_summary["status"] == "UNRELIABLE"
+    assert decision.relation_summary["reason_code"] == (
+        "CREATOR_CLASSIFICATION_MISSING" if not creator_categories else "CREATOR_CATEGORY_UNMAPPED"
+    )

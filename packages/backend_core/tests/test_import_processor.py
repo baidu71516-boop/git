@@ -44,6 +44,7 @@ from backend_core.influencers.models import (
     InfluencerContact,
     InfluencerMetricSnapshot,
     InfluencerPlatformAccount,
+    InfluencerSourceState,
     PlatformAccountSourceIdentity,
 )
 from openpyxl import Workbook
@@ -364,6 +365,59 @@ def test_current_38_field_huitun_export_preserves_notes_7d_in_preview() -> None:
             row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
             assert row is not None
             assert row.normalized_data["metrics"]["notes_7d"] == 3
+
+    asyncio.run(scenario())
+
+
+def test_huitun_douyin_creator_classification_survives_normalization_and_commit() -> None:
+    async def scenario() -> None:
+        async with processor_session() as (session, storage):
+            job = await seed_import_job(
+                session,
+                storage,
+                huitun_douyin_csv(
+                    [
+                        valid_douyin_row(
+                            "classification-token",
+                            nickname="舞蹈达人",
+                            handle="dance-creator",
+                        )
+                        | {"分类": "舞蹈"}
+                    ]
+                ),
+                filename="huitun-douyin-classification.csv",
+            )
+            collection = await session.get(CollectionJob, job.collection_job_id)
+            assert collection is not None
+            collection.industry = "影视"
+            collection.subdirection = "剧评"
+            await session.flush()
+
+            processor = ImportProcessor(session, storage, parser_limits=limits())
+            assert (await processor.parse_and_preview(job.id))["status"] == (
+                ImportJobStatus.PREVIEW_READY.value
+            )
+            row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
+            assert row is not None
+            assert row.raw_data["分类"] == "舞蹈"
+            assert row.normalized_data["public_profile"]["creator_classification_tags"] == ["舞蹈"]
+            assert row.normalized_data["public_profile"]["creator_tags"] == ["美食", "探店"]
+
+            await queue_confirm(session, job.id, 1)
+            assert (await processor.confirm(job.id, 1))["created_rows"] == 1
+
+            state = await session.scalar(
+                select(InfluencerSourceState).where(
+                    InfluencerSourceState.last_import_job_id == job.id
+                )
+            )
+            assert state is not None
+            assert state.source is DataSource.HUITUN
+            assert state.last_import_row_id == row.id
+            assert state.source_data["creator_classification_tags"] == ["舞蹈"]
+            assert (collection.industry, collection.subdirection) == ("影视", "剧评")
+            assert "industry" not in state.source_data
+            assert "subdirection" not in state.source_data
 
     asyncio.run(scenario())
 

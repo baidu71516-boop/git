@@ -1,7 +1,17 @@
+from datetime import UTC, datetime
 from decimal import Decimal
+from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
+from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.imports.adapters import HuitunCsvAdapter, HuitunExcelAdapter
+from backend_core.imports.enums import (
+    ImportJobFileStatus,
+    ImportJobStatus,
+    ImportRowAction,
+    ImportSourceType,
+)
 from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.normalizers import normalize_douyin_profile_url
 from backend_core.imports.parsers import RawTabularRecord
@@ -56,6 +66,7 @@ def test_huitun_douyin_adapter_uses_profile_token_not_handle(handle: str) -> Non
     adapter = HuitunCsvAdapter()
     mapping = adapter.mapping_for_headers(DOUYIN_HEADERS)
     assert mapping["抖音号"] == "account_handle"
+    assert mapping["分类"] == "creator_classification_tags"
     assert mapping["达人主页链接"] == "profile_url"
     adapter.validate_table([douyin_row(**{"抖音号": handle})])
 
@@ -73,11 +84,61 @@ def test_huitun_douyin_adapter_uses_profile_token_not_handle(handle: str) -> Non
     assert adapted.record.public_profile["region_raw"] == "省份: 上海；城市: 上海"
     assert "企业认证信息: 企业认证原文" in adapted.record.public_profile["verification_info"]
     assert adapted.record.public_profile["creator_tags"] == ["美食", "探店"]
+    assert adapted.record.public_profile["creator_classification_tags"] == ["美食"]
     assert adapted.record.metrics == {"followers_count": 12345}
     assert "notes_count" not in adapted.record.metrics
     assert "likes_collects_total" not in adapted.record.metrics
     assert adapted.raw_data["分类"] == "美食"
     assert adapted.raw_data["带货类目"] == "食品饮料"
+
+
+def test_huitun_douyin_blank_classification_does_not_fabricate_evidence() -> None:
+    adapter = HuitunExcelAdapter()
+    adapter.mapping_for_headers(DOUYIN_HEADERS)
+
+    adapted = adapter.adapt(douyin_row(**{"分类": "  --  "}))
+
+    assert adapted.is_valid
+    assert "creator_classification_tags" not in adapted.record.public_profile
+    assert adapted.raw_data["分类"] == "  --  "
+
+
+def test_buyer_classification_reads_persisted_huitun_category_evidence() -> None:
+    import_job_id = UUID(int=1)
+    import_row_id = UUID(int=2)
+    now = datetime(2026, 9, 2, tzinfo=UTC)
+    account = SimpleNamespace(platform=Platform.DOUYIN, source=DataSource.HUITUN)
+    state = SimpleNamespace(
+        source=DataSource.HUITUN,
+        source_data={"creator_classification_tags": ["舞蹈"]},
+        last_import_job_id=import_job_id,
+        last_import_row_id=import_row_id,
+    )
+    import_row = SimpleNamespace(
+        id=import_row_id,
+        import_job_id=import_job_id,
+        committed_at=now,
+        committed_action=ImportRowAction.CREATE,
+        # The raw payload is immutable evidence only; the downstream reader
+        # must consume the normalized/source-state projection instead.
+        raw_data={"分类": "影视"},
+        normalized_data={"public_profile": {"creator_classification_tags": ["舞蹈"]}},
+    )
+    import_job = SimpleNamespace(
+        id=import_job_id,
+        status=ImportJobStatus.COMPLETED,
+        confirmed_revision=1,
+        source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+    )
+    import_file = SimpleNamespace(
+        id=UUID(int=3), import_job_id=import_job_id, status=ImportJobFileStatus.READY
+    )
+    import_row.import_job_file_id = import_file.id
+    import_row.preview_revision = import_job.confirmed_revision
+
+    assert CandidatePoolRepository._creator_classification(
+        account, state, import_row, import_job, import_file
+    ) == (("舞蹈",), (import_job_id,))
 
 
 def test_huitun_douyin_blank_optional_metric_is_not_zero() -> None:

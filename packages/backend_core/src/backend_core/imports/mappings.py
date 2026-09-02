@@ -60,6 +60,7 @@ HUITUN_DOUYIN_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
         "所属MCN": "mcn_name",
         "简介": "bio",
         "内容标签": "creator_tags",
+        "分类": "creator_classification_tags",
         "粉丝数": "followers_count",
         "达人主页链接": "profile_url",
     }
@@ -69,6 +70,7 @@ HUITUN_DOUYIN_REQUIRED_HEADERS = frozenset({"播主昵称", "抖音号", "达人
 CANONICAL_FIELDS = frozenset(
     {
         *HUITUN_FIELD_MAPPING.values(),
+        "creator_classification_tags",
         "external_source_id",
         "platform_account_id",
     }

@@ -52,6 +52,7 @@ PUBLIC_PROFILE_FIELDS = frozenset(
         "verification_info",
         "mcn_name",
         "creator_tags",
+        "creator_classification_tags",
         "creator_level",
         "is_brand_partner",
     }
@@ -235,6 +236,11 @@ class _MappedAdapter:
                 output[field] = parsed
             elif field == "creator_tags":
                 output[field] = parse_tags(value)
+            elif field == "creator_classification_tags":
+                # Huitun's 分类 is one creator-current label, not a tag list.
+                # Preserve it exactly (apart from canonical whitespace trimming)
+                # so the frozen Buyer taxonomy can fail closed on unmapped labels.
+                output[field] = [value]
             else:
                 output[field] = value
 
