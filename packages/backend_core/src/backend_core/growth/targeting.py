@@ -2084,9 +2084,8 @@ def evaluate_buyer_prospect_rule(
     elif facts.follower_metric_snapshot_id is None or facts.followers_count is None:
         follower_result = TargetingEvaluationResult.UNKNOWN
         follower_reason = TargetingReasonCode.FOLLOWERS_MISSING
-    elif (
-        (policy.follower_min is not None and facts.followers_count < policy.follower_min)
-        or (policy.follower_max is not None and facts.followers_count > policy.follower_max)
+    elif (policy.follower_min is not None and facts.followers_count < policy.follower_min) or (
+        policy.follower_max is not None and facts.followers_count > policy.follower_max
     ):
         follower_result = TargetingEvaluationResult.NOT_MATCH
         follower_reason = TargetingReasonCode.FOLLOWERS_OUT_OF_RANGE

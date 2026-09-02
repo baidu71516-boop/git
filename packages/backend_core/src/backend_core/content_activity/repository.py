@@ -120,7 +120,7 @@ class ContentActivityRepository:
                         == ContentActivityRefreshRequestState.RUNNING,
                         ContentActivityRefreshRequest.lease_expires_at <= as_of,
                     ),
-                )
+                ),
             )
             .order_by(
                 ContentActivityRefreshRequest.next_attempt_at.nulls_last(),

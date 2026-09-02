@@ -116,20 +116,21 @@ class DouyinRuntimeCaptureIngestInput(ContentActivityInput):
     ]
     actual_uid: str | None = Field(default=None, max_length=160)
     semantic_uid: str | None = Field(default=None, max_length=160)
-    publications: tuple[DouyinRuntimePublicationInput, ...] = Field(
-        default=(), max_length=1_000
-    )
+    publications: tuple[DouyinRuntimePublicationInput, ...] = Field(default=(), max_length=1_000)
     pagination_terminal: bool | None = None
     latest_page_proven: bool = False
     coverage_start_at: datetime | None = None
     coverage_end_at: datetime | None = None
-    rejection_reason: Literal[
-        "UID_MISMATCH",
-        "REQUEST_BINDING_MISMATCH",
-        "AMBIGUOUS_REQUEST",
-        "PUBLICATION_UID_CONFLICT",
-        "SCHEMA_REJECTED",
-    ] | None = None
+    rejection_reason: (
+        Literal[
+            "UID_MISMATCH",
+            "REQUEST_BINDING_MISMATCH",
+            "AMBIGUOUS_REQUEST",
+            "PUBLICATION_UID_CONFLICT",
+            "SCHEMA_REJECTED",
+        ]
+        | None
+    ) = None
 
     @field_validator("runtime_request_id", "actual_uid", "semantic_uid")
     @classmethod
@@ -160,17 +161,11 @@ class DouyinRuntimeCaptureIngestInput(ContentActivityInput):
             if self.pagination_terminal is not True and not (
                 self.pagination_terminal is False and self.latest_page_proven
             ):
-                raise ValueError(
-                    "SUCCESS requires terminal pagination or proven newest first page"
-                )
+                raise ValueError("SUCCESS requires terminal pagination or proven newest first page")
             if self.coverage_end_at is None:
                 raise ValueError("SUCCESS requires coverage_end_at")
         elif self.outcome == "EMPTY":
-            if (
-                self.publications
-                or self.pagination_terminal is not True
-                or self.latest_page_proven
-            ):
+            if self.publications or self.pagination_terminal is not True or self.latest_page_proven:
                 raise ValueError("EMPTY requires no publications and terminal pagination")
             if self.coverage_start_at is None or self.coverage_end_at is None:
                 raise ValueError("EMPTY requires an explicit coverage range")

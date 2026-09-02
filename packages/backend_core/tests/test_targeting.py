@@ -980,9 +980,7 @@ def test_market_prospect_rule_category_tier_and_follower_filters(
 
     assert result.result is expected
     followers = next(
-        item
-        for item in result.redacted_evidence["criteria"]
-        if item["criterion"] == "followers"
+        item for item in result.redacted_evidence["criteria"] if item["criterion"] == "followers"
     )
     assert followers["result"] == expected.value
 
@@ -1041,62 +1039,83 @@ def test_market_prospect_rule_owner_and_contacted_filters_are_evidence_based() -
     other_owner_id = uuid4()
     facts = _market_facts(source_collection_job_id, owner_operator_id=owner_id)
 
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(source_collection_job_id), facts, as_of=CONTENT_ACTIVITY_AS_OF
-    ).result is TargetingEvaluationResult.MATCH
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(
-            source_collection_job_id,
-            prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
-        ),
-        facts,
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.NOT_MATCH
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(
-            source_collection_job_id,
-            prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
-            prospect_owner_operator_id=owner_id,
-        ),
-        facts,
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.MATCH
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(
-            source_collection_job_id,
-            prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
-            prospect_owner_operator_id=other_owner_id,
-        ),
-        facts,
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.NOT_MATCH
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(
-            source_collection_job_id,
-            prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
-        ),
-        _market_facts(source_collection_job_id, owner_operator_id=None),
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.MATCH
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(source_collection_job_id), facts, as_of=CONTENT_ACTIVITY_AS_OF
+        ).result
+        is TargetingEvaluationResult.MATCH
+    )
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(
+                source_collection_job_id,
+                prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
+            ),
+            facts,
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.NOT_MATCH
+    )
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(
+                source_collection_job_id,
+                prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+                prospect_owner_operator_id=owner_id,
+            ),
+            facts,
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.MATCH
+    )
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(
+                source_collection_job_id,
+                prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
+                prospect_owner_operator_id=other_owner_id,
+            ),
+            facts,
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.NOT_MATCH
+    )
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(
+                source_collection_job_id,
+                prospect_owner_filter=BuyerProspectOwnerFilter.UNASSIGNED,
+            ),
+            _market_facts(source_collection_job_id, owner_operator_id=None),
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.MATCH
+    )
 
     contact_only = _market_facts(
         source_collection_job_id,
         current_contact_types=(ContactType.EMAIL,),
     )
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(source_collection_job_id, exclude_contacted=True),
-        contact_only,
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.MATCH
-    assert evaluate_buyer_prospect_rule(
-        _market_policy(source_collection_job_id, exclude_contacted=True),
-        _market_facts(
-            source_collection_job_id,
-            contacted_outreach_event_id=uuid4(),
-            contacted_outreach_occurred_at=CONTENT_ACTIVITY_AS_OF,
-        ),
-        as_of=CONTENT_ACTIVITY_AS_OF,
-    ).result is TargetingEvaluationResult.NOT_MATCH
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(source_collection_job_id, exclude_contacted=True),
+            contact_only,
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.MATCH
+    )
+    assert (
+        evaluate_buyer_prospect_rule(
+            _market_policy(source_collection_job_id, exclude_contacted=True),
+            _market_facts(
+                source_collection_job_id,
+                contacted_outreach_event_id=uuid4(),
+                contacted_outreach_occurred_at=CONTENT_ACTIVITY_AS_OF,
+            ),
+            as_of=CONTENT_ACTIVITY_AS_OF,
+        ).result
+        is TargetingEvaluationResult.NOT_MATCH
+    )
 
 
 def test_buyer_evaluator_uses_trustworthy_douyin_creator_classification() -> None:

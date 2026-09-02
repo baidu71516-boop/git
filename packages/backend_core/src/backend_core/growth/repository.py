@@ -71,12 +71,12 @@ from backend_core.influencers.models import (
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
-from backend_core.outreach.enums import OutreachEventType
-from backend_core.outreach.models import OutreachEvent
 from backend_core.influencers.repository import (
     eligible_huitun_freshness,
     visible_influencer_criteria,
 )
+from backend_core.outreach.enums import OutreachEventType
+from backend_core.outreach.models import OutreachEvent
 
 DEFAULT_BATCH_SIZE = 500
 MAX_BATCH_SIZE = 1_000
@@ -934,17 +934,15 @@ class CandidatePoolRepository:
             if source_collection_job_id is None:
                 return ()
             statement = statement.where(
-                (
-                    _committed_provenance_as_of_predicate(
-                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                        source_collection_job_id,
-                        as_of,
-                    )
-                    if market_prospect_rule
-                    else _committed_provenance_predicate(
-                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                        source_collection_job_id,
-                    )
+                _committed_provenance_as_of_predicate(
+                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                    source_collection_job_id,
+                    as_of,
+                )
+                if market_prospect_rule
+                else _committed_provenance_predicate(
+                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                    source_collection_job_id,
                 )
             )
         statement = statement.order_by(InfluencerPlatformAccount.id).limit(batch_size)
@@ -1280,9 +1278,9 @@ class CandidatePoolRepository:
                 )
             )
         ).all()
-        grouped: dict[
-            UUID, list[tuple[UUID, UUID, UUID, datetime | None, bool]]
-        ] = defaultdict(list)
+        grouped: dict[UUID, list[tuple[UUID, UUID, UUID, datetime | None, bool]]] = defaultdict(
+            list
+        )
         for account_id, file_id, job_id, row_id, acquired_at, confirmation_required in rows:
             if account_id is not None:
                 grouped[account_id].append(

@@ -1012,7 +1012,9 @@ class CandidatePoolService:
             department_id=scope.department_id,
         )
         if record is None:
-            raise TargetingError(404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found")
+            raise TargetingError(
+                404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found"
+            )
         return self._buyer_prospect_rule_public(record)
 
     async def buyer_prospect_rule_options(
@@ -1107,8 +1109,7 @@ class CandidatePoolService:
             )
             functional_change = next_definition.canonical_hash != current_definition.canonical_hash
             metadata_change = (
-                pool.name != payload.name
-                or pool.owner_operator_id != owner_operator_id
+                pool.name != payload.name or pool.owner_operator_id != owner_operator_id
             )
             if not functional_change and not metadata_change:
                 await self.session.commit()
@@ -1222,7 +1223,10 @@ class CandidatePoolService:
                     "VERSION_CONFLICT",
                     "Market Prospect Rule changed; refresh before updating status",
                 )
-            if pool.status is CandidatePoolStatus.ARCHIVED and payload.status is not CandidatePoolStatus.ARCHIVED:
+            if (
+                pool.status is CandidatePoolStatus.ARCHIVED
+                and payload.status is not CandidatePoolStatus.ARCHIVED
+            ):
                 raise TargetingError(
                     409,
                     "CANDIDATE_POOL_ARCHIVED",
@@ -1758,7 +1762,9 @@ class CandidatePoolService:
                         self._policy_audit_after(policy_record), scope
                     ),
                 )
-                policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy = requested_policy
+                policy: (
+                    SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy
+                ) = requested_policy
             else:
                 if request.is_current_policy_run or request.is_long_inactivity_current_policy_run:
                     selected_policy_record = await self.repository.get_current_policy(

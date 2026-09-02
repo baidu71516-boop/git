@@ -118,8 +118,7 @@ def test_runtime_capture_works_with_provider_off_and_persists_only_normalized_le
                     )
                     request = await session.scalar(
                         select(ContentActivityRefreshRequest).where(
-                            ContentActivityRefreshRequest.request_token
-                            == launch.capture_request_id
+                            ContentActivityRefreshRequest.request_token == launch.capture_request_id
                         )
                     )
                     assert request is not None
@@ -128,10 +127,13 @@ def test_runtime_capture_works_with_provider_off_and_persists_only_normalized_le
                     assert launch.capture_token not in request.capture_token_digest
                     # Runtime bridge requests are never dispatched through the
                     # provider reconciler, even with the provider default OFF.
-                    assert await service.repository.list_due_refresh_requests(
-                        as_of=NOW,
-                        limit=10,
-                    ) == []
+                    assert (
+                        await service.repository.list_due_refresh_requests(
+                            as_of=NOW,
+                            limit=10,
+                        )
+                        == []
+                    )
 
                     accepted = await service.ingest_douyin_runtime_capture(
                         capture_token=launch.capture_token,
@@ -311,8 +313,7 @@ def test_invalid_payload_reason_is_persisted_without_semantic_data() -> None:
                     assert observation.latest_publication_id is None
                     request = await session.scalar(
                         select(ContentActivityRefreshRequest).where(
-                            ContentActivityRefreshRequest.request_token
-                            == launch.capture_request_id
+                            ContentActivityRefreshRequest.request_token == launch.capture_request_id
                         )
                     )
                     assert request is not None

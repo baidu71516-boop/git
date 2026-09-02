@@ -129,9 +129,7 @@ def normalize_douyin_runtime_capture(
             error_code="UID_MISMATCH",
         )
     coverage_end_at = _utc_or_none(payload.coverage_end_at)
-    if coverage_end_at is None or not _scope_reaches_observation(
-        coverage_end_at, observation_time
-    ):
+    if coverage_end_at is None or not _scope_reaches_observation(coverage_end_at, observation_time):
         return _incomplete_attempt(payload.actual_uid, error_code="SCOPE_END_NOT_CURRENT")
 
     if payload.outcome == "SUCCESS":
@@ -152,9 +150,7 @@ def normalize_douyin_runtime_capture(
             )
         latest = max(publications)
         tied_count = sum(published_at == latest for published_at in publications)
-        representative = sha256(
-            f"{payload.actual_uid}|{latest.isoformat()}".encode()
-        ).hexdigest()
+        representative = sha256(f"{payload.actual_uid}|{latest.isoformat()}".encode()).hexdigest()
         return HuitunDouyinRuntimeAttempt(
             actual_uid=payload.actual_uid,
             observation_status=ContentActivityObservationStatus.COMPLETE,

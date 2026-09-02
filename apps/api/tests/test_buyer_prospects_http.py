@@ -239,9 +239,7 @@ class FakeCandidatePoolService:
         include_archived: bool,
         department_id: UUID,
     ) -> BuyerProspectRulePage:
-        self.calls.append(
-            ("list", (cursor, limit, include_archived, department_id))
-        )
+        self.calls.append(("list", (cursor, limit, include_archived, department_id)))
         return BuyerProspectRulePage(items=(_rule(self.context),), next_cursor=None)
 
     async def get_buyer_prospect_rule(
@@ -253,7 +251,9 @@ class FakeCandidatePoolService:
     ) -> BuyerProspectRulePublic:
         self.calls.append(("get", (pool_id, department_id)))
         if pool_id != RULE_ID:
-            raise TargetingError(404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found")
+            raise TargetingError(
+                404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found"
+            )
         return _rule(self.context)
 
     async def create_buyer_prospect_rule(
@@ -325,13 +325,15 @@ class FakeCandidatePoolService:
         ip: str,
         user_agent: str,
     ) -> CandidatePoolRunPublic:
-        model_dump = getattr(payload, "model_dump")
+        model_dump = payload.model_dump
         request = model_dump(mode="json", exclude_none=True)
         self.calls.append(
             ("run", (pool_id, request, department_id, idempotency_key, ip, user_agent))
         )
         if pool_id != RULE_ID:
-            raise TargetingError(404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found")
+            raise TargetingError(
+                404, "BUYER_PROSPECT_RULE_NOT_FOUND", "Market Prospect Rule not found"
+            )
         replay = idempotency_key in self.run_requests
         self.run_requests.add(idempotency_key)
         return _run(replay=replay)
@@ -379,9 +381,7 @@ def test_buyer_prospect_list_and_get_adapt_closed_service_contracts() -> None:
                 listed = await client.get("/api/v1/buyer-prospects?limit=20")
                 assert listed.status_code == 200
                 assert listed.json()["data"]["items"][0]["id"] == str(RULE_ID)
-                assert service.calls == [
-                    ("list", (None, 20, False, context.department.id))
-                ]
+                assert service.calls == [("list", (None, 20, False, context.department.id))]
 
                 detail = await client.get(f"/api/v1/buyer-prospects/{RULE_ID}")
                 assert detail.status_code == 200
@@ -657,9 +657,7 @@ def test_buyer_prospect_scope_stays_in_department_without_cross_scope_disclosure
                     headers={"X-Department-ID": str(context.department.id)},
                 )
                 assert own_department.status_code == 200
-                assert service.calls == [
-                    ("list", (None, 50, False, context.department.id))
-                ]
+                assert service.calls == [("list", (None, 50, False, context.department.id))]
 
                 cross_department = await client.get(
                     "/api/v1/buyer-prospects",
@@ -685,9 +683,7 @@ def test_buyer_prospect_cross_department_source_is_rejected_without_disclosure()
                 _set_csrf_cookie(client)
                 rejected = await client.post(
                     "/api/v1/buyer-prospects",
-                    json=_create_payload(
-                        source_collection_job_id=OTHER_DEPARTMENT_SOURCE_ID
-                    ),
+                    json=_create_payload(source_collection_job_id=OTHER_DEPARTMENT_SOURCE_ID),
                     headers=_mutation_headers("other-department-source-key"),
                 )
                 _assert_error(rejected, status_code=404, code="COLLECTION_JOB_NOT_FOUND")

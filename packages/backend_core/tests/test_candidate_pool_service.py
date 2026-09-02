@@ -42,21 +42,13 @@ from backend_core.growth.buyer_taxonomy_v1 import (
 )
 from backend_core.growth.enums import (
     BuyerLeadTier,
-    BuyerProspectOwnerFilter,
-    BuyerProspectRecentCollectionWindow,
-    CampaignReviewMode,
-    CampaignStatus,
     CandidatePoolKind,
     CandidatePoolRunStatus,
-    CandidatePoolStatus,
     CandidateResult,
-    DuplicateHistoryPolicy,
     Phase3AOperationScope,
 )
 from backend_core.growth.long_inactivity import LongInactivityProviderRefresh
 from backend_core.growth.models import (
-    Campaign,
-    CampaignMember,
     CandidatePool,
     CandidatePoolMember,
     CandidatePoolRun,
@@ -64,9 +56,6 @@ from backend_core.growth.models import (
 )
 from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import (
-    BuyerProspectRuleCreateInput,
-    BuyerProspectRuleLifecycleInput,
-    BuyerProspectRuleUpdateInput,
     CandidatePoolCreateInput,
     CandidatePoolRunRequest,
     LongInactivityEnrichmentRequest,
@@ -74,7 +63,6 @@ from backend_core.growth.schemas import (
 )
 from backend_core.growth.service import CandidatePoolService, TargetingError
 from backend_core.growth.targeting import (
-    BuyerProspectRuleTargetingPolicy,
     BuyerTargetingPolicy,
     CandidateFactBundle,
     CollectionContextSnapshot,
@@ -116,20 +104,9 @@ from backend_core.influencers.models import (
     Influencer,
     InfluencerContact,
     InfluencerCurrentMetrics,
-    InfluencerMetricSnapshot,
     InfluencerPlatformAccount,
     InfluencerSourceState,
 )
-from backend_core.outreach.enums import (
-    OutreachActorType,
-    OutreachChannel,
-    OutreachEventType,
-    OutreachPriority,
-    OutreachPrioritySource,
-    OutreachTaskKind,
-    OutreachTaskState,
-)
-from backend_core.outreach.models import OutreachEvent, OutreachTarget, OutreachTask
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import (
     AsyncConnection,

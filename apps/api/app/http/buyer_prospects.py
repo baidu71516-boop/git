@@ -48,11 +48,7 @@ BuyerProspectsReadContext = Annotated[
 ]
 BuyerProspectsDataReadContext = Annotated[
     EffectiveAuthorizationContext,
-    Depends(
-        require_module(
-            ALL_OF(ModuleKey.CANDIDATE_POOLS, ModuleKey.DATA_COLLECTION)
-        )
-    ),
+    Depends(require_module(ALL_OF(ModuleKey.CANDIDATE_POOLS, ModuleKey.DATA_COLLECTION))),
 ]
 BuyerProspectsWriteContext = Annotated[
     EffectiveAuthorizationContext,
@@ -60,11 +56,7 @@ BuyerProspectsWriteContext = Annotated[
 ]
 BuyerProspectsAuthoringWriteContext = Annotated[
     EffectiveAuthorizationContext,
-    Depends(
-        require_module_write(
-            ALL_OF(ModuleKey.CANDIDATE_POOLS, ModuleKey.DATA_COLLECTION)
-        )
-    ),
+    Depends(require_module_write(ALL_OF(ModuleKey.CANDIDATE_POOLS, ModuleKey.DATA_COLLECTION))),
 ]
 
 BUYER_PROSPECT_LIST_QUERY_PARAMETERS = frozenset({"cursor", "limit", "include_archived"})

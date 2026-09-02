@@ -961,13 +961,16 @@ def test_huitun_douyin_returned_scope_contract_is_complete_but_never_trusted_cur
             identity_id=identity_id,
             verification_id=verification_id,
         )
-        assert connection.scalar(
-            text(
-                "SELECT activity_semantics::text FROM content_activity_observations "
-                "WHERE id = :id"
-            ),
-            {"id": observation_id},
-        ) == "HUITUN_RETURNED_SCOPE"
+        assert (
+            connection.scalar(
+                text(
+                    "SELECT activity_semantics::text FROM content_activity_observations "
+                    "WHERE id = :id"
+                ),
+                {"id": observation_id},
+            )
+            == "HUITUN_RETURNED_SCOPE"
+        )
         # Returned-scope evidence is valid for the V1 business rule only. The
         # existing trusted-current projection guard must not accept it.
         with pytest.raises(DBAPIError):

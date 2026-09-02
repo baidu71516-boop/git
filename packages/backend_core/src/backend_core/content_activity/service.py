@@ -763,9 +763,7 @@ class ContentActivityService:
             identity_id=identity.id if identity is not None else None,
             verification_id=verification_id,
             attempt_started_at=(
-                _ledger_timestamp_utc(request.started_at)
-                if request.started_at is not None
-                else now
+                _ledger_timestamp_utc(request.started_at) if request.started_at is not None else now
             ),
             request_token=request.request_token,
             runtime_request_id=payload.runtime_request_id,

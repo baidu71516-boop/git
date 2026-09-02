@@ -139,7 +139,9 @@ def _assert_composed_schema(migration_database: MigrationDatabase) -> None:
         )
         assert connection.scalar(text("SELECT 'NOT_MATCH'::candidate_result::text")) == "NOT_MATCH"
         assert _enum_values(connection, "candidate_pool_status") == CANDIDATE_POOL_STATUS_VALUES
-        assert connection.scalar(text("SELECT 'DISABLED'::candidate_pool_status::text")) == "DISABLED"
+        assert (
+            connection.scalar(text("SELECT 'DISABLED'::candidate_pool_status::text")) == "DISABLED"
+        )
 
         operator_columns = {column["name"] for column in inspector.get_columns("operators")}
         session_columns = {column["name"] for column in inspector.get_columns("sessions")}
@@ -175,7 +177,9 @@ def test_downgrade_to_buyer_preserves_disabled_status_and_reupgrades(
     migration_database.upgrade("head")
     with migration_database.engine.begin() as connection:
         connection.execute(
-            text("CREATE TABLE market_prospect_status_probe (status candidate_pool_status NOT NULL)")
+            text(
+                "CREATE TABLE market_prospect_status_probe (status candidate_pool_status NOT NULL)"
+            )
         )
         connection.execute(
             text("INSERT INTO market_prospect_status_probe (status) VALUES ('DISABLED')")
@@ -187,9 +191,15 @@ def test_downgrade_to_buyer_preserves_disabled_status_and_reupgrades(
     with migration_database.engine.connect() as connection:
         assert _revision(connection) == BUYER_REVISION
         assert _enum_values(connection, "candidate_pool_status") == CANDIDATE_POOL_STATUS_VALUES
-        assert connection.scalar(text("SELECT status::text FROM market_prospect_status_probe")) == "DISABLED"
+        assert (
+            connection.scalar(text("SELECT status::text FROM market_prospect_status_probe"))
+            == "DISABLED"
+        )
 
     migration_database.upgrade("head")
     _assert_composed_schema(migration_database)
     with migration_database.engine.connect() as connection:
-        assert connection.scalar(text("SELECT status::text FROM market_prospect_status_probe")) == "DISABLED"
+        assert (
+            connection.scalar(text("SELECT status::text FROM market_prospect_status_probe"))
+            == "DISABLED"
+        )
