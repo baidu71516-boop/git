@@ -28,6 +28,7 @@ import { CampaignListView } from "@/features/campaigns/campaign-list-view";
 import { CandidatePoolDetailView } from "@/features/candidate-pools/candidate-pool-detail-view";
 import { CandidatePoolListView } from "@/features/candidate-pools/candidate-pool-list-view";
 import { CandidateRunDetailView } from "@/features/candidate-pools/candidate-run-detail-view";
+import { BuyerProspectWorkspace } from "@/features/buyer-prospects/buyer-prospect-workspace";
 import { PermissionsWorkspace } from "@/features/permissions/permissions-workspace";
 import { AppShell } from "@/components/app-shell";
 import { ComplianceFooter } from "@/components/compliance-footer";
@@ -88,6 +89,7 @@ type AuthWorkspace =
   | "outreach-today"
   | "campaigns"
   | "candidate-pools"
+  | "buyer-prospects"
   | "permissions";
 
 function operatorAuthErrorMessage(error: unknown): string {
@@ -348,6 +350,8 @@ export function AuthShell({
                   : candidatePoolId
                     ? "候选池详情"
                     : "候选池"
+                : workspace === "buyer-prospects"
+                  ? "潜在客户"
                 : workspace === "permissions"
                   ? "权限管理"
                   : influencerId
@@ -452,6 +456,13 @@ export function AuthShell({
               hasSelectedOperator={auth.operator !== null}
             />
           )
+        ) : null
+      ) : workspace === "buyer-prospects" ? (
+        auth.effective_role ? (
+          <BuyerProspectWorkspace
+            role={auth.effective_role}
+            hasSelectedOperator={auth.operator !== null}
+          />
         ) : null
       ) : auth.effective_role ? (
         <DataCollectionWorkspace role={auth.effective_role} />

@@ -11,7 +11,7 @@ import {
   Select,
   Space,
 } from "antd";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import type { BuyerLeadTier } from "@/features/candidate-pools/types";
 
@@ -43,6 +43,7 @@ const windowOptions: Array<{
 ];
 
 type RuleFormValues = BuyerProspectRuleCreateRequest;
+export type BuyerProspectRuleSubmitIntent = "save" | "save_and_run";
 
 function initialValues(rule?: BuyerProspectRule): RuleFormValues {
   return {
@@ -64,6 +65,7 @@ export function BuyerProspectRuleForm({
   options,
   rule,
   submitLabel,
+  saveAndRunLabel,
   loading,
   error,
   onSubmit,
@@ -71,11 +73,16 @@ export function BuyerProspectRuleForm({
   options: BuyerProspectRuleOptions;
   rule?: BuyerProspectRule;
   submitLabel: string;
+  saveAndRunLabel?: string;
   loading: boolean;
   error: string | null;
-  onSubmit: (values: BuyerProspectRuleCreateRequest) => void;
+  onSubmit: (
+    values: BuyerProspectRuleCreateRequest,
+    intent: BuyerProspectRuleSubmitIntent,
+  ) => void;
 }) {
   const [form] = Form.useForm<RuleFormValues>();
+  const submitIntent = useRef<BuyerProspectRuleSubmitIntent>("save");
   const ownerFilter = Form.useWatch("prospect_owner_filter", form);
 
   useEffect(() => {
@@ -91,7 +98,8 @@ export function BuyerProspectRuleForm({
         if (values.prospect_owner_filter !== "OPERATOR") {
           values.prospect_owner_operator_id = undefined;
         }
-        onSubmit(values);
+        onSubmit(values, submitIntent.current);
+        submitIntent.current = "save";
       }}
     >
       {error ? (
@@ -215,9 +223,29 @@ export function BuyerProspectRuleForm({
         }}
       </Form.Item>
       <Form.Item>
-        <Button type="primary" htmlType="submit" loading={loading} block>
-          {submitLabel}
-        </Button>
+        <Space className="full-width" wrap>
+          <Button
+            type="primary"
+            htmlType="submit"
+            loading={loading}
+            onClick={() => {
+              submitIntent.current = "save";
+            }}
+          >
+            {submitLabel}
+          </Button>
+          {saveAndRunLabel ? (
+            <Button
+              htmlType="submit"
+              loading={loading}
+              onClick={() => {
+                submitIntent.current = "save_and_run";
+              }}
+            >
+              {saveAndRunLabel}
+            </Button>
+          ) : null}
+        </Space>
       </Form.Item>
     </Form>
   );

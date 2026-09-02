@@ -49,6 +49,11 @@ const navGroups = [
         icon: <ProfileOutlined aria-hidden="true" />,
       },
       {
+        label: "潜在客户",
+        href: "/buyer-prospects",
+        icon: <UsergroupAddOutlined aria-hidden="true" />,
+      },
+      {
         label: "达人库",
         href: "/influencers",
         icon: <UsergroupAddOutlined aria-hidden="true" />,
