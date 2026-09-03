@@ -93,7 +93,7 @@ from backend_core.growth.targeting import (
     evaluate_targeting,
     parse_targeting_policy,
 )
-from backend_core.imports.enums import CollectionJobStatus
+from backend_core.imports.enums import ImportSourceType
 from backend_core.imports.hashing import canonical_json, canonical_value, hash_document
 from backend_core.influencers.enums import Platform
 from backend_core.influencers.freshness import (
@@ -108,6 +108,12 @@ from backend_core.influencers.schemas import (
 )
 
 LongInactivityProviderEnricher = Callable[[UUID], Awaitable[LongInactivityProviderRefresh]]
+
+
+_BUYER_PROSPECT_SOURCE_LABELS: dict[ImportSourceType, str] = {
+    ImportSourceType.MANUAL_HUITUN_EXPORT: "灰豚",
+    ImportSourceType.GENERIC_CSV: "通用 CSV",
+}
 
 
 class TargetingError(Exception):
@@ -406,21 +412,31 @@ class CandidatePoolService:
             definition, (BuyerTargetingPolicy, BuyerProspectRuleTargetingPolicy)
         ):
             raise TargetingError(422, "POLICY_KIND_MISMATCH", "Buyer pool requires BUYER_V1 policy")
-        if kind is CandidatePoolKind.POTENTIAL_BUYER and source_collection_job_id is None:
-            raise TargetingError(
-                422,
-                "SOURCE_COLLECTION_REQUIRED",
-                "Buyer Candidate Pools require source_collection_job_id",
-            )
-        if (
-            isinstance(definition, BuyerProspectRuleTargetingPolicy)
-            and definition.source_collection_job_id != source_collection_job_id
-        ):
-            raise TargetingError(
-                422,
-                "SOURCE_COLLECTION_MISMATCH",
-                "Market Prospect Rule source must match its Candidate Pool source",
-            )
+        if kind is CandidatePoolKind.POTENTIAL_BUYER:
+            if isinstance(definition, BuyerProspectRuleTargetingPolicy):
+                if definition.source_type is not None and source_collection_job_id is not None:
+                    raise TargetingError(
+                        422,
+                        "SOURCE_TYPE_POOL_MISMATCH",
+                        "Market Prospect Rules with an import source cannot bind "
+                        "one Collection Job",
+                    )
+                if (
+                    definition.source_collection_job_id is not None
+                    and definition.source_collection_job_id != source_collection_job_id
+                ):
+                    raise TargetingError(
+                        422,
+                        "SOURCE_COLLECTION_MISMATCH",
+                        "Historical Market Prospect Rule source must match its "
+                        "Candidate Pool source",
+                    )
+            elif source_collection_job_id is None:
+                raise TargetingError(
+                    422,
+                    "SOURCE_COLLECTION_REQUIRED",
+                    "Buyer Candidate Pools require source_collection_job_id",
+                )
 
     @staticmethod
     def _validate_authorable_seller_policy(definition: SellerTargetingPolicy) -> None:
@@ -525,7 +541,7 @@ class CandidatePoolService:
                 follower_min=payload.follower_min,
                 follower_max=payload.follower_max,
                 buyer_lead_tiers=payload.buyer_lead_tiers,
-                source_collection_job_id=payload.source_collection_job_id,
+                source_type=payload.source_type,
                 recent_collection_window=payload.recent_collection_window,
                 prospect_owner_filter=payload.prospect_owner_filter,
                 prospect_owner_operator_id=payload.prospect_owner_operator_id,
@@ -542,37 +558,16 @@ class CandidatePoolService:
         self,
         *,
         department_id: UUID,
-        source_collection_job_id: UUID,
+        source_type: ImportSourceType,
     ) -> None:
-        collection = await self.repository.get_collection_job(
-            source_collection_job_id,
+        if not await self.repository.has_committed_buyer_source_type_candidates(
             department_id=department_id,
-        )
-        if collection is None:
-            raise TargetingError(404, "COLLECTION_JOB_NOT_FOUND", "Collection Job not found")
-        if collection.status not in {CollectionJobStatus.ACTIVE, CollectionJobStatus.COMPLETED}:
-            raise TargetingError(
-                409,
-                "COLLECTION_JOB_INELIGIBLE",
-                "Collection Job is not eligible for Market Prospect Rules",
-            )
-        taxonomy = resolve_buyer_taxonomy_v1()
-        if any(
-            label is not None and taxonomy.normalize(label) is None
-            for label in (collection.industry, collection.subdirection)
+            source_type=source_type,
         ):
             raise TargetingError(
                 409,
-                "BUYER_CLIENT_CATEGORY_UNMAPPED",
-                "Collection Job client category is not mapped by Buyer Taxonomy V1",
-            )
-        if not await self.repository.has_committed_buyer_source_candidates(
-            collection_job_id=collection.id
-        ):
-            raise TargetingError(
-                409,
-                "BUYER_SOURCE_PROVENANCE_INCOMPLETE",
-                "Collection Job has no completed committed source provenance for Buyer screening",
+                "BUYER_SOURCE_UNAVAILABLE",
+                "Data source has no completed committed provenance for Buyer screening",
             )
 
     async def _validate_market_prospect_owner_filter(
@@ -607,7 +602,7 @@ class CandidatePoolService:
             "status": pool.status.value,
             "pool_version": pool.version,
             "policy_type": policy.policy_type,
-            "source_collection_job_id": str(policy.source_collection_job_id),
+            "source_type": policy.source_type.value if policy.source_type is not None else None,
         }
 
     async def create_pool(
@@ -633,7 +628,9 @@ class CandidatePoolService:
             )
             if isinstance(typed_definition, SellerTargetingPolicy):
                 self._validate_authorable_seller_policy(typed_definition)
-            if payload.kind is CandidatePoolKind.POTENTIAL_BUYER:
+            if payload.kind is CandidatePoolKind.POTENTIAL_BUYER and not isinstance(
+                typed_definition, BuyerProspectRuleTargetingPolicy
+            ):
                 assert payload.source_collection_job_id is not None
                 collection = await self.repository.get_collection_job(
                     payload.source_collection_job_id,
@@ -868,15 +865,18 @@ class CandidatePoolService:
                     ),
                 )
             else:
-                policy_record = await self.repository.get_current_policy(pool, for_update=True)
-                if policy_record is None:
+                existing_policy_record = await self.repository.get_current_policy(
+                    pool, for_update=True
+                )
+                if existing_policy_record is None:
                     raise TargetingError(
                         409,
                         "TARGETING_POLICY_REQUIRED",
                         "Candidate Pool has no policy",
                     )
-                existing_definition = self._typed_policy(pool, policy_record)
+                existing_definition = self._typed_policy(pool, existing_policy_record)
                 self._require_reviewed_buyer_taxonomy(existing_definition, status_code=409)
+                policy_record = existing_policy_record
 
             typed_policy = self._typed_policy(pool, policy_record)
             if not isinstance(typed_policy, BuyerTargetingPolicy):
@@ -951,10 +951,11 @@ class CandidatePoolService:
 
         scope, _operator_id = await self._resolve_mutation_scope(context, department_id)
         policy = self._market_prospect_definition(payload)
+        assert policy.source_type is not None
         try:
             await self._validate_market_prospect_source(
                 department_id=scope.department_id,
-                source_collection_job_id=policy.source_collection_job_id,
+                source_type=policy.source_type,
             )
             await self._validate_market_prospect_owner_filter(scope=scope, policy=policy)
             created = await self.create_pool(
@@ -962,7 +963,7 @@ class CandidatePoolService:
                 CandidatePoolCreateInput(
                     name=payload.name,
                     kind=CandidatePoolKind.POTENTIAL_BUYER,
-                    source_collection_job_id=policy.source_collection_job_id,
+                    source_collection_job_id=None,
                     owner_operator_id=payload.owner_operator_id,
                     policy=policy,
                 ),
@@ -1026,19 +1027,11 @@ class CandidatePoolService:
         department_id: UUID | None = None,
     ) -> BuyerProspectRuleOptionsPublic:
         scope = await self._resolve_read_scope(context, department_id)
-        collections = await self.repository.list_buyer_prospect_source_collection_jobs(
+        source_types = await self.repository.list_buyer_prospect_source_types(
             department_id=scope.department_id
         )
         operators = await self.auth_repository.list_active_operators(scope.department_id)
         taxonomy = resolve_buyer_taxonomy_v1()
-        eligible_collections = tuple(
-            collection
-            for collection in collections
-            if all(
-                label is None or taxonomy.normalize(label) is not None
-                for label in (collection.industry, collection.subdirection)
-            )
-        )
         taxonomy_categories = tuple(
             BuyerProspectRuleTaxonomyOption(id=node["id"], label=node["display_name"])
             for node in buyer_taxonomy_v1_document()["nodes"]
@@ -1046,14 +1039,13 @@ class CandidatePoolService:
         return BuyerProspectRuleOptionsPublic(
             taxonomy_category_ids=taxonomy.categories,
             taxonomy_categories=taxonomy_categories,
-            source_collection_jobs=tuple(
+            sources=tuple(
                 BuyerProspectRuleSourceOption(
-                    id=collection.id,
-                    name=collection.name,
-                    industry=collection.industry,
-                    subdirection=collection.subdirection,
+                    value=source_type,
+                    label=_BUYER_PROSPECT_SOURCE_LABELS[source_type],
                 )
-                for collection in eligible_collections
+                for source_type in source_types
+                if source_type in _BUYER_PROSPECT_SOURCE_LABELS
             ),
             operators=tuple(
                 BuyerProspectRuleOperatorOption(id=operator.id, name=operator.name)
@@ -1073,6 +1065,7 @@ class CandidatePoolService:
     ) -> BuyerProspectRulePublic:
         scope, operator_id = await self._resolve_mutation_scope(context, department_id)
         next_definition = self._market_prospect_definition(payload)
+        assert next_definition.source_type is not None
         mutation_started = False
         try:
             record = await self.repository.get_buyer_prospect_rule(
@@ -1102,7 +1095,7 @@ class CandidatePoolService:
                 )
             await self._validate_market_prospect_source(
                 department_id=scope.department_id,
-                source_collection_job_id=next_definition.source_collection_job_id,
+                source_type=next_definition.source_type,
             )
             await self._validate_market_prospect_owner_filter(
                 scope=scope,
@@ -1127,7 +1120,7 @@ class CandidatePoolService:
             pool.name = payload.name
             pool.owner_operator_id = owner_operator_id
             if functional_change:
-                pool.source_collection_job_id = next_definition.source_collection_job_id
+                pool.source_collection_job_id = None
                 policy_record = await self._append_policy_locked(
                     pool,
                     operator_id,
@@ -1951,10 +1944,22 @@ class CandidatePoolService:
 
         pool = record.pool
         definition = self._typed_policy(pool, record.policy)
+        source_type = (
+            definition.source_type
+            if isinstance(definition, BuyerProspectRuleTargetingPolicy)
+            else None
+        )
+        if source_type is None and record.legacy_source_type is not None:
+            source_type = record.legacy_source_type
         if (
             not isinstance(definition, BuyerProspectRuleTargetingPolicy)
             or pool.current_policy_id != record.policy.id
-            or pool.source_collection_job_id != definition.source_collection_job_id
+            or source_type is None
+            or (definition.source_type is not None and pool.source_collection_job_id is not None)
+            or (
+                definition.source_collection_job_id is not None
+                and pool.source_collection_job_id != definition.source_collection_job_id
+            )
         ):
             raise TargetingError(
                 500,
@@ -1975,7 +1980,8 @@ class CandidatePoolService:
             follower_min=definition.follower_min,
             follower_max=definition.follower_max,
             buyer_lead_tiers=definition.buyer_lead_tiers,
-            source_collection_job_id=definition.source_collection_job_id,
+            source_type=source_type,
+            source_label=_BUYER_PROSPECT_SOURCE_LABELS.get(source_type, "不可用数据来源"),
             recent_collection_window=definition.recent_collection_window,
             prospect_owner_filter=definition.prospect_owner_filter,
             prospect_owner_operator_id=definition.prospect_owner_operator_id,
@@ -2073,10 +2079,15 @@ class CandidatePoolService:
         *,
         as_of: datetime,
     ) -> TargetingEvaluation:
+        as_of_utc = (
+            as_of.replace(tzinfo=UTC)
+            if as_of.tzinfo is None or as_of.utcoffset() is None
+            else as_of.astimezone(UTC)
+        )
         return evaluate_targeting(
             policy,
             facts,
-            as_of=as_of,
+            as_of=as_of_utc,
             content_activity_freshness_policy=self.content_activity_freshness_policy,
             grey_dolphin_activity_freshness_policy=(self.grey_dolphin_activity_freshness_policy),
         )

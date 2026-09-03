@@ -4,7 +4,6 @@ import {
   Alert,
   Button,
   Checkbox,
-  Descriptions,
   Form,
   Input,
   InputNumber,
@@ -43,7 +42,9 @@ const windowOptions: Array<{
   { value: "ALL", label: "全部历史" },
 ];
 
-type RuleFormValues = BuyerProspectRuleCreateRequest;
+type RuleFormValues = Omit<BuyerProspectRuleCreateRequest, "source_type"> & {
+  source_type?: BuyerProspectRuleCreateRequest["source_type"];
+};
 export type BuyerProspectRuleSubmitIntent = "save" | "save_and_run";
 
 function initialValues(rule?: BuyerProspectRule): RuleFormValues {
@@ -54,7 +55,7 @@ function initialValues(rule?: BuyerProspectRule): RuleFormValues {
     follower_min: rule?.follower_min ?? null,
     follower_max: rule?.follower_max ?? null,
     buyer_lead_tiers: rule?.buyer_lead_tiers ?? [],
-    source_collection_job_id: rule?.source_collection_job_id ?? "",
+    source_type: rule?.source_type ?? undefined,
     recent_collection_window: rule?.recent_collection_window ?? "30",
     prospect_owner_filter: rule?.prospect_owner_filter ?? "ANY",
     prospect_owner_operator_id: rule?.prospect_owner_operator_id ?? undefined,
@@ -85,10 +86,13 @@ export function BuyerProspectRuleForm({
   const [form] = Form.useForm<RuleFormValues>();
   const submitIntent = useRef<BuyerProspectRuleSubmitIntent>("save");
   const ownerFilter = Form.useWatch("prospect_owner_filter", form);
-  const sourceCollectionJobId = Form.useWatch("source_collection_job_id", form);
-  const selectedSource = options.source_collection_jobs.find(
-    (job) => job.id === sourceCollectionJobId,
-  );
+  const sourceOptions = [
+    ...options.sources,
+    ...(rule &&
+    !options.sources.some((source) => source.value === rule.source_type)
+      ? [{ value: rule.source_type, label: rule.source_label }]
+      : []),
+  ];
 
   useEffect(() => {
     form.setFieldsValue(initialValues(rule));
@@ -103,12 +107,23 @@ export function BuyerProspectRuleForm({
         if (values.prospect_owner_filter !== "OPERATOR") {
           values.prospect_owner_operator_id = undefined;
         }
-        onSubmit(values, submitIntent.current);
+        onSubmit(
+          {
+            ...values,
+            source_type: values.source_type!,
+          },
+          submitIntent.current,
+        );
         submitIntent.current = "save";
       }}
     >
       {error ? (
-        <Alert className="campaign-modal-alert" type="error" showIcon title={error} />
+        <Alert
+          className="campaign-modal-alert"
+          type="error"
+          showIcon
+          title={error}
+        />
       ) : null}
       <Form.Item
         label="规则名称"
@@ -143,45 +158,35 @@ export function BuyerProspectRuleForm({
         name="buyer_lead_tiers"
         rules={[{ required: true, message: "请选择至少一个潜客等级" }]}
       >
-        <Select mode="multiple" options={tierOptions} placeholder="选择潜客等级" />
+        <Select
+          mode="multiple"
+          options={tierOptions}
+          placeholder="选择潜客等级"
+        />
       </Form.Item>
       <Form.Item
         label="数据来源"
-        name="source_collection_job_id"
-        rules={[{ required: true, message: "请选择可用采集任务" }]}
+        name="source_type"
+        rules={[{ required: true, message: "请选择数据来源" }]}
       >
         <Select
-          placeholder="选择同部门采集任务"
-          options={options.source_collection_jobs.map((job) => ({
-            label: `${job.name} · ${job.industry}${
-              job.subdirection ? ` / ${job.subdirection}` : ""
-            }`,
-            value: job.id,
+          placeholder="选择数据来源"
+          options={sourceOptions.map((source) => ({
+            label: source.label,
+            value: source.value,
           }))}
         />
       </Form.Item>
-      {selectedSource ? (
-        <Descriptions
-          bordered
-          column={1}
-          size="small"
-          title="来源上下文"
-          className="buyer-prospect-source-context"
-        >
-          <Descriptions.Item label="来源行业">
-            {selectedSource.industry}
-          </Descriptions.Item>
-          <Descriptions.Item label="来源赛道">
-            {selectedSource.subdirection ?? "—"}
-          </Descriptions.Item>
-        </Descriptions>
-      ) : null}
       <Form.Item
         label="最近采集范围"
         name="recent_collection_window"
         rules={[{ required: true, message: "请选择最近采集范围" }]}
       >
-        <Radio.Group options={windowOptions} optionType="button" buttonStyle="solid" />
+        <Radio.Group
+          options={windowOptions}
+          optionType="button"
+          buttonStyle="solid"
+        />
       </Form.Item>
       <Form.Item label="潜客负责人筛选" name="prospect_owner_filter">
         <Select<BuyerProspectOwnerFilter>
@@ -230,7 +235,8 @@ export function BuyerProspectRuleForm({
         {() => {
           const minimum = form.getFieldValue("follower_min") as number | null;
           const maximum = form.getFieldValue("follower_max") as number | null;
-          const invalid = minimum != null && maximum != null && minimum > maximum;
+          const invalid =
+            minimum != null && maximum != null && minimum > maximum;
           return invalid ? (
             <Alert
               className="campaign-modal-alert"

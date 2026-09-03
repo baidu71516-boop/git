@@ -42,6 +42,7 @@ from backend_core.growth.schemas import (
     CandidatePoolRunPublic,
 )
 from backend_core.growth.service import TargetingError
+from backend_core.imports.enums import ImportSourceType
 from httpx import ASGITransport, AsyncClient, Response
 
 NOW = datetime(2026, 8, 24, 10, 0, tzinfo=UTC)
@@ -49,7 +50,8 @@ RULE_ID = UUID("00000000-0000-0000-0000-000000000901")
 POLICY_ID = UUID("00000000-0000-0000-0000-000000000902")
 RUN_ID = UUID("00000000-0000-0000-0000-000000000903")
 SOURCE_ID = UUID("00000000-0000-0000-0000-000000000904")
-OTHER_DEPARTMENT_SOURCE_ID = UUID("00000000-0000-0000-0000-000000000905")
+HUITUN_SOURCE = ImportSourceType.MANUAL_HUITUN_EXPORT
+UNAVAILABLE_SOURCE = ImportSourceType.GENERIC_CSV
 
 
 def _context(*, role: Role = Role.OPERATOR) -> AuthContext:
@@ -170,7 +172,7 @@ def _rule(
         follower_min=1_000,
         follower_max=10_000,
         buyer_lead_tiers=(BuyerLeadTier.HIGH,),
-        source_collection_job_id=SOURCE_ID,
+        source_type=HUITUN_SOURCE,
         recent_collection_window=BuyerProspectRecentCollectionWindow.DAYS_30,
         prospect_owner_filter=BuyerProspectOwnerFilter.ANY,
         prospect_owner_operator_id=None,
@@ -200,14 +202,14 @@ def _run(*, replay: bool = False) -> CandidatePoolRunPublic:
     )
 
 
-def _create_payload(*, source_collection_job_id: UUID = SOURCE_ID) -> dict[str, object]:
+def _create_payload(*, source_type: ImportSourceType = HUITUN_SOURCE) -> dict[str, object]:
     return {
         "name": "Summer beauty prospects",
         "category_ids": ["beauty"],
         "follower_min": 1_000,
         "follower_max": 10_000,
         "buyer_lead_tiers": [BuyerLeadTier.HIGH.value],
-        "source_collection_job_id": str(source_collection_job_id),
+        "source_type": source_type.value,
         "recent_collection_window": BuyerProspectRecentCollectionWindow.DAYS_30.value,
         "prospect_owner_filter": BuyerProspectOwnerFilter.ANY.value,
         "exclude_contacted": False,
@@ -259,12 +261,10 @@ class FakeCandidatePoolService:
                 BuyerProspectRuleTaxonomyOption(id="AUTO", label="汽车"),
                 BuyerProspectRuleTaxonomyOption(id="BEAUTY", label="美妆"),
             ),
-            source_collection_jobs=(
+            sources=(
                 BuyerProspectRuleSourceOption(
-                    id=SOURCE_ID,
-                    name="影视批次",
-                    industry="影视",
-                    subdirection="剧情 / 娱乐",
+                    value=HUITUN_SOURCE,
+                    label="灰豚",
                 ),
             ),
             operators=(
@@ -305,8 +305,12 @@ class FakeCandidatePoolService:
                 (payload.model_dump(mode="json"), department_id, idempotency_key, ip, user_agent),
             )
         )
-        if payload.source_collection_job_id == OTHER_DEPARTMENT_SOURCE_ID:
-            raise TargetingError(404, "COLLECTION_JOB_NOT_FOUND", "Collection Job not found")
+        if payload.source_type is UNAVAILABLE_SOURCE:
+            raise TargetingError(
+                409,
+                "BUYER_SOURCE_UNAVAILABLE",
+                "Data source has no completed committed provenance for Buyer screening",
+            )
         return _rule(self.context, name=payload.name)
 
     async def update_buyer_prospect_rule(
@@ -325,8 +329,12 @@ class FakeCandidatePoolService:
                 (pool_id, payload.model_dump(mode="json"), department_id, ip, user_agent),
             )
         )
-        if payload.source_collection_job_id == OTHER_DEPARTMENT_SOURCE_ID:
-            raise TargetingError(404, "COLLECTION_JOB_NOT_FOUND", "Collection Job not found")
+        if payload.source_type is UNAVAILABLE_SOURCE:
+            raise TargetingError(
+                409,
+                "BUYER_SOURCE_UNAVAILABLE",
+                "Data source has no completed committed provenance for Buyer screening",
+            )
         return _rule(self.context, name=payload.name, version=4)
 
     async def set_buyer_prospect_rule_lifecycle(
@@ -426,7 +434,7 @@ def test_buyer_prospect_list_and_get_adapt_closed_service_contracts() -> None:
     asyncio.run(scenario())
 
 
-def test_buyer_prospect_options_expose_trusted_labels_and_source_context() -> None:
+def test_buyer_prospect_options_expose_employee_source_labels() -> None:
     async def scenario() -> None:
         context = _context()
         service = FakeCandidatePoolService(context)
@@ -442,12 +450,10 @@ def test_buyer_prospect_options_expose_trusted_labels_and_source_context() -> No
                     {"id": "AUTO", "label": "汽车"},
                     {"id": "BEAUTY", "label": "美妆"},
                 ]
-                assert data["source_collection_jobs"] == [
+                assert data["sources"] == [
                     {
-                        "id": str(SOURCE_ID),
-                        "name": "影视批次",
-                        "industry": "影视",
-                        "subdirection": "剧情 / 娱乐",
+                        "value": HUITUN_SOURCE.value,
+                        "label": "灰豚",
                     }
                 ]
                 assert service.calls == [("options", context.department.id)]
@@ -476,6 +482,7 @@ def test_buyer_prospect_create_accepts_valid_closed_rule() -> None:
                 assert created.json()["data"]["id"] == str(RULE_ID)
                 call = service.calls[-1]
                 assert call[0] == "create"
+                assert call[1][0]["source_type"] == HUITUN_SOURCE.value
                 assert call[1][1:] == (
                     context.department.id,
                     "buyer-rule-create-key",
@@ -760,7 +767,7 @@ def test_buyer_prospect_scope_stays_in_department_without_cross_scope_disclosure
     asyncio.run(scenario())
 
 
-def test_buyer_prospect_cross_department_source_is_rejected_without_disclosure() -> None:
+def test_buyer_prospect_unavailable_source_is_rejected_safely() -> None:
     async def scenario() -> None:
         context = _context()
         service = FakeCandidatePoolService(context)
@@ -772,10 +779,10 @@ def test_buyer_prospect_cross_department_source_is_rejected_without_disclosure()
                 _set_csrf_cookie(client)
                 rejected = await client.post(
                     "/api/v1/buyer-prospects",
-                    json=_create_payload(source_collection_job_id=OTHER_DEPARTMENT_SOURCE_ID),
-                    headers=_mutation_headers("other-department-source-key"),
+                    json=_create_payload(source_type=UNAVAILABLE_SOURCE),
+                    headers=_mutation_headers("unavailable-source-key"),
                 )
-                _assert_error(rejected, status_code=404, code="COLLECTION_JOB_NOT_FOUND")
+                _assert_error(rejected, status_code=409, code="BUYER_SOURCE_UNAVAILABLE")
                 call = service.calls[-1]
                 assert call[0] == "create"
                 assert call[1][1] == context.department.id

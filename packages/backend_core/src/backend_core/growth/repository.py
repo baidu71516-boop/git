@@ -54,7 +54,6 @@ from backend_core.growth.targeting import (
     TargetingEvaluation,
 )
 from backend_core.imports.enums import (
-    CollectionJobStatus,
     ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
@@ -116,6 +115,7 @@ class BuyerProspectRuleRecord:
     owner: Operator
     policy: TargetingPolicy
     latest_run: CandidatePoolRun | None
+    legacy_source_type: ImportSourceType | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,15 +211,66 @@ def _committed_provenance_as_of_predicate(
     )
 
 
+def _committed_source_type_provenance_as_of_predicate(
+    account_id: ColumnElement[UUID],
+    source_type: ImportSourceType,
+    department_id: UUID,
+    as_of: datetime | None = None,
+) -> ColumnElement[bool]:
+    """Bind Market Prospect source membership to its canonical import type."""
+
+    committed_actions = (
+        ImportRowAction.CREATE,
+        ImportRowAction.UPDATE,
+        ImportRowAction.NO_CHANGE,
+    )
+    statement = (
+        select(1)
+        .select_from(ImportRow)
+        .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+        .join(
+            ImportJobFile,
+            and_(
+                ImportJobFile.id == ImportRow.import_job_file_id,
+                ImportJobFile.import_job_id == ImportRow.import_job_id,
+            ),
+        )
+        .where(
+            ImportRow.matched_platform_account_id == account_id,
+            ImportRow.committed_at.is_not(None),
+            ImportRow.committed_action.in_(committed_actions),
+            ImportJob.department_id == department_id,
+            ImportJob.source_type == source_type,
+            ImportJob.status == ImportJobStatus.COMPLETED,
+            ImportJob.confirmed_revision.is_not(None),
+            ImportRow.preview_revision == ImportJob.confirmed_revision,
+            ImportJobFile.status == ImportJobFileStatus.READY,
+        )
+    )
+    if as_of is not None:
+        statement = statement.where(ImportRow.committed_at <= as_of)
+    return cast(ColumnElement[bool], exists(statement))
+
+
 def _source_collection_job_id_for_policy(
     pool: CandidatePool,
     policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
 ) -> UUID | None:
-    """Keep a historical Market run bound to its immutable policy source."""
+    """Read collection-backed source identity for legacy Buyer policies only."""
 
     if isinstance(policy, BuyerProspectRuleTargetingPolicy):
         return policy.source_collection_job_id
     return pool.source_collection_job_id
+
+
+def _source_type_for_policy(
+    policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
+) -> ImportSourceType | None:
+    """Read the canonical import source for new Market Prospect policies."""
+
+    if isinstance(policy, BuyerProspectRuleTargetingPolicy):
+        return policy.source_type
+    return None
 
 
 class CandidatePoolRepository:
@@ -325,7 +376,7 @@ class CandidatePoolRepository:
         for_update: bool = False,
     ) -> BuyerProspectRuleRecord | None:
         statement = (
-            select(CandidatePool, Operator, TargetingPolicy)
+            select(CandidatePool, Operator, TargetingPolicy, CollectionJob.source_type)
             .join(
                 Operator,
                 and_(
@@ -338,6 +389,13 @@ class CandidatePoolRepository:
                 and_(
                     TargetingPolicy.id == CandidatePool.current_policy_id,
                     TargetingPolicy.pool_id == CandidatePool.id,
+                ),
+            )
+            .outerjoin(
+                CollectionJob,
+                and_(
+                    CollectionJob.id == CandidatePool.source_collection_job_id,
+                    CollectionJob.department_id == CandidatePool.department_id,
                 ),
             )
             .where(
@@ -353,13 +411,14 @@ class CandidatePoolRepository:
         row = (await self.session.execute(statement)).first()
         if row is None:
             return None
-        pool, owner, policy = row
+        pool, owner, policy, legacy_source_type = row
         latest_run = await self.get_latest_run_for_policy(pool_id=pool.id, policy_id=policy.id)
         return BuyerProspectRuleRecord(
             pool=pool,
             owner=owner,
             policy=policy,
             latest_run=latest_run,
+            legacy_source_type=legacy_source_type,
         )
 
     async def list_buyer_prospect_rules(
@@ -371,7 +430,7 @@ class CandidatePoolRepository:
         include_archived: bool,
     ) -> tuple[tuple[BuyerProspectRuleRecord, ...], UUID | None]:
         statement = (
-            select(CandidatePool, Operator, TargetingPolicy)
+            select(CandidatePool, Operator, TargetingPolicy, CollectionJob.source_type)
             .join(
                 Operator,
                 and_(
@@ -384,6 +443,13 @@ class CandidatePoolRepository:
                 and_(
                     TargetingPolicy.id == CandidatePool.current_policy_id,
                     TargetingPolicy.pool_id == CandidatePool.id,
+                ),
+            )
+            .outerjoin(
+                CollectionJob,
+                and_(
+                    CollectionJob.id == CandidatePool.source_collection_job_id,
+                    CollectionJob.department_id == CandidatePool.department_id,
                 ),
             )
             .where(
@@ -401,7 +467,7 @@ class CandidatePoolRepository:
         rows = tuple((await self.session.execute(statement)).all())
         visible_rows = rows[:limit]
         latest_runs = await self.latest_runs_for_policy_ids(
-            policy_ids=tuple(policy.id for _pool, _owner, policy in visible_rows)
+            policy_ids=tuple(policy.id for _pool, _owner, policy, _source_type in visible_rows)
         )
         items = tuple(
             BuyerProspectRuleRecord(
@@ -409,52 +475,63 @@ class CandidatePoolRepository:
                 owner=owner,
                 policy=policy,
                 latest_run=latest_runs.get(policy.id),
+                legacy_source_type=legacy_source_type,
             )
-            for pool, owner, policy in visible_rows
+            for pool, owner, policy, legacy_source_type in visible_rows
         )
         return (
             items,
             items[-1].pool.id if len(rows) > limit and items else None,
         )
 
-    async def list_buyer_prospect_source_collection_jobs(
+    async def list_buyer_prospect_source_types(
         self,
         *,
         department_id: UUID,
-    ) -> tuple[CollectionJob, ...]:
-        """Return only same-Department jobs with durable Buyer source evidence.
+    ) -> tuple[ImportSourceType, ...]:
+        """Return actual completed import source types with eligible Buyer rows.
 
-        Category mapping remains a frozen service concern, but a chooser must
-        never advertise a CollectionJob that cannot supply a committed Buyer
-        candidate at all.  This mirrors the exact provenance predicate used by
-        run materialization without doing one query per job.
+        A Market rule filters imported data, rather than CollectionJob setup.
+        The options list therefore follows the same completed, committed,
+        visible-account provenance that the rule materializer uses.
         """
 
-        eligible_source = exists(
-            select(1)
-            .select_from(InfluencerPlatformAccount)
+        committed_actions = (
+            ImportRowAction.CREATE,
+            ImportRowAction.UPDATE,
+            ImportRowAction.NO_CHANGE,
+        )
+        source_types = await self.session.scalars(
+            select(ImportJob.source_type)
+            .select_from(ImportJob)
+            .join(ImportRow, ImportRow.import_job_id == ImportJob.id)
+            .join(
+                ImportJobFile,
+                and_(
+                    ImportJobFile.id == ImportRow.import_job_file_id,
+                    ImportJobFile.import_job_id == ImportRow.import_job_id,
+                ),
+            )
+            .join(
+                InfluencerPlatformAccount,
+                InfluencerPlatformAccount.id == ImportRow.matched_platform_account_id,
+            )
             .join(Influencer, Influencer.id == InfluencerPlatformAccount.influencer_id)
             .where(
+                ImportJob.department_id == department_id,
+                ImportJob.status == ImportJobStatus.COMPLETED,
+                ImportJob.confirmed_revision.is_not(None),
+                ImportRow.preview_revision == ImportJob.confirmed_revision,
+                ImportRow.committed_at.is_not(None),
+                ImportRow.committed_action.in_(committed_actions),
+                ImportJobFile.status == ImportJobFileStatus.READY,
                 InfluencerPlatformAccount.is_active.is_(True),
                 *visible_influencer_criteria(),
-                _committed_provenance_predicate(
-                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    cast(ColumnElement[UUID], CollectionJob.id),
-                ),
             )
+            .distinct()
+            .order_by(ImportJob.source_type)
         )
-        jobs = await self.session.scalars(
-            select(CollectionJob)
-            .where(
-                CollectionJob.department_id == department_id,
-                CollectionJob.status.in_(
-                    (CollectionJobStatus.ACTIVE, CollectionJobStatus.COMPLETED)
-                ),
-                eligible_source,
-            )
-            .order_by(CollectionJob.name, CollectionJob.id)
-        )
-        return tuple(jobs)
+        return tuple(source_types)
 
     async def get_policy(
         self,
@@ -665,6 +742,32 @@ class CandidatePoolRepository:
         )
         return bool((await self.session.execute(statement)).scalar())
 
+    async def has_committed_buyer_source_type_candidates(
+        self,
+        *,
+        department_id: UUID,
+        source_type: ImportSourceType,
+    ) -> bool:
+        """Require direct committed ImportJob provenance for a Market source."""
+
+        statement = select(
+            exists(
+                select(1)
+                .select_from(InfluencerPlatformAccount)
+                .join(Influencer, Influencer.id == InfluencerPlatformAccount.influencer_id)
+                .where(
+                    InfluencerPlatformAccount.is_active.is_(True),
+                    *visible_influencer_criteria(),
+                    _committed_source_type_provenance_as_of_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_type,
+                        department_id,
+                    ),
+                )
+            )
+        )
+        return bool((await self.session.execute(statement)).scalar())
+
     async def get_active_buyer_pool_for_bootstrap(
         self,
         *,
@@ -762,6 +865,7 @@ class CandidatePoolRepository:
         policy: SellerTargetingPolicy | BuyerTargetingPolicy | BuyerProspectRuleTargetingPolicy,
     ) -> dict[str, object]:
         source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
+        source_type = _source_type_for_policy(policy)
         current_contacts = (
             select(
                 InfluencerContact.influencer_id.label("influencer_id"),
@@ -801,13 +905,22 @@ class CandidatePoolRepository:
             )
         )
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            assert source_collection_job_id is not None
-            statement = statement.where(
-                _committed_provenance_predicate(
-                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    source_collection_job_id,
+            if source_type is not None:
+                statement = statement.where(
+                    _committed_source_type_provenance_as_of_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_type,
+                        pool.department_id,
+                    )
                 )
-            )
+            else:
+                assert source_collection_job_id is not None
+                statement = statement.where(
+                    _committed_provenance_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_collection_job_id,
+                    )
+                )
         count, account_updated, metrics_updated, source_updated, contacts_updated = (
             await self.session.execute(statement)
         ).one()
@@ -835,6 +948,8 @@ class CandidatePoolRepository:
                 )
                 watermark["source_collection_job_id"] = collection.id
                 watermark["collection_context"] = snapshot.model_dump(mode="json")
+        if source_type is not None:
+            watermark["source_type"] = source_type.value
         return watermark
 
     @staticmethod
@@ -847,6 +962,10 @@ class CandidatePoolRepository:
         """Read reservation-time Buyer context without consulting live CollectionJob state."""
 
         if pool.kind is not CandidatePoolKind.POTENTIAL_BUYER:
+            return None
+        if _source_type_for_policy(policy) is not None:
+            # New data-source rules draw collection context from the exact
+            # provenance ImportJob selected for each candidate.
             return None
         source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
         if source_collection_job_id is None or input_watermark is None:
@@ -876,11 +995,16 @@ class CandidatePoolRepository:
 
         if not 1 <= batch_size <= MAX_BATCH_SIZE:
             raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
+        as_of_utc = _utc(as_of)
+        if as_of_utc is None:  # pragma: no cover - typed non-null guard
+            raise ValueError("Candidate Run as_of is required")
+        as_of = as_of_utc
         cursor: UUID | None = None
         source_collection_job_id = _source_collection_job_id_for_policy(pool, policy)
+        source_type = _source_type_for_policy(policy)
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            if source_collection_job_id is None:
-                raise ValueError("Buyer pools require source_collection_job_id")
+            if source_collection_job_id is None and source_type is None:
+                raise ValueError("Buyer pools require source_collection_job_id or source_type")
 
         while True:
             accounts = await self._account_batch(
@@ -890,6 +1014,7 @@ class CandidatePoolRepository:
                 as_of=as_of,
                 market_prospect_rule=isinstance(policy, BuyerProspectRuleTargetingPolicy),
                 source_collection_job_id=source_collection_job_id,
+                source_type=source_type,
             )
             if not accounts:
                 return
@@ -898,6 +1023,7 @@ class CandidatePoolRepository:
                 accounts=accounts,
                 collection_context=collection_context,
                 source_collection_job_id=source_collection_job_id,
+                source_type=source_type,
                 buyer=pool.kind is CandidatePoolKind.POTENTIAL_BUYER,
                 market_prospect_rule=isinstance(policy, BuyerProspectRuleTargetingPolicy),
                 department_id=pool.department_id,
@@ -919,6 +1045,7 @@ class CandidatePoolRepository:
         as_of: datetime,
         market_prospect_rule: bool,
         source_collection_job_id: UUID | None,
+        source_type: ImportSourceType | None,
     ) -> tuple[InfluencerPlatformAccount, ...]:
         statement = (
             select(InfluencerPlatformAccount)
@@ -931,20 +1058,30 @@ class CandidatePoolRepository:
         if cursor is not None:
             statement = statement.where(InfluencerPlatformAccount.id > cursor)
         if pool.kind is CandidatePoolKind.POTENTIAL_BUYER:
-            if source_collection_job_id is None:
+            if source_type is not None:
+                statement = statement.where(
+                    _committed_source_type_provenance_as_of_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_type,
+                        pool.department_id,
+                        as_of,
+                    )
+                )
+            elif source_collection_job_id is not None:
+                statement = statement.where(
+                    _committed_provenance_as_of_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_collection_job_id,
+                        as_of,
+                    )
+                    if market_prospect_rule
+                    else _committed_provenance_predicate(
+                        cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
+                        source_collection_job_id,
+                    )
+                )
+            else:
                 return ()
-            statement = statement.where(
-                _committed_provenance_as_of_predicate(
-                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    source_collection_job_id,
-                    as_of,
-                )
-                if market_prospect_rule
-                else _committed_provenance_predicate(
-                    cast(ColumnElement[UUID], InfluencerPlatformAccount.id),
-                    source_collection_job_id,
-                )
-            )
         statement = statement.order_by(InfluencerPlatformAccount.id).limit(batch_size)
         return tuple((await self.session.execute(statement)).scalars())
 
@@ -960,6 +1097,7 @@ class CandidatePoolRepository:
         as_of: datetime,
         freshness_policy: FreshnessPolicy,
         include_content_activity: bool = False,
+        source_type: ImportSourceType | None = None,
     ) -> tuple[CandidateFactBundle, ...]:
         account_ids = tuple(account.id for account in accounts)
         influencer_ids = tuple({account.influencer_id for account in accounts})
@@ -1028,7 +1166,9 @@ class CandidatePoolRepository:
             else {}
         )
         provenance = (
-            await self._buyer_provenance(account_ids, source_collection_job_id) if buyer else {}
+            await self._buyer_provenance(account_ids, source_collection_job_id)
+            if buyer and source_type is None
+            else {}
         )
         metric_snapshots = (
             await self._latest_metric_snapshots_as_of(account_ids=account_ids, as_of=as_of)
@@ -1039,6 +1179,8 @@ class CandidatePoolRepository:
             await self._buyer_source_provenance_as_of(
                 account_ids=account_ids,
                 source_collection_job_id=source_collection_job_id,
+                source_type=source_type,
+                department_id=department_id,
                 as_of=as_of,
             )
             if market_prospect_rule
@@ -1152,7 +1294,14 @@ class CandidatePoolRepository:
                         import_job=metric_import_job,
                         import_file=metric_import_file,
                     ),
-                    source_collection_job_id=source_collection_job_id,
+                    source_collection_job_id=(
+                        source_provenance[5]
+                        if source_type is not None and source_provenance is not None
+                        else source_collection_job_id
+                    ),
+                    buyer_source_type=(
+                        source_provenance[4] if source_provenance is not None else None
+                    ),
                     buyer_source_import_job_file_id=(
                         source_provenance[0] if source_provenance is not None else None
                     ),
@@ -1166,13 +1315,21 @@ class CandidatePoolRepository:
                         source_provenance[3] if source_provenance is not None else None
                     ),
                     collection_industry=(
-                        collection_context.industry if collection_context else None
+                        source_provenance[6]
+                        if source_type is not None and source_provenance is not None
+                        else (collection_context.industry if collection_context else None)
                     ),
                     collection_subdirection=(
-                        collection_context.subdirection if collection_context else None
+                        source_provenance[7]
+                        if source_type is not None and source_provenance is not None
+                        else (collection_context.subdirection if collection_context else None)
                     ),
                     creator_classification_tags=creator_tags,
-                    source_collection_import_job_ids=tuple(provenance.get(account.id, ())),
+                    source_collection_import_job_ids=(
+                        (source_provenance[1],)
+                        if source_type is not None and source_provenance is not None
+                        else tuple(provenance.get(account.id, ()))
+                    ),
                     creator_classification_import_job_ids=creator_import_job_ids,
                     owner_operator_id=owner_by_influencer.get(account.influencer_id),
                     contacted_outreach_event_id=(
@@ -1231,8 +1388,22 @@ class CandidatePoolRepository:
         *,
         account_ids: tuple[UUID, ...],
         source_collection_job_id: UUID | None,
+        source_type: ImportSourceType | None,
+        department_id: UUID,
         as_of: datetime,
-    ) -> dict[UUID, tuple[UUID, UUID, UUID, datetime | None]]:
+    ) -> dict[
+        UUID,
+        tuple[
+            UUID,
+            UUID,
+            UUID,
+            datetime | None,
+            ImportSourceType,
+            UUID,
+            str,
+            str | None,
+        ],
+    ]:
         """Return one source-file lineage record per account for Market rules.
 
         Finite windows rely only on a trusted, known ``source_acquired_at``;
@@ -1240,48 +1411,92 @@ class CandidatePoolRepository:
         when historical acquisition time is unavailable.
         """
 
-        if not account_ids or source_collection_job_id is None:
+        if not account_ids or (source_collection_job_id is None and source_type is None):
             return {}
+        as_of_utc = _utc(as_of)
+        if as_of_utc is None:  # pragma: no cover - typed non-null guard
+            raise ValueError("Market Prospect as_of is required")
         committed_actions = (
             ImportRowAction.CREATE,
             ImportRowAction.UPDATE,
             ImportRowAction.NO_CHANGE,
         )
-        rows = (
-            await self.session.execute(
-                select(
-                    ImportRow.matched_platform_account_id,
-                    ImportJobFile.id,
-                    ImportJob.id,
-                    ImportRow.id,
-                    ImportJobFile.source_acquired_at,
-                    ImportJobFile.source_acquired_at_confirmation_required,
-                )
-                .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
-                .join(
-                    ImportJobFile,
-                    and_(
-                        ImportJobFile.id == ImportRow.import_job_file_id,
-                        ImportJobFile.import_job_id == ImportRow.import_job_id,
-                    ),
-                )
-                .where(
-                    ImportRow.matched_platform_account_id.in_(account_ids),
-                    ImportRow.committed_at.is_not(None),
-                    ImportRow.committed_at <= as_of,
-                    ImportRow.committed_action.in_(committed_actions),
-                    ImportJob.collection_job_id == source_collection_job_id,
-                    ImportJob.status == ImportJobStatus.COMPLETED,
-                    ImportJob.confirmed_revision.is_not(None),
-                    ImportRow.preview_revision == ImportJob.confirmed_revision,
-                    ImportJobFile.status == ImportJobFileStatus.READY,
-                )
+        statement = (
+            select(
+                ImportRow.matched_platform_account_id,
+                ImportJobFile.id,
+                ImportJob.id,
+                ImportRow.id,
+                ImportJobFile.source_acquired_at,
+                ImportJobFile.source_acquired_at_confirmation_required,
+                ImportJob.source_type,
+                ImportJob.collection_job_id,
+                CollectionJob.industry,
+                CollectionJob.subdirection,
             )
-        ).all()
-        grouped: dict[UUID, list[tuple[UUID, UUID, UUID, datetime | None, bool]]] = defaultdict(
-            list
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .join(
+                ImportJobFile,
+                and_(
+                    ImportJobFile.id == ImportRow.import_job_file_id,
+                    ImportJobFile.import_job_id == ImportRow.import_job_id,
+                ),
+            )
+            .join(
+                CollectionJob,
+                and_(
+                    CollectionJob.id == ImportJob.collection_job_id,
+                    CollectionJob.department_id == ImportJob.department_id,
+                ),
+            )
+            .where(
+                ImportRow.matched_platform_account_id.in_(account_ids),
+                ImportRow.committed_at.is_not(None),
+                ImportRow.committed_at <= as_of_utc,
+                ImportRow.committed_action.in_(committed_actions),
+                ImportJob.status == ImportJobStatus.COMPLETED,
+                ImportJob.confirmed_revision.is_not(None),
+                ImportRow.preview_revision == ImportJob.confirmed_revision,
+                ImportJobFile.status == ImportJobFileStatus.READY,
+            )
         )
-        for account_id, file_id, job_id, row_id, acquired_at, confirmation_required in rows:
+        if source_type is not None:
+            statement = statement.where(
+                ImportJob.department_id == department_id,
+                ImportJob.source_type == source_type,
+            )
+        else:
+            assert source_collection_job_id is not None
+            statement = statement.where(ImportJob.collection_job_id == source_collection_job_id)
+        rows = (await self.session.execute(statement)).all()
+        grouped: dict[
+            UUID,
+            list[
+                tuple[
+                    UUID,
+                    UUID,
+                    UUID,
+                    datetime | None,
+                    bool,
+                    ImportSourceType,
+                    UUID,
+                    str,
+                    str | None,
+                ]
+            ],
+        ] = defaultdict(list)
+        for (
+            account_id,
+            file_id,
+            job_id,
+            row_id,
+            acquired_at,
+            confirmation_required,
+            row_source_type,
+            collection_job_id,
+            industry,
+            subdirection,
+        ) in rows:
             if account_id is not None:
                 grouped[account_id].append(
                     (
@@ -1290,15 +1505,31 @@ class CandidatePoolRepository:
                         row_id,
                         _utc(acquired_at),
                         bool(confirmation_required),
+                        row_source_type,
+                        collection_job_id,
+                        industry,
+                        subdirection,
                     )
                 )
 
-        result: dict[UUID, tuple[UUID, UUID, UUID, datetime | None]] = {}
+        result: dict[
+            UUID,
+            tuple[
+                UUID,
+                UUID,
+                UUID,
+                datetime | None,
+                ImportSourceType,
+                UUID,
+                str,
+                str | None,
+            ],
+        ] = {}
         for account_id, candidates in grouped.items():
             trusted_as_of = [
                 item
                 for item in candidates
-                if item[3] is not None and not item[4] and item[3] <= as_of
+                if item[3] is not None and not item[4] and item[3] <= as_of_utc
             ]
             if trusted_as_of:
                 selected = max(trusted_as_of, key=lambda item: (item[3], item[0]))
@@ -1316,6 +1547,10 @@ class CandidatePoolRepository:
                 selected[1],
                 selected[2],
                 None if selected[4] else selected[3],
+                selected[5],
+                selected[6],
+                selected[7],
+                selected[8],
             )
         return result
 

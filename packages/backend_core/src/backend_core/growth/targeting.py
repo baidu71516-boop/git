@@ -35,6 +35,7 @@ from backend_core.growth.enums import (
     BuyerProspectOwnerFilter,
     BuyerProspectRecentCollectionWindow,
 )
+from backend_core.imports.enums import ImportSourceType
 from backend_core.imports.hashing import canonical_value, hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
 from backend_core.influencers.freshness import (
@@ -80,6 +81,7 @@ class TargetingReasonCode(StrEnum):
     BUYER_SOURCE_ACQUIRED_AT_MISSING = "BUYER_SOURCE_ACQUIRED_AT_MISSING"
     BUYER_SOURCE_COLLECTION_MISMATCH = "BUYER_SOURCE_COLLECTION_MISMATCH"
     BUYER_SOURCE_PROVENANCE_MISSING = "BUYER_SOURCE_PROVENANCE_MISSING"
+    BUYER_SOURCE_TYPE_MISMATCH = "BUYER_SOURCE_TYPE_MISMATCH"
     BUYER_SOURCE_WINDOW_MATCH = "BUYER_SOURCE_WINDOW_MATCH"
     BUYER_SOURCE_WINDOW_NOT_MATCH = "BUYER_SOURCE_WINDOW_NOT_MATCH"
     CATEGORY_ALIGNED = "CATEGORY_ALIGNED"
@@ -551,13 +553,17 @@ class BuyerProspectRuleTargetingPolicy(FrozenTargetingContract):
     policy_type: Literal["BUYER_PROSPECT_RULE_V1"] = "BUYER_PROSPECT_RULE_V1"
     taxonomy: TaxonomyDefinition
     # Empty means no secondary current-creator-category filter. The Buyer
-    # evaluator still compares CollectionJob source context to the creator's
-    # trusted current classification for every eligible candidate.
+    # evaluator still compares each source ImportJob's CollectionJob context
+    # to the creator's trusted current classification for every candidate.
     category_ids: tuple[str, ...] = ()
     follower_min: StrictInt | None = Field(default=None, ge=0)
     follower_max: StrictInt | None = Field(default=None, ge=0)
     buyer_lead_tiers: tuple[BuyerLeadTier, ...]
-    source_collection_job_id: UUID
+    # New Market rules use the existing import source enum.  The optional
+    # CollectionJob value remains solely to parse and hydrate historical rule
+    # policies that were persisted before data-source filtering was corrected.
+    source_type: ImportSourceType | None = None
+    source_collection_job_id: UUID | None = None
     recent_collection_window: BuyerProspectRecentCollectionWindow
     prospect_owner_filter: BuyerProspectOwnerFilter = BuyerProspectOwnerFilter.ANY
     prospect_owner_operator_id: UUID | None = None
@@ -593,6 +599,8 @@ class BuyerProspectRuleTargetingPolicy(FrozenTargetingContract):
                 raise ValueError("prospect_owner_operator_id is required for OPERATOR")
         elif self.prospect_owner_operator_id is not None:
             raise ValueError("prospect_owner_operator_id requires OPERATOR")
+        if (self.source_type is None) == (self.source_collection_job_id is None):
+            raise ValueError("exactly one of source_type or source_collection_job_id is required")
         return self
 
     @property
@@ -679,6 +687,7 @@ class CandidateFactBundle(FrozenTargetingContract):
     content_activity: ContentActivityFact | None = None
     grey_dolphin_activity: GreyDolphinActivityFact | None = None
     source_collection_job_id: UUID | None = None
+    buyer_source_type: ImportSourceType | None = None
     buyer_source_import_job_file_id: UUID | None = None
     buyer_source_import_job_id: UUID | None = None
     buyer_source_import_row_id: UUID | None = None
@@ -1965,6 +1974,7 @@ def _market_prospect_evaluation(
             "buyer_lead_tier": tier_decision.tier.value,
             "buyer_relation_summary": tier_decision.relation_summary,
             "market_prospect_rule": {
+                "source_type": policy.source_type,
                 "source_collection_job_id": policy.source_collection_job_id,
                 "taxonomy": {
                     "taxonomy_id": policy.taxonomy.taxonomy_id,
@@ -2009,7 +2019,7 @@ def evaluate_buyer_prospect_rule(
             if base_evaluation.reason_codes
             else TargetingReasonCode.NO_COMPARISON_RULE
         )
-        criteria = [
+        criteria: list[dict[str, Any]] = [
             _market_prospect_criterion(
                 criterion="buyer_lead_tier",
                 result=TargetingEvaluationResult.UNKNOWN,
@@ -2025,7 +2035,7 @@ def evaluate_buyer_prospect_rule(
             criteria=criteria,
         )
 
-    criteria: list[dict[str, Any]] = []
+    criteria = []
     criteria.append(
         _market_prospect_criterion(
             criterion="buyer_lead_tier",
@@ -2106,13 +2116,20 @@ def evaluate_buyer_prospect_rule(
     )
 
     source_observed = {
+        "source_type": facts.buyer_source_type,
         "source_collection_job_id": facts.source_collection_job_id,
         "import_job_file_id": facts.buyer_source_import_job_file_id,
         "import_job_id": facts.buyer_source_import_job_id,
         "import_row_id": facts.buyer_source_import_row_id,
         "source_acquired_at": facts.buyer_source_acquired_at,
     }
-    if facts.source_collection_job_id != policy.source_collection_job_id:
+    if policy.source_type is not None and facts.buyer_source_type != policy.source_type:
+        source_result = TargetingEvaluationResult.UNKNOWN
+        source_reason = TargetingReasonCode.BUYER_SOURCE_TYPE_MISMATCH
+    elif (
+        policy.source_collection_job_id is not None
+        and facts.source_collection_job_id != policy.source_collection_job_id
+    ):
         source_result = TargetingEvaluationResult.UNKNOWN
         source_reason = TargetingReasonCode.BUYER_SOURCE_COLLECTION_MISMATCH
     elif facts.buyer_source_import_job_file_id is None:

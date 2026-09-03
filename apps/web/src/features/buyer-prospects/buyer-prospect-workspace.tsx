@@ -112,7 +112,9 @@ function ownerFilterLabel(
 ) {
   if (filter === "UNASSIGNED") return "未分配负责人";
   if (filter === "OPERATOR") {
-    return operatorId ? `指定负责人：${operators.get(operatorId) ?? operatorId}` : "指定负责人";
+    return operatorId
+      ? `指定负责人：${operators.get(operatorId) ?? operatorId}`
+      : "指定负责人";
   }
   return "不限负责人";
 }
@@ -138,7 +140,9 @@ export function BuyerProspectWorkspace({
   const router = useRouter();
   const [messageApi, contextHolder] = message.useMessage();
   const [includeArchived, setIncludeArchived] = useState(false);
-  const [editingRule, setEditingRule] = useState<BuyerProspectRule | "new" | null>(null);
+  const [editingRule, setEditingRule] = useState<
+    BuyerProspectRule | "new" | null
+  >(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const listQuery = useBuyerProspectRuleList(includeArchived);
@@ -154,9 +158,9 @@ export function BuyerProspectWorkspace({
   const sourceNames = useMemo(
     () =>
       new Map(
-        (optionsQuery.data?.source_collection_jobs ?? []).map((job) => [
-          job.id,
-          job.name,
+        (optionsQuery.data?.sources ?? []).map((source) => [
+          source.value,
+          source.label,
         ]),
       ),
     [optionsQuery.data],
@@ -245,7 +249,10 @@ export function BuyerProspectWorkspace({
     }
   }
 
-  async function updateLifecycle(rule: BuyerProspectRule, status: BuyerProspectRuleStatus) {
+  async function updateLifecycle(
+    rule: BuyerProspectRule,
+    status: BuyerProspectRuleStatus,
+  ) {
     if (!canMutate) return;
     try {
       await lifecycleMutation.mutateAsync({
@@ -277,7 +284,11 @@ export function BuyerProspectWorkspace({
       </Button>
     ) : (
       <Tooltip title="请先选择当前操作人">
-        <Button type="primary" icon={<PlusOutlined aria-hidden="true" />} disabled>
+        <Button
+          type="primary"
+          icon={<PlusOutlined aria-hidden="true" />}
+          disabled
+        >
           新建筛选规则
         </Button>
       </Tooltip>
@@ -291,10 +302,13 @@ export function BuyerProspectWorkspace({
       width: 180,
       render: (_: unknown, rule: BuyerProspectRule) =>
         canWrite ? (
-          <Button type="link" onClick={() => {
-            setFormError(null);
-            setEditingRule(rule);
-          }}>
+          <Button
+            type="link"
+            onClick={() => {
+              setFormError(null);
+              setEditingRule(rule);
+            }}
+          >
             {rule.name}
           </Button>
         ) : (
@@ -309,16 +323,26 @@ export function BuyerProspectWorkspace({
           <span>
             当前达人类目：
             {rule.category_ids
-              .map((categoryId) => taxonomyLabels.get(categoryId) ?? "未识别类目")
+              .map(
+                (categoryId) => taxonomyLabels.get(categoryId) ?? "未识别类目",
+              )
               .join("、") || "不限"}
           </span>
           <span>粉丝数：{followerRangeLabel(rule)}</span>
           <span>
             潜客等级：
-            {rule.buyer_lead_tiers.map((tier) => tierLabels[tier] ?? tier).join("、") || "—"}
+            {rule.buyer_lead_tiers
+              .map((tier) => tierLabels[tier] ?? tier)
+              .join("、") || "—"}
           </span>
-          <span>数据来源：{sourceNames.get(rule.source_collection_job_id) ?? rule.source_collection_job_id}</span>
-          <span>最近采集：{recentCollectionWindowLabels[rule.recent_collection_window] ?? rule.recent_collection_window}</span>
+          <span>
+            数据来源：{sourceNames.get(rule.source_type) ?? rule.source_label}
+          </span>
+          <span>
+            最近采集：
+            {recentCollectionWindowLabels[rule.recent_collection_window] ??
+              rule.recent_collection_window}
+          </span>
           <span>
             负责人筛选：
             {ownerFilterLabel(
@@ -444,7 +468,9 @@ export function BuyerProspectWorkspace({
             showIcon
             title="潜在客户规则加载失败"
             description="请稍后重试。"
-            action={<Button onClick={() => void listQuery.refetch()}>重新加载</Button>}
+            action={
+              <Button onClick={() => void listQuery.refetch()}>重新加载</Button>
+            }
           />
         ) : rules.length === 0 ? (
           <div className="campaign-empty-state">
@@ -499,7 +525,11 @@ export function BuyerProspectWorkspace({
             showIcon
             title="筛选规则选项加载失败"
             description="请刷新后重试。"
-            action={<Button onClick={() => void optionsQuery.refetch()}>重新加载</Button>}
+            action={
+              <Button onClick={() => void optionsQuery.refetch()}>
+                重新加载
+              </Button>
+            }
           />
         ) : editingRule ? (
           <BuyerProspectRuleForm

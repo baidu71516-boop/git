@@ -33,6 +33,7 @@ from backend_core.growth.targeting import (
     TargetingPolicyDefinition,
     TargetingReasonCode,
 )
+from backend_core.imports.enums import ImportSourceType
 from backend_core.influencers.schemas import (
     InfluencerIdentitySummary,
     PlatformAccountIdentitySummary,
@@ -62,7 +63,7 @@ class BuyerProspectRuleFiltersInput(TargetingWriteContract):
     follower_min: StrictInt | None = Field(default=None, ge=0)
     follower_max: StrictInt | None = Field(default=None, ge=0)
     buyer_lead_tiers: tuple[BuyerLeadTier, ...] = Field(min_length=1)
-    source_collection_job_id: UUID
+    source_type: ImportSourceType
     recent_collection_window: BuyerProspectRecentCollectionWindow
     prospect_owner_filter: BuyerProspectOwnerFilter = BuyerProspectOwnerFilter.ANY
     prospect_owner_operator_id: UUID | None = None
@@ -254,7 +255,8 @@ class BuyerProspectRulePublic(TargetingReadContract):
     follower_min: int | None
     follower_max: int | None
     buyer_lead_tiers: tuple[BuyerLeadTier, ...]
-    source_collection_job_id: UUID
+    source_type: ImportSourceType
+    source_label: str
     recent_collection_window: BuyerProspectRecentCollectionWindow
     prospect_owner_filter: BuyerProspectOwnerFilter
     prospect_owner_operator_id: UUID | None
@@ -276,10 +278,10 @@ class BuyerProspectRulePage(TargetingReadContract):
 
 
 class BuyerProspectRuleSourceOption(TargetingReadContract):
-    id: UUID
-    name: str
-    industry: str
-    subdirection: str | None
+    """One eligible import source with a server-owned employee label."""
+
+    value: ImportSourceType
+    label: str
 
 
 class BuyerProspectRuleTaxonomyOption(TargetingReadContract):
@@ -297,7 +299,7 @@ class BuyerProspectRuleOperatorOption(TargetingReadContract):
 class BuyerProspectRuleOptionsPublic(TargetingReadContract):
     taxonomy_category_ids: tuple[str, ...]
     taxonomy_categories: tuple[BuyerProspectRuleTaxonomyOption, ...]
-    source_collection_jobs: tuple[BuyerProspectRuleSourceOption, ...]
+    sources: tuple[BuyerProspectRuleSourceOption, ...]
     operators: tuple[BuyerProspectRuleOperatorOption, ...]
 
 

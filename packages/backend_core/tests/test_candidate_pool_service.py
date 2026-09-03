@@ -42,6 +42,8 @@ from backend_core.growth.buyer_taxonomy_v1 import (
 )
 from backend_core.growth.enums import (
     BuyerLeadTier,
+    BuyerProspectOwnerFilter,
+    BuyerProspectRecentCollectionWindow,
     CandidatePoolKind,
     CandidatePoolRunStatus,
     CandidateResult,
@@ -56,6 +58,8 @@ from backend_core.growth.models import (
 )
 from backend_core.growth.repository import CandidatePoolRepository
 from backend_core.growth.schemas import (
+    BuyerProspectRuleCreateInput,
+    BuyerProspectRuleUpdateInput,
     CandidatePoolCreateInput,
     CandidatePoolRunRequest,
     LongInactivityEnrichmentRequest,
@@ -280,6 +284,8 @@ async def _collection_job(
     context: AuthContext,
     industry: str,
     subdirection: str | None = "makeup",
+    source_type: ImportSourceType = ImportSourceType.GENERIC_CSV,
+    status: CollectionJobStatus = CollectionJobStatus.COMPLETED,
 ) -> CollectionJob:
     assert context.operator is not None
     collection = CollectionJob(
@@ -291,8 +297,8 @@ async def _collection_job(
         target_count=1,
         department_id=context.department.id,
         owner_operator_id=context.operator.id,
-        source_type=ImportSourceType.GENERIC_CSV,
-        status=CollectionJobStatus.COMPLETED,
+        source_type=source_type,
+        status=status,
     )
     session.add(collection)
     await session.flush()
@@ -308,6 +314,7 @@ async def _committed_import(
     creator_tags: list[str] | None,
     raw_data: dict[str, object] | None = None,
     source_acquired_at: datetime | None = None,
+    source_type: ImportSourceType = ImportSourceType.GENERIC_CSV,
 ) -> ImportJob:
     """Seed committed canonical import provenance for one account."""
 
@@ -326,7 +333,7 @@ async def _committed_import(
         collection_job_id=collection.id,
         department_id=context.department.id,
         operator_id=context.operator.id,
-        source_type=ImportSourceType.GENERIC_CSV,
+        source_type=source_type,
         status=ImportJobStatus.COMPLETED,
         preview_revision=1,
         confirmed_revision=1,
@@ -349,6 +356,11 @@ async def _committed_import(
     )
     session.add(file)
     await session.flush()
+    classification_key = (
+        "creator_classification_tags"
+        if account.platform is Platform.DOUYIN and account.source is DataSource.HUITUN
+        else "creator_tags"
+    )
     row = ImportRow(
         import_job_id=job.id,
         import_job_file_id=file.id,
@@ -356,7 +368,9 @@ async def _committed_import(
         raw_data=raw_data or {},
         normalized_data={
             "source": account.source.value,
-            "public_profile": ({"creator_tags": creator_tags} if creator_tags is not None else {}),
+            "public_profile": (
+                {classification_key: creator_tags} if creator_tags is not None else {}
+            ),
         },
         matched_influencer_id=account.influencer_id,
         matched_platform_account_id=account.id,
@@ -384,7 +398,7 @@ async def _committed_import(
             platform_account_id=account.id,
             source=account.source,
             source_updated_at=NOW,
-            source_data={"creator_tags": creator_tags or []},
+            source_data={classification_key: creator_tags or []},
             source_data_hash=uuid4().hex * 2,
             state_version=1,
             last_import_job_id=job.id,
@@ -394,7 +408,7 @@ async def _committed_import(
     else:
         state.source_updated_at = NOW
         if creator_tags is not None:
-            state.source_data = {"creator_tags": creator_tags}
+            state.source_data = {classification_key: creator_tags}
         state.source_data_hash = uuid4().hex * 2
         state.state_version += 1
         state.last_import_job_id = job.id
@@ -413,6 +427,129 @@ async def _create_schema(connection: AsyncConnection) -> None:
         await connection.run_sync(Base.metadata.create_all)
     finally:
         metric_table.indexes.update(metric_indexes)
+
+
+def test_market_prospect_source_options_follow_import_jobs_and_hydrate_edits() -> None:
+    async def scenario() -> None:
+        engine = create_async_engine("sqlite+aiosqlite://")
+        async with engine.begin() as connection:
+            await _create_schema(connection)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with factory() as session:
+                context = await _actor(session, role=Role.OPERATOR)
+                assert context.operator is not None
+                account = await _account(
+                    session,
+                    owner=context.operator,
+                    source=DataSource.HUITUN,
+                    platform=Platform.DOUYIN,
+                    source_tags=["美食"],
+                )
+                collection = await _collection_job(
+                    session,
+                    context=context,
+                    industry="科技",
+                    subdirection=None,
+                    source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                    # The former options query excluded this Job. The source
+                    # remains eligible because its completed ImportJob is the
+                    # actual provenance of the employee-facing filter.
+                    status=CollectionJobStatus.DRAFT,
+                )
+                await _committed_import(
+                    session,
+                    context=context,
+                    collection=collection,
+                    account=account,
+                    creator_tags=["美食"],
+                    source_acquired_at=NOW - timedelta(days=1),
+                    source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                )
+                await session.commit()
+
+                service = _service(session)
+                options = await service.buyer_prospect_rule_options(context)
+                assert [(option.value, option.label) for option in options.sources] == [
+                    (ImportSourceType.MANUAL_HUITUN_EXPORT, "灰豚")
+                ]
+
+                create_payload = BuyerProspectRuleCreateInput(
+                    name="灰豚潜客",
+                    category_ids=(),
+                    buyer_lead_tiers=(BuyerLeadTier.HIGH,),
+                    source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
+                    recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
+                    prospect_owner_filter=BuyerProspectOwnerFilter.ANY,
+                    exclude_contacted=False,
+                )
+                created = await service.create_buyer_prospect_rule(
+                    context,
+                    create_payload,
+                    idempotency_key="market-source-create",
+                )
+                assert created.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT
+                pool = await session.get(CandidatePool, created.id)
+                assert pool is not None
+                assert pool.source_collection_job_id is None
+
+                hydrated = await service.get_buyer_prospect_rule(context, pool_id=created.id)
+                assert hydrated.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT
+
+                updated = await service.update_buyer_prospect_rule(
+                    context,
+                    pool_id=created.id,
+                    payload=BuyerProspectRuleUpdateInput(
+                        **{
+                            **create_payload.model_dump(),
+                            "name": "已编辑灰豚潜客",
+                            "owner_operator_id": context.operator.id,
+                            "expected_pool_version": created.version,
+                        }
+                    ),
+                )
+                assert updated.name == "已编辑灰豚潜客"
+                assert updated.source_type is ImportSourceType.MANUAL_HUITUN_EXPORT
+
+                run = await service.reserve_run(
+                    context,
+                    pool_id=created.id,
+                    idempotency_key="market-source-run",
+                )
+                completed = await service.materialize_run(run.id)
+                assert completed is not None
+                members = await service.list_run_members(
+                    context,
+                    pool_id=created.id,
+                    run_id=run.id,
+                    cursor=None,
+                    limit=10,
+                )
+                assert (
+                    completed.match_count,
+                    completed.unknown_count,
+                    completed.not_match_count,
+                ) == (1, 0, 0)
+                assert len(members.items) == 1
+                assert members.items[0].result is CandidateResult.MATCH
+
+                with pytest.raises(TargetingError) as unavailable:
+                    await service.create_buyer_prospect_rule(
+                        context,
+                        BuyerProspectRuleCreateInput(
+                            **{
+                                **create_payload.model_dump(),
+                                "name": "不可用来源",
+                                "source_type": ImportSourceType.GENERIC_CSV,
+                            }
+                        ),
+                        idempotency_key="market-source-unavailable",
+                    )
+                assert unavailable.value.code == "BUYER_SOURCE_UNAVAILABLE"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
 
 
 def test_content_activity_candidate_facts_are_hydrated_in_fixed_set_based_history_queries() -> None:

@@ -42,6 +42,7 @@ from backend_core.growth.targeting import (
     evaluate_seller,
     reduce_criterion_results,
 )
+from backend_core.imports.enums import ImportSourceType
 from backend_core.imports.hashing import hash_document
 from backend_core.influencers.enums import ContactFilter, ContactType, DataSource, Platform
 from backend_core.influencers.freshness import (
@@ -874,7 +875,7 @@ def test_buyer_missing_collection_context_is_unknown() -> None:
 
 
 def _market_policy(
-    source_collection_job_id: object,
+    _source_collection_job_id: object,
     **changes: object,
 ) -> BuyerProspectRuleTargetingPolicy:
     values: dict[str, object] = {
@@ -883,7 +884,7 @@ def _market_policy(
         "follower_min": 100,
         "follower_max": 200,
         "buyer_lead_tiers": (BuyerLeadTier.HIGH,),
-        "source_collection_job_id": source_collection_job_id,
+        "source_type": ImportSourceType.MANUAL_HUITUN_EXPORT,
         "recent_collection_window": BuyerProspectRecentCollectionWindow.ALL,
         "prospect_owner_filter": BuyerProspectOwnerFilter.ANY,
         "exclude_contacted": False,
@@ -899,6 +900,7 @@ def _market_facts(source_collection_job_id: object, **changes: object) -> Candid
         "collection_industry": "科技",
         "creator_classification_tags": ("美食",),
         "source_collection_job_id": source_collection_job_id,
+        "buyer_source_type": ImportSourceType.MANUAL_HUITUN_EXPORT,
         "source_collection_import_job_ids": (uuid4(),),
         "creator_classification_import_job_ids": (uuid4(),),
         "followers_count": 100,
@@ -913,7 +915,6 @@ def _market_facts(source_collection_job_id: object, **changes: object) -> Candid
 
 
 def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
-    source_collection_job_id = uuid4()
     operator_id = uuid4()
     valid = BuyerProspectRuleCreateInput(
         name="Market prospects",
@@ -921,7 +922,7 @@ def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
         follower_min=100,
         follower_max=200,
         buyer_lead_tiers=(BuyerLeadTier.UNKNOWN, BuyerLeadTier.HIGH),
-        source_collection_job_id=source_collection_job_id,
+        source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
         recent_collection_window=BuyerProspectRecentCollectionWindow.DAYS_30,
         prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
         prospect_owner_operator_id=operator_id,
@@ -933,7 +934,7 @@ def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
     unrestricted = BuyerProspectRuleCreateInput(
         name="Unrestricted current categories",
         buyer_lead_tiers=(BuyerLeadTier.CHANGED,),
-        source_collection_job_id=source_collection_job_id,
+        source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
         recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
     )
     assert unrestricted.category_ids == ()
@@ -943,19 +944,40 @@ def test_market_prospect_rule_validation_is_closed_and_canonical() -> None:
             follower_min=201,
             follower_max=200,
             buyer_lead_tiers=(BuyerLeadTier.HIGH,),
-            source_collection_job_id=source_collection_job_id,
+            source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
             recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
         )
     with pytest.raises(ValidationError):
         BuyerProspectRuleCreateInput(
             name="Missing selected owner",
             buyer_lead_tiers=(BuyerLeadTier.HIGH,),
-            source_collection_job_id=source_collection_job_id,
+            source_type=ImportSourceType.MANUAL_HUITUN_EXPORT,
             recent_collection_window=BuyerProspectRecentCollectionWindow.ALL,
             prospect_owner_filter=BuyerProspectOwnerFilter.OPERATOR,
         )
     with pytest.raises(ValidationError):
-        _market_policy(source_collection_job_id, category_ids=("NOT_A_CATEGORY",))
+        _market_policy(uuid4(), category_ids=("NOT_A_CATEGORY",))
+
+
+def test_market_prospect_rule_source_type_participates_in_execution() -> None:
+    source_collection_job_id = uuid4()
+
+    result = evaluate_buyer_prospect_rule(
+        _market_policy(source_collection_job_id),
+        _market_facts(
+            source_collection_job_id,
+            buyer_source_type=ImportSourceType.GENERIC_CSV,
+        ),
+        as_of=CONTENT_ACTIVITY_AS_OF,
+    )
+
+    assert result.result is TargetingEvaluationResult.UNKNOWN
+    source_criterion = next(
+        item
+        for item in result.redacted_evidence["criteria"]
+        if item["criterion"] == "recent_collection_window"
+    )
+    assert source_criterion["reason_code"] == "BUYER_SOURCE_TYPE_MISMATCH"
 
 
 @pytest.mark.parametrize(

@@ -4,16 +4,16 @@ import type {
   CandidatePoolRole,
   CandidatePoolRun,
 } from "@/features/candidate-pools/types";
+import type { ImportSourceType } from "@/features/imports/types";
 
 export type BuyerProspectRuleStatus = "ACTIVE" | "DISABLED" | "ARCHIVED";
-export type BuyerProspectRecentCollectionWindow = "7" | "30" | "60" | "90" | "ALL";
+export type BuyerProspectRecentCollectionWindow =
+  "7" | "30" | "60" | "90" | "ALL";
 export type BuyerProspectOwnerFilter = "ANY" | "UNASSIGNED" | "OPERATOR";
 
-export type BuyerProspectSourceCollectionJob = {
-  id: string;
-  name: string;
-  industry: string;
-  subdirection: string | null;
+export type BuyerProspectSource = {
+  value: ImportSourceType;
+  label: string;
 };
 
 export type BuyerProspectOperator = {
@@ -29,7 +29,7 @@ export type BuyerProspectTaxonomyCategory = {
 export type BuyerProspectRuleOptions = {
   taxonomy_category_ids: string[];
   taxonomy_categories: BuyerProspectTaxonomyCategory[];
-  source_collection_jobs: BuyerProspectSourceCollectionJob[];
+  sources: BuyerProspectSource[];
   operators: BuyerProspectOperator[];
 };
 
@@ -47,7 +47,8 @@ export type BuyerProspectRule = {
   follower_min: number | null;
   follower_max: number | null;
   buyer_lead_tiers: BuyerLeadTier[];
-  source_collection_job_id: string;
+  source_type: ImportSourceType;
+  source_label: string;
   recent_collection_window: BuyerProspectRecentCollectionWindow;
   prospect_owner_filter: BuyerProspectOwnerFilter;
   prospect_owner_operator_id: string | null;
@@ -69,7 +70,7 @@ export type BuyerProspectRuleCreateRequest = {
   follower_min: number | null;
   follower_max: number | null;
   buyer_lead_tiers: BuyerLeadTier[];
-  source_collection_job_id: string;
+  source_type: ImportSourceType;
   recent_collection_window: BuyerProspectRecentCollectionWindow;
   prospect_owner_filter: BuyerProspectOwnerFilter;
   prospect_owner_operator_id?: string;

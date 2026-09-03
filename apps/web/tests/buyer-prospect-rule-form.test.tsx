@@ -15,12 +15,10 @@ const options: BuyerProspectRuleOptions = {
     { id: "BEAUTY", label: "美妆" },
     { id: "AI_SHORT_DRAMA", label: "AI短剧" },
   ],
-  source_collection_jobs: [
+  sources: [
     {
-      id: "collection-film",
-      name: "灰豚 2026-09-02 影视批次",
-      industry: "影视",
-      subdirection: "剧情 / 娱乐",
+      value: "manual_huitun_export",
+      label: "灰豚",
     },
   ],
   operators: [],
@@ -41,7 +39,8 @@ function rule(categoryIds: string[]): BuyerProspectRule {
     follower_min: null,
     follower_max: null,
     buyer_lead_tiers: ["CHANGED"],
-    source_collection_job_id: "collection-film",
+    source_type: "manual_huitun_export",
+    source_label: "灰豚",
     recent_collection_window: "30",
     prospect_owner_filter: "ANY",
     prospect_owner_operator_id: null,
@@ -81,14 +80,11 @@ describe("Buyer prospect rule form", () => {
     expect(onSubmit.mock.calls[0]?.[0].category_ids).toEqual([]);
   });
 
-  it("shows source context separately and renders Chinese taxonomy labels while preserving IDs", async () => {
+  it("hydrates 灰豚, keeps the canonical source hidden, and submits its existing value", async () => {
     const onSubmit = renderForm(["AUTO"]);
 
-    expect(screen.getByText("来源上下文")).toBeInTheDocument();
-    expect(screen.getByText("来源行业")).toBeInTheDocument();
-    expect(screen.getByText("影视")).toBeInTheDocument();
-    expect(screen.getByText("来源赛道")).toBeInTheDocument();
-    expect(screen.getByText("剧情 / 娱乐")).toBeInTheDocument();
+    expect(screen.getByText("灰豚")).toBeInTheDocument();
+    expect(screen.queryByText("manual_huitun_export")).not.toBeInTheDocument();
     expect(screen.getByText("汽车")).toBeInTheDocument();
     expect(screen.queryByText("AUTO")).not.toBeInTheDocument();
 
@@ -96,5 +92,8 @@ describe("Buyer prospect rule form", () => {
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
     expect(onSubmit.mock.calls[0]?.[0].category_ids).toEqual(["AUTO"]);
+    expect(onSubmit.mock.calls[0]?.[0].source_type).toBe(
+      "manual_huitun_export",
+    );
   });
 });
