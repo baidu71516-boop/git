@@ -7,6 +7,7 @@ import {
   Card,
   Checkbox,
   Drawer,
+  Input,
   Modal,
   Radio,
   Select,
@@ -755,6 +756,7 @@ export function CandidateRunDetailView({
     runId,
     isBuyerRun && runQuery.data?.status === "COMPLETED",
   );
+  const [memberSearch, setMemberSearch] = useState("");
   const [evidence, setEvidence] = useState<CandidateMember | null>(
     previewMode ? null : (previewEvidence ?? null),
   );
@@ -822,19 +824,29 @@ export function CandidateRunDetailView({
     () => membersQuery.data?.pages ?? [],
     [membersQuery.data],
   );
-  const buyerSummaryRows = useMemo(
-    () =>
-      buyerSummaryQuery.data
+  const buyerSummaryRows = useMemo(() => {
+    if (!buyerSummaryQuery.data) return [];
+
+    const rows =
+      filter === "all"
         ? buyerLeadTierOrder.flatMap((tier) => buyerSummaryQuery.data[tier])
-        : [],
-    [buyerSummaryQuery.data],
-  );
+        : (buyerSummaryQuery.data[filter as BuyerLeadTier] ?? []);
+
+    const query = memberSearch.trim().toLocaleLowerCase();
+    if (!query) return rows;
+
+    return rows.filter((member) =>
+      [
+        member.influencer.display_name,
+        member.platform_account.account_name,
+        member.platform_account.account_handle ?? "",
+        member.platform_account.platform_account_id ?? "",
+      ].some((value) => value.toLocaleLowerCase().includes(query)),
+    );
+  }, [buyerSummaryQuery.data, filter, memberSearch]);
   const buyerHasTierData = buyerRunHasTierData(buyerSummaryQuery.data);
   const usingBuyerSummary =
-    isBuyerRun &&
-    filter === "all" &&
-    buyerSummaryQuery.isSuccess &&
-    buyerHasTierData;
+    isBuyerRun && buyerSummaryQuery.isSuccess && buyerHasTierData;
   const memberListLoading =
     (!usingBuyerSummary && membersQuery.isPending) ||
     (isBuyerRun && filter === "all" && buyerSummaryQuery.isPending);
@@ -1339,6 +1351,27 @@ export function CandidateRunDetailView({
                 }
               />
               <div className="candidate-results-toolbar-controls">
+                {isBuyerRun ? (
+                  <Input.Search
+                    allowClear
+                    aria-label="搜索达人"
+                    placeholder="搜索达人昵称 / 账号"
+                    value={memberSearch}
+                    onChange={(event) => {
+                      setMemberSearch(event.target.value);
+                      updateMemberPageNavigation(
+                        {
+                          candidatePoolId: poolId,
+                          filter,
+                          pageSize,
+                          runId,
+                        },
+                        0,
+                      );
+                    }}
+                    style={{ width: 260 }}
+                  />
+                ) : null}
                 {canWrite ? (
                   <div className="candidate-bulk-actions">
                     <Text type="secondary">{selectedLabel}</Text>
