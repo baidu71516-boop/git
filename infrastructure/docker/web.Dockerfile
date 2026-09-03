@@ -14,7 +14,7 @@ COPY apps/web apps/web
 RUN pnpm --filter @influencer-outreach/web build \
     && chown -R node:node /workspace
 
+WORKDIR /workspace/apps/web
 USER node
 EXPOSE 3000
-CMD ["pnpm", "--filter", "@influencer-outreach/web", "start"]
-
+CMD ["node", "node_modules/next/dist/bin/next", "start"]
