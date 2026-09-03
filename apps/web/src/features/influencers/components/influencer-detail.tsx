@@ -342,6 +342,11 @@ export function InfluencerDetail({
   const tags = unique(
     detail.platform_accounts.flatMap((account) => account.source_tags || []),
   );
+  const creatorClassifications = unique(
+    detail.source_states.flatMap(
+      (state) => state.creator_classification_tags || [],
+    ),
+  );
   const visibleTags = tags.slice(0, 2);
   const extraTags = tags.length - visibleTags.length;
   const allSourcesText =
@@ -378,6 +383,22 @@ export function InfluencerDetail({
                 {extraTags > 0 ? (
                   <Tag className="source-tag-more">+{extraTags}</Tag>
                 ) : null}
+              </Space>
+            ) : (
+              <span>—</span>
+            )}
+          </span>
+        </div>
+        <div className="detail-label-row">
+          <span className="detail-row-label">当前达人分类</span>
+          <span className="detail-tag-line">
+            {creatorClassifications.length ? (
+              <Space size={[4, 4]} wrap>
+                {creatorClassifications.map((classification) => (
+                  <Tag key={classification} className="source-tag">
+                    {classification}
+                  </Tag>
+                ))}
               </Space>
             ) : (
               <span>—</span>

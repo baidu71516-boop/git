@@ -86,6 +86,7 @@ function previewSourceStates(row: number): SourceStateDetail[] {
       source_updated_at: "2026-08-01T00:00:00.000Z",
       state_version: 1,
       creator_tags: ["AI筛选", "高匹配"],
+      creator_classification_tags: ["舞蹈"],
       last_import_job_id: "job-preview",
       last_import_row_id: "row-preview",
     },

@@ -336,6 +336,7 @@ def make_detail_record(
     *,
     contact_values: tuple[str, ...] = ("fixture@example.invalid",),
     creator_tags: object = ("动画", "电商"),
+    creator_classification_tags: object = ("舞蹈",),
     owner: Operator | None = None,
     freshness: tuple[AccountSourceFreshnessRecord, ...] = (),
 ) -> InfluencerDetailRecord:
@@ -354,7 +355,11 @@ def make_detail_record(
         platform_account_id=ACCOUNT_ID,
         source=DataSource.HUITUN,
         source_updated_at=NOW,
-        source_data={"creator_tags": creator_tags, "private_source_field": "do-not-expose"},
+        source_data={
+            "creator_tags": creator_tags,
+            "creator_classification_tags": creator_classification_tags,
+            "private_source_field": "do-not-expose",
+        },
         source_data_hash=uuid4().hex * 2,
         state_version=2,
         last_import_job_id=uuid4(),
@@ -893,9 +898,35 @@ def test_source_state_creator_tags_are_whitelisted_and_type_filtered(
             "source_updated_at",
             "state_version",
             "creator_tags",
+            "creator_classification_tags",
             "last_import_job_id",
             "last_import_row_id",
         }
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (["舞蹈", "生活"], ["舞蹈", "生活"]),
+        (["舞蹈", 7, None, False, "生活"], ["舞蹈", "生活"]),
+        (None, []),
+        ({"label": "舞蹈"}, []),
+        ("舞蹈", []),
+    ],
+)
+def test_source_state_creator_classification_is_whitelisted_and_type_filtered(
+    raw_value: object, expected: list[str]
+) -> None:
+    async def scenario() -> None:
+        repository = FakeInfluencerRepository()
+        repository.detail_result = make_detail_record(creator_classification_tags=raw_value)
+        detail = await InfluencerService(repository).get_influencer_detail(
+            make_context(Role.OPERATOR), INFLUENCER_ID
+        )
+
+        assert detail.source_states[0].creator_classification_tags == expected
 
     asyncio.run(scenario())
 
@@ -911,6 +942,7 @@ def test_source_state_missing_creator_tags_maps_to_empty_list() -> None:
             make_context(Role.OPERATOR), INFLUENCER_ID
         )
         assert detail.source_states[0].creator_tags == []
+        assert detail.source_states[0].creator_classification_tags == []
 
     asyncio.run(scenario())
 

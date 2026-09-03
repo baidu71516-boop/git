@@ -457,6 +457,7 @@ def test_detail_structurally_carries_only_frozen_sections() -> None:
                 source_updated_at=None,
                 state_version=1,
                 creator_tags=["动画"],
+                creator_classification_tags=["舞蹈"],
                 last_import_job_id=import_job_id,
                 last_import_row_id=import_row_id,
             )
@@ -504,6 +505,7 @@ def test_detail_structurally_carries_only_frozen_sections() -> None:
     }
     assert detail.platform_accounts[0].source_tags == ["动画"]
     assert detail.source_states[0].creator_tags == ["动画"]
+    assert detail.source_states[0].creator_classification_tags == ["舞蹈"]
     assert detail.current_metrics[0].metrics["followers_count"] == 0
     assert detail.freshness_status is FreshnessStatus.UNKNOWN
     assert detail.requires_refresh is False

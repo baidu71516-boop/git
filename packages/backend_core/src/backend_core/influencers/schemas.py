@@ -289,6 +289,7 @@ class SourceStateDetail(ReadContract):
     source_updated_at: datetime | None = None
     state_version: int = Field(ge=1)
     creator_tags: list[str] = Field(default_factory=list)
+    creator_classification_tags: list[str] = Field(default_factory=list)
     last_import_job_id: UUID
     last_import_row_id: UUID
 

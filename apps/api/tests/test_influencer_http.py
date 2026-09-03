@@ -231,7 +231,11 @@ async def _seed_influencer_graph(session: AsyncSession) -> UUID:
                 platform_account_id=account.id,
                 source=DataSource.HUITUN,
                 source_updated_at=NOW,
-                source_data={"creator_tags": ["动画"], "private": "not-public"},
+                source_data={
+                    "creator_tags": ["动画"],
+                    "creator_classification_tags": ["舞蹈"],
+                    "private": "not-public",
+                },
                 source_data_hash=uuid4().hex * 2,
                 state_version=1,
                 last_import_job_id=import_job_id,
@@ -521,6 +525,7 @@ def test_registered_endpoints_auth_csrf_contact_and_envelope() -> None:
                     "***",
                     "***",
                 ]
+                assert detail_data["source_states"][0]["creator_classification_tags"] == ["舞蹈"]
                 assert "normalized_value" not in detail.text
 
                 unknown = await client.get(
@@ -1029,6 +1034,8 @@ def test_openapi_exposes_only_the_four_frozen_influencer_gets() -> None:
 
     detail = success_data("/api/v1/influencers/{influencer_id}")
     assert {"freshness_status", "requires_refresh"} <= set(detail["properties"])
+    detail_source_state = resolve(resolve(detail["properties"]["source_states"])["items"])
+    assert "creator_classification_tags" in detail_source_state["properties"]
     detail_account = resolve(resolve(detail["properties"]["platform_accounts"])["items"])
     assert {
         "last_huitun_observed_at",

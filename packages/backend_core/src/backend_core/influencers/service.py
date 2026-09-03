@@ -366,6 +366,16 @@ def _creator_tags(source_state: InfluencerSourceState) -> list[str]:
     return [tag for tag in raw_tags if isinstance(tag, str)]
 
 
+def _creator_classification_tags(source_state: InfluencerSourceState) -> list[str]:
+    source_data = source_state.source_data
+    if not isinstance(source_data, dict):
+        return []
+    raw_tags = source_data.get("creator_classification_tags")
+    if not isinstance(raw_tags, list):
+        return []
+    return [tag for tag in raw_tags if isinstance(tag, str)]
+
+
 def _source_state_detail(source_state: InfluencerSourceState) -> SourceStateDetail:
     return SourceStateDetail(
         platform_account_id=source_state.platform_account_id,
@@ -373,6 +383,7 @@ def _source_state_detail(source_state: InfluencerSourceState) -> SourceStateDeta
         source_updated_at=source_state.source_updated_at,
         state_version=source_state.state_version,
         creator_tags=_creator_tags(source_state),
+        creator_classification_tags=_creator_classification_tags(source_state),
         last_import_job_id=source_state.last_import_job_id,
         last_import_row_id=source_state.last_import_row_id,
     )

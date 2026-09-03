@@ -152,6 +152,7 @@ const detailData = {
       source_updated_at: "2026-08-10T08:00:00Z",
       state_version: 2,
       creator_tags: ["来源赛道"],
+      creator_classification_tags: ["舞蹈"],
       last_import_job_id: "state-job",
       last_import_row_id: "state-row",
     },
@@ -309,6 +310,26 @@ describe("InfluencerDetailWorkspace", () => {
     expect(
       within(basicSection as HTMLElement).getByText("已停用负责人"),
     ).toBeInTheDocument();
+    const genericTagsRow = within(basicSection as HTMLElement)
+      .getByText("标签")
+      .closest(".detail-label-row");
+    expect(genericTagsRow).not.toBeNull();
+    expect(
+      within(genericTagsRow as HTMLElement).getByText("美妆"),
+    ).toBeInTheDocument();
+    expect(
+      within(genericTagsRow as HTMLElement).queryByText("舞蹈"),
+    ).not.toBeInTheDocument();
+    const classificationRow = within(basicSection as HTMLElement)
+      .getByText("当前达人分类")
+      .closest(".detail-label-row");
+    expect(classificationRow).not.toBeNull();
+    expect(
+      within(classificationRow as HTMLElement).getByText("舞蹈"),
+    ).toBeInTheDocument();
+    expect(
+      within(classificationRow as HTMLElement).queryByText("美妆"),
+    ).not.toBeInTheDocument();
     const ownerSection = screen
       .getByRole("heading", { name: "管理信息", level: 5 })
       .closest("section");
@@ -578,6 +599,33 @@ describe("InfluencerDetailWorkspace", () => {
     expect(screen.queryByText(rawProviderSentinel)).not.toBeInTheDocument();
   });
 
+  it("renders every persisted current classification as a separate chip", async () => {
+    mockDetailApi({
+      ...detailData,
+      source_states: detailData.source_states.map((state) => ({
+        ...state,
+        creator_classification_tags: ["舞蹈", "生活"],
+      })),
+    });
+    renderDetail();
+
+    await screen.findByRole("heading", { name: "多账号达人", level: 2 });
+    const basicSection = screen
+      .getByRole("heading", { name: "基本资料", level: 5 })
+      .closest("section");
+    expect(basicSection).not.toBeNull();
+    const classificationRow = within(basicSection as HTMLElement)
+      .getByText("当前达人分类")
+      .closest(".detail-label-row");
+    expect(classificationRow).not.toBeNull();
+    expect(
+      within(classificationRow as HTMLElement).getByText("舞蹈"),
+    ).toBeInTheDocument();
+    expect(
+      within(classificationRow as HTMLElement).getByText("生活"),
+    ).toBeInTheDocument();
+  });
+
   it("renders an unassigned Owner and missing fields without inventing values", async () => {
     mockDetailApi(
       {
@@ -602,6 +650,13 @@ describe("InfluencerDetailWorkspace", () => {
     expect(missingBasicSection).not.toBeNull();
     expect(
       within(missingBasicSection as HTMLElement).getByText("未分配"),
+    ).toBeInTheDocument();
+    const missingClassificationRow = within(missingBasicSection as HTMLElement)
+      .getByText("当前达人分类")
+      .closest(".detail-label-row");
+    expect(missingClassificationRow).not.toBeNull();
+    expect(
+      within(missingClassificationRow as HTMLElement).getByText("—"),
     ).toBeInTheDocument();
     expect(screen.getAllByText("—").length).toBeGreaterThan(2);
     expect(await screen.findByText("暂无指标历史")).toBeInTheDocument();

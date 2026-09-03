@@ -174,6 +174,7 @@ export type SourceStateDetail = {
   source_updated_at: string | null;
   state_version: number;
   creator_tags: string[];
+  creator_classification_tags: string[];
   last_import_job_id: string;
   last_import_row_id: string;
 };
