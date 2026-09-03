@@ -1209,6 +1209,25 @@ def test_buyer_evaluator_uses_trustworthy_douyin_creator_classification() -> Non
     assert result.reason_codes == (TargetingReasonCode.CATEGORY_MISMATCH,)
 
 
+def test_buyer_lead_tier_normalizes_combined_collection_context() -> None:
+    source_collection_job_id = uuid4()
+
+    decision = evaluate_buyer_lead_tier(
+        BuyerTargetingPolicy(taxonomy=_reviewed_taxonomy()),
+        _market_facts(
+            source_collection_job_id,
+            collection_industry="剧情",
+            collection_subdirection="演绎",
+            creator_classification_tags=("舞蹈",),
+        ),
+    )
+
+    assert decision.tier is BuyerLeadTier.CHANGED
+    assert decision.relation_summary["status"] == "RELIABLE"
+    assert decision.relation_summary["client_categories"] == ["DRAMA"]
+    assert decision.relation_summary["creator_categories"] == ["DANCE"]
+
+
 @pytest.mark.parametrize(
     ("source_industry", "creator_categories", "expected_tier"),
     [

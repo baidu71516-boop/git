@@ -1686,10 +1686,20 @@ def _normalize_collection_categories(
     taxonomy: TaxonomyDefinition, facts: CandidateFactBundle
 ) -> tuple[tuple[str, ...] | None, str | None]:
     labels = [facts.collection_industry]
-    if facts.collection_subdirection is not None and facts.collection_subdirection.strip():
-        labels.append(facts.collection_subdirection)
     if not labels[0] or not labels[0].strip():
         return None, "COLLECTION_CONTEXT_MISSING"
+
+    industry = labels[0].strip()
+    subdirection = (
+        facts.collection_subdirection.strip()
+        if facts.collection_subdirection is not None and facts.collection_subdirection.strip()
+        else None
+    )
+    if subdirection is not None:
+        combined_category = taxonomy.normalize(f"{industry}{subdirection}")
+        if combined_category is not None:
+            return (combined_category,), None
+        labels.append(subdirection)
     normalized: list[str] = []
     for label in labels:
         if label is None:
