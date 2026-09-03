@@ -3225,3 +3225,60 @@ def test_candidate_pool_create_replay_enriches_legacy_owner_and_rejects_cross_de
             await engine.dispose()
 
     asyncio.run(scenario())
+
+
+def test_huitun_creator_classification_accepts_pre_fix_raw_provenance() -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    import backend_core.growth.repository as repository
+
+    job_id = uuid4()
+    row_id = uuid4()
+    file_id = uuid4()
+
+    account = SimpleNamespace(
+        platform=repository.Platform.DOUYIN,
+        source=repository.DataSource.HUITUN,
+    )
+    state = SimpleNamespace(
+        source=repository.DataSource.HUITUN,
+        last_import_job_id=job_id,
+        last_import_row_id=row_id,
+        source_data={"creator_classification_tags": ["舞蹈"]},
+    )
+    row = SimpleNamespace(
+        id=row_id,
+        import_job_id=job_id,
+        committed_at=object(),
+        committed_action=repository.ImportRowAction.UPDATE,
+        preview_revision=1,
+        import_job_file_id=file_id,
+        normalized_data={"public_profile": {}},
+        raw_data={"分类": "舞蹈"},
+    )
+    job = SimpleNamespace(
+        id=job_id,
+        status=repository.ImportJobStatus.COMPLETED,
+        confirmed_revision=1,
+        source_type=repository.ImportSourceType.MANUAL_HUITUN_EXPORT,
+    )
+    import_file = SimpleNamespace(
+        id=file_id,
+        import_job_id=job_id,
+        status=repository.ImportJobFileStatus.READY,
+    )
+
+    extract = repository.CandidatePoolRepository._creator_classification
+
+    assert extract(account, state, row, job, import_file) == (
+        ("舞蹈",),
+        (job_id,),
+    )
+
+    row.raw_data = {"分类": "汽车"}
+    assert extract(account, state, row, job, import_file) == (None, ())
+
+    row.raw_data = {"分类": "舞蹈"}
+    row.normalized_data = {"public_profile": {"creator_classification_tags": ["汽车"]}}
+    assert extract(account, state, row, job, import_file) == (None, ())

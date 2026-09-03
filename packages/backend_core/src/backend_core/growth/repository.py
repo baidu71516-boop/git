@@ -2066,17 +2066,39 @@ class CandidatePoolRepository:
             public_profile = (
                 normalized_data.get("public_profile") if isinstance(normalized_data, dict) else None
             )
-            import_classification = CandidatePoolRepository._tag_values(
-                public_profile.get("creator_classification_tags")
-                if isinstance(public_profile, dict)
-                else None
+            has_import_classification = (
+                isinstance(public_profile, dict) and "creator_classification_tags" in public_profile
             )
-            if (
-                state_classification is None
-                or import_classification is None
-                or state_classification != import_classification
-            ):
-                return None, ()
+            if has_import_classification:
+                import_classification = CandidatePoolRepository._tag_values(
+                    public_profile.get("creator_classification_tags")
+                )
+                if (
+                    state_classification is None
+                    or import_classification is None
+                    or state_classification != import_classification
+                ):
+                    return None, ()
+            else:
+                # Historical pre-fix Huitun rows did not persist creator
+                # classification into normalized_data. In that case only,
+                # prove the repaired SourceState against immutable raw evidence.
+                raw_data = state_import_row.raw_data
+                raw_classification_value = (
+                    raw_data.get("分类") if isinstance(raw_data, dict) else None
+                )
+                raw_classification = CandidatePoolRepository._tag_values(
+                    [raw_classification_value]
+                    if isinstance(raw_classification_value, str)
+                    else None
+                )
+                if (
+                    state_classification is None
+                    or raw_classification is None
+                    or state_classification != raw_classification
+                ):
+                    return None, ()
+
             # Do not split or infer from free text. Huitun's 分类 is one
             # primary self-classification, normalized later by the frozen
             # taxonomy; content tags and commerce category stay unused here.
