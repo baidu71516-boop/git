@@ -691,7 +691,8 @@ export function CandidateRunDetailView({
   );
   const isBuyerRun =
     policy?.definition.schema_version === 1 &&
-    policy.definition.policy_type === "BUYER_V1";
+    (policy.definition.policy_type === "BUYER_V1" ||
+      policy.definition.policy_type === "BUYER_PROSPECT_RULE_V1");
   const [filter, setFilter] = useState<CandidateMemberFilter>("all");
   const [pageSize, setPageSize] = useState<CandidateMemberPageSize>(
     CANDIDATE_MEMBER_PAGE_LIMIT,
