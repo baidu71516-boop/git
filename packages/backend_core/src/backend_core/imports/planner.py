@@ -69,6 +69,15 @@ class PlannedImportRow:
     plan_hash: str
 
 
+@dataclass(frozen=True)
+class ExistingAccountProjectionPlan:
+    """Formal source-state and metrics plan for one already-identified account."""
+
+    source_state: dict[str, Any] | None
+    metrics: dict[str, Any]
+    snapshot: dict[str, Any] | None
+
+
 class ImportPlanningRepository(Protocol):
     """Read-only persistence boundary required by the shared Planner."""
 
@@ -195,6 +204,29 @@ def metric_snapshot_key(record: CanonicalInfluencerRecord) -> str:
     serialized_metrics = record.as_dict()["metrics"]
     metrics = {key: value for key, value in serialized_metrics.items() if value is not None}
     return _metric_snapshot_key(record, hash_document(metrics))
+
+
+def metric_snapshot_projection(
+    record: CanonicalInfluencerRecord,
+) -> dict[str, Any] | None:
+    """Build the formal snapshot semantic projection for normalized metrics.
+
+    The normal Confirm planner uses this same projection before applying its
+    existing snapshot-dedupe rule.  Reprojection needs the un-deduped semantic
+    value too, so it can verify an immutable snapshot already tied to a row.
+    """
+
+    serialized_metrics = record.as_dict()["metrics"]
+    metrics = {key: value for key, value in serialized_metrics.items() if value is not None}
+    if not metrics:
+        return None
+    metrics_hash = hash_document(metrics)
+    return {
+        "snapshot_key": _metric_snapshot_key(record, metrics_hash),
+        "source_updated_at": record.as_dict()["source_updated_at"],
+        "metrics": metrics,
+        "metrics_hash": metrics_hash,
+    }
 
 
 def build_preview_context(
@@ -349,6 +381,72 @@ class ImportPlanner:
         }
         return {key: value for key, value in values.items() if value is not None}
 
+    async def _source_state_projection(
+        self,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount | None,
+    ) -> tuple[InfluencerSourceState | None, FreshnessRelation, dict[str, Any] | None]:
+        source_state = (
+            await self.repository.get_source_state(account.id, record.source)
+            if account is not None
+            else None
+        )
+        relation = freshness_relation(
+            record.source_updated_at,
+            source_state.source_updated_at if source_state else None,
+            exists=source_state is not None,
+        )
+        incoming_values = self._incoming_account_values(record)
+        existing_source_data = dict(source_state.source_data) if source_state else {}
+        merged_source_data = dict(existing_source_data)
+        for key, incoming in incoming_values.items():
+            existing = merged_source_data.get(key)
+            if _is_empty(existing) or relation in {
+                FreshnessRelation.NEW,
+                FreshnessRelation.NEWER,
+            }:
+                merged_source_data[key] = incoming
+        merged_source_hash = hash_document(merged_source_data)
+        source_state_changes = (
+            source_state is None
+            or merged_source_hash != source_state.source_data_hash
+            or (
+                relation == FreshnessRelation.NEWER
+                and _as_utc(record.source_updated_at) != _as_utc(source_state.source_updated_at)
+            )
+        )
+        source_state_plan: dict[str, Any] | None = None
+        if source_state_changes:
+            source_state_plan = {
+                "operation": "create" if source_state is None else "update",
+                "source_updated_at": (
+                    record.as_dict()["source_updated_at"]
+                    if relation in {FreshnessRelation.NEW, FreshnessRelation.NEWER}
+                    else (_datetime_text(source_state.source_updated_at) if source_state else None)
+                ),
+                "source_data": merged_source_data,
+                "source_data_hash": merged_source_hash,
+                "state_version": 1 if source_state is None else source_state.state_version + 1,
+            }
+        return source_state, relation, source_state_plan
+
+    async def plan_existing_account_projections(
+        self,
+        *,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount,
+    ) -> ExistingAccountProjectionPlan:
+        """Plan projections for a persisted account without invoking the matcher."""
+
+        _, relation, source_state_plan = await self._source_state_projection(record, account)
+        current_metrics = await self.repository.get_current_metrics(account.id, record.source)
+        metrics_plan, _, _ = await self._plan_metrics(record, account, current_metrics, relation)
+        return ExistingAccountProjectionPlan(
+            source_state=source_state_plan,
+            metrics=metrics_plan,
+            snapshot=metric_snapshot_projection(record),
+        )
+
     async def plan(
         self,
         *,
@@ -438,15 +536,8 @@ class ImportPlanner:
             )
 
         account = match.account
-        source_state = (
-            await self.repository.get_source_state(account.id, record.source)
-            if account is not None
-            else None
-        )
-        relation = freshness_relation(
-            record.source_updated_at,
-            source_state.source_updated_at if source_state else None,
-            exists=source_state is not None,
+        source_state, relation, source_state_plan = await self._source_state_projection(
+            record, account
         )
         incoming_values = self._incoming_account_values(record)
         account_updates: dict[str, Any] = {}
@@ -494,38 +585,6 @@ class ImportPlanner:
                             "field": canonical_field,
                         }
                     )
-
-        existing_source_data = dict(source_state.source_data) if source_state else {}
-        merged_source_data = dict(existing_source_data)
-        for key, incoming in incoming_values.items():
-            existing = merged_source_data.get(key)
-            if _is_empty(existing) or relation in {
-                FreshnessRelation.NEW,
-                FreshnessRelation.NEWER,
-            }:
-                merged_source_data[key] = incoming
-        merged_source_hash = hash_document(merged_source_data)
-        source_state_changes = (
-            source_state is None
-            or merged_source_hash != source_state.source_data_hash
-            or (
-                relation == FreshnessRelation.NEWER
-                and _as_utc(record.source_updated_at) != _as_utc(source_state.source_updated_at)
-            )
-        )
-        source_state_plan: dict[str, Any] | None = None
-        if source_state_changes:
-            source_state_plan = {
-                "operation": "create" if source_state is None else "update",
-                "source_updated_at": (
-                    record.as_dict()["source_updated_at"]
-                    if relation in {FreshnessRelation.NEW, FreshnessRelation.NEWER}
-                    else (_datetime_text(source_state.source_updated_at) if source_state else None)
-                ),
-                "source_data": merged_source_data,
-                "source_data_hash": merged_source_hash,
-                "state_version": 1 if source_state is None else source_state.state_version + 1,
-            }
 
         source_identity_plan: dict[str, Any] | None = None
         existing_source_identity_id: str | None = None
@@ -733,6 +792,7 @@ class ImportPlanner:
         metrics = {key: value for key, value in serialized_metrics.items() if value is not None}
         metrics_hash = hash_document(metrics)
         snapshot_key = _metric_snapshot_key(record, metrics_hash)
+        snapshot_projection = metric_snapshot_projection(record)
         snapshot_exists = (
             await self.repository.snapshot_exists(snapshot_key) if account is not None else False
         )
@@ -789,16 +849,7 @@ class ImportPlanner:
                         "message": "Metrics without source time will not replace current metrics",
                     }
                 )
-        snapshot_plan = (
-            {
-                "snapshot_key": snapshot_key,
-                "source_updated_at": record.as_dict()["source_updated_at"],
-                "metrics": metrics,
-                "metrics_hash": metrics_hash,
-            }
-            if metrics and not snapshot_exists
-            else None
-        )
+        snapshot_plan = snapshot_projection if snapshot_projection and not snapshot_exists else None
         preconditions = {
             "current": (
                 {

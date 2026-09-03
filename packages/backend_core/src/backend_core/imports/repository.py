@@ -15,6 +15,7 @@ from backend_core.imports.enums import (
     ImportJobFileStatus,
     ImportJobStatus,
     ImportRowAction,
+    ImportSourceType,
     SourceAcquiredAtOrigin,
 )
 from backend_core.imports.errors import ImportDomainError
@@ -426,6 +427,50 @@ class ImportRepository:
         )
         return list(result)
 
+    async def list_committed_huitun_reprojection_rows(
+        self,
+        *,
+        department_id: UUID,
+        import_job_id: UUID,
+        confirmed_revision: int,
+        for_update: bool = False,
+    ) -> list[ImportRow]:
+        """Return reprojection rows under the full production target scope.
+
+        Keeping department, job, source, completed status, confirmed revision,
+        and committed-action checks in this query is intentional: a caller
+        cannot accidentally broaden repair by filtering only in a service.
+        """
+
+        statement = (
+            select(ImportRow)
+            .join(ImportJobFile, ImportJobFile.id == ImportRow.import_job_file_id)
+            .join(ImportJob, ImportJob.id == ImportRow.import_job_id)
+            .where(
+                ImportJob.id == import_job_id,
+                ImportJob.department_id == department_id,
+                ImportJob.source_type == ImportSourceType.MANUAL_HUITUN_EXPORT,
+                ImportJob.status == ImportJobStatus.COMPLETED,
+                ImportJob.confirmed_revision == confirmed_revision,
+                ImportJob.confirmed_at.is_not(None),
+                ImportJob.completed_at.is_not(None),
+                ImportRow.import_job_id == import_job_id,
+                ImportRow.preview_revision == confirmed_revision,
+                ImportRow.committed_at.is_not(None),
+                ImportRow.committed_action.in_(
+                    (
+                        ImportRowAction.CREATE,
+                        ImportRowAction.UPDATE,
+                        ImportRowAction.NO_CHANGE,
+                    )
+                ),
+            )
+            .order_by(ImportJobFile.position, ImportRow.row_number, ImportRow.id)
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return list(await self.session.scalars(statement))
+
     async def list_batch_staging_rows(self, import_job_id: UUID) -> list[ImportRow]:
         """Return only rows belonging to included, successfully parsed occurrences."""
 
@@ -574,6 +619,19 @@ class ImportRepository:
             )
         )
         return value is not None
+
+    async def get_metric_snapshot_for_import_row(
+        self,
+        import_row_id: UUID,
+        *,
+        for_update: bool = False,
+    ) -> InfluencerMetricSnapshot | None:
+        statement = select(InfluencerMetricSnapshot).where(
+            InfluencerMetricSnapshot.import_row_id == import_row_id
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return cast(InfluencerMetricSnapshot | None, await self.session.scalar(statement))
 
     async def acquire_identity_locks(self, identities: Iterable[str]) -> None:
         await BulkImportRepository(self.session).acquire_identity_locks_bulk(identities)

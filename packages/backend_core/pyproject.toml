@@ -26,3 +26,4 @@ packages = ["src/backend_core"]
 [project.scripts]
 bootstrap-admin = "backend_core.auth.cli:main"
 setup-operator-credential = "backend_core.auth.operator_credential_cli:main"
+huitun-reproject = "backend_core.imports.huitun_reprojection_cli:main"

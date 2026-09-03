@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend_core.imports.bulk_repository import AccountSourceKey, PrefetchedImportState
 from backend_core.imports.contracts import CanonicalInfluencerRecord
 from backend_core.imports.enums import ImportRowAction
+from backend_core.imports.errors import ImportDomainError
 from backend_core.imports.models import ImportJob, ImportRow
 from backend_core.imports.planner import PlannedImportRow
 from backend_core.imports.repository import ImportRepository
@@ -97,6 +98,12 @@ class _PendingCreate:
     account: InfluencerPlatformAccount
     merge: dict[str, Any]
     now: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ReprojectionApplyResult:
+    source_state_repaired: bool
+    metric_snapshot_inserted: bool
 
 
 class ImportMergeApplier:
@@ -212,39 +219,82 @@ class ImportMergeApplier:
                 )
             )
 
-        source_state_plan = merge.get("source_state")
-        if source_state_plan:
-            source_state = await self._source_state(account.id, record.source)
-            if source_state is None:
-                source_state = InfluencerSourceState(
-                    id=uuid4(),
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    source=record.source,
-                    source_updated_at=_parse_datetime(source_state_plan["source_updated_at"]),
-                    source_data=source_state_plan["source_data"],
-                    source_data_hash=source_state_plan["source_data_hash"],
-                    state_version=source_state_plan["state_version"],
-                    last_import_job_id=job.id,
-                    last_import_row_id=row.id,
-                )
-                self.session.add(source_state)
-                if self.cache is not None:
-                    self.cache.source_states[AccountSourceKey(account.id, record.source)] = (
-                        source_state
-                    )
-            else:
-                source_state.source_updated_at = _parse_datetime(
-                    source_state_plan["source_updated_at"]
-                )
-                source_state.source_data = source_state_plan["source_data"]
-                source_state.source_data_hash = source_state_plan["source_data_hash"]
-                source_state.state_version = source_state_plan["state_version"]
-                source_state.last_import_job_id = job.id
-                source_state.last_import_row_id = row.id
-
+        await self._apply_source_state(job, row, record, account, merge.get("source_state"))
         await self._apply_contacts(job, row, record, account, merge["contacts"], now)
         await self._apply_metrics(job, row, record, account, merge["metrics"], now)
+
+    async def reproject_source_state_and_metrics(
+        self,
+        job: ImportJob,
+        row: ImportRow,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount,
+        *,
+        source_state_plan: dict[str, Any] | None,
+        metrics_plan: dict[str, Any],
+        expected_snapshot: dict[str, Any] | None,
+        captured_at: datetime,
+    ) -> ReprojectionApplyResult:
+        """Apply only the existing source-state and metric projection contracts.
+
+        Reprojection callers have already verified the persisted ImportRow-to-
+        account lineage. This intentionally never touches account, source
+        identity, Contact state, or an existing metric snapshot.
+        """
+
+        source_state_repaired = await self._apply_source_state(
+            job, row, record, account, source_state_plan
+        )
+        metric_snapshot_inserted = await self._apply_metrics(
+            job,
+            row,
+            record,
+            account,
+            metrics_plan,
+            captured_at,
+            reconcile_import_row_snapshot=True,
+            expected_snapshot=expected_snapshot,
+        )
+        return ReprojectionApplyResult(
+            source_state_repaired=source_state_repaired,
+            metric_snapshot_inserted=metric_snapshot_inserted,
+        )
+
+    async def _apply_source_state(
+        self,
+        job: ImportJob,
+        row: ImportRow,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount,
+        source_state_plan: dict[str, Any] | None,
+    ) -> bool:
+        if not source_state_plan:
+            return False
+        source_state = await self._source_state(account.id, record.source)
+        if source_state is None:
+            source_state = InfluencerSourceState(
+                id=uuid4(),
+                influencer_id=account.influencer_id,
+                platform_account_id=account.id,
+                source=record.source,
+                source_updated_at=_parse_datetime(source_state_plan["source_updated_at"]),
+                source_data=source_state_plan["source_data"],
+                source_data_hash=source_state_plan["source_data_hash"],
+                state_version=source_state_plan["state_version"],
+                last_import_job_id=job.id,
+                last_import_row_id=row.id,
+            )
+            self.session.add(source_state)
+            if self.cache is not None:
+                self.cache.source_states[AccountSourceKey(account.id, record.source)] = source_state
+            return True
+        source_state.source_updated_at = _parse_datetime(source_state_plan["source_updated_at"])
+        source_state.source_data = source_state_plan["source_data"]
+        source_state.source_data_hash = source_state_plan["source_data_hash"]
+        source_state.state_version = source_state_plan["state_version"]
+        source_state.last_import_job_id = job.id
+        source_state.last_import_row_id = row.id
+        return True
 
     async def finalize(self) -> None:
         """Flush new business rows once, then make CREATE lineage visible.
@@ -357,7 +407,10 @@ class ImportMergeApplier:
         account: InfluencerPlatformAccount,
         metrics_plan: dict[str, Any],
         now: datetime,
-    ) -> None:
+        *,
+        reconcile_import_row_snapshot: bool = False,
+        expected_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         current_plan = metrics_plan.get("current")
         if current_plan:
             current = await self._current_metrics(account.id, record.source)
@@ -385,22 +438,115 @@ class ImportMergeApplier:
                 current.last_import_job_id = job.id
                 current.last_import_row_id = row.id
         snapshot_plan = metrics_plan.get("snapshot")
-        if snapshot_plan:
-            self.session.add(
-                InfluencerMetricSnapshot(
-                    id=uuid4(),
-                    influencer_id=account.influencer_id,
-                    platform_account_id=account.id,
-                    source=record.source,
-                    source_updated_at=_parse_datetime(snapshot_plan["source_updated_at"]),
-                    import_job_id=job.id,
-                    import_row_id=row.id,
-                    captured_at=now,
-                    metrics=snapshot_plan["metrics"],
-                    metrics_hash=snapshot_plan["metrics_hash"],
-                    snapshot_key=snapshot_plan["snapshot_key"],
-                )
+        if reconcile_import_row_snapshot:
+            return await self._reconcile_import_row_snapshot(
+                job,
+                row,
+                record,
+                account,
+                snapshot_plan,
+                expected_snapshot=expected_snapshot,
+                captured_at=now,
             )
+        if snapshot_plan:
+            self._add_metric_snapshot(job, row, record, account, snapshot_plan, now)
+            return True
+        return False
+
+    def _add_metric_snapshot(
+        self,
+        job: ImportJob,
+        row: ImportRow,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount,
+        snapshot_plan: dict[str, Any],
+        captured_at: datetime,
+    ) -> None:
+        self.session.add(
+            InfluencerMetricSnapshot(
+                id=uuid4(),
+                influencer_id=account.influencer_id,
+                platform_account_id=account.id,
+                source=record.source,
+                source_updated_at=_parse_datetime(snapshot_plan["source_updated_at"]),
+                import_job_id=job.id,
+                import_row_id=row.id,
+                captured_at=captured_at,
+                metrics=snapshot_plan["metrics"],
+                metrics_hash=snapshot_plan["metrics_hash"],
+                snapshot_key=snapshot_plan["snapshot_key"],
+            )
+        )
+
+    async def _reconcile_import_row_snapshot(
+        self,
+        job: ImportJob,
+        row: ImportRow,
+        record: CanonicalInfluencerRecord,
+        account: InfluencerPlatformAccount,
+        snapshot_plan: dict[str, Any] | None,
+        *,
+        expected_snapshot: dict[str, Any] | None,
+        captured_at: datetime,
+    ) -> bool:
+        """Reconcile a row snapshot by immutable, missing-only semantics."""
+
+        existing = await self.repository.get_metric_snapshot_for_import_row(row.id, for_update=True)
+        if existing is not None and (
+            existing.import_job_id != job.id
+            or existing.influencer_id != account.influencer_id
+            or existing.platform_account_id != account.id
+            or existing.source != record.source
+        ):
+            raise ImportDomainError(
+                "HUITUN_REPROJECTION_IDENTITY_CONFLICT",
+                "Committed metric snapshot no longer has its original identity target",
+                status_code=409,
+            )
+        if existing is not None:
+            if expected_snapshot is None or not self._snapshot_matches_projection(
+                existing, expected_snapshot, captured_at
+            ):
+                raise ImportDomainError(
+                    "HUITUN_REPROJECTION_SNAPSHOT_CONFLICT",
+                    "Existing metric snapshot differs from the committed row projection",
+                    status_code=409,
+                )
+            return False
+        if expected_snapshot is None:
+            return False
+        if snapshot_plan is None:
+            # Normal projection dedupe found an equivalent snapshot for another
+            # committed row. The database's immutable uniqueness contract owns
+            # that decision; do not synthesize or rewrite another snapshot.
+            return False
+        if snapshot_plan != expected_snapshot:
+            raise ImportDomainError(
+                "HUITUN_REPROJECTION_SNAPSHOT_CONFLICT",
+                "Metric snapshot projection does not match its expected semantics",
+                status_code=409,
+            )
+        self._add_metric_snapshot(job, row, record, account, snapshot_plan, captured_at)
+        return True
+
+    @staticmethod
+    def _snapshot_matches_projection(
+        existing: InfluencerMetricSnapshot,
+        expected: dict[str, Any],
+        captured_at: datetime,
+    ) -> bool:
+        existing_source_updated_at = existing.source_updated_at
+        if existing_source_updated_at is not None:
+            existing_source_updated_at = _parse_datetime(existing_source_updated_at.isoformat())
+        existing_captured_at = _parse_datetime(existing.captured_at.isoformat())
+        expected_captured_at = _parse_datetime(captured_at.isoformat())
+        return (
+            existing_source_updated_at == _parse_datetime(expected["source_updated_at"])
+            and existing_captured_at == expected_captured_at
+            and existing.metrics == expected["metrics"]
+            and existing.metrics_hash == expected["metrics_hash"]
+            and existing.snapshot_key == expected["snapshot_key"]
+        )
 
     async def _current_metrics(
         self, account_id: UUID, source: DataSource
@@ -413,4 +559,9 @@ class ImportMergeApplier:
         return self.cache.current_metrics.get(key)
 
 
-__all__ = ["ImportMergeApplier", "MergeApplyCache", "PreviewStaleError"]
+__all__ = [
+    "ImportMergeApplier",
+    "MergeApplyCache",
+    "PreviewStaleError",
+    "ReprojectionApplyResult",
+]
