@@ -29,6 +29,7 @@ import { fetchCampaignPage } from "@/features/campaigns/api";
 import { campaignStatusPresentation } from "@/features/campaigns/formatters";
 import type { Campaign } from "@/features/campaigns/types";
 import { platformLabel } from "@/features/influencers/formatters";
+import { useBuyerProspectRuleOptions } from "@/features/buyer-prospects/queries";
 import { ApiClientError } from "@/lib/api/client";
 
 import {
@@ -277,8 +278,15 @@ function safeList(value: unknown): string {
     : "—";
 }
 
-function buyerCategoryLabel(categories: string[]): string {
-  return categories.length > 0 ? categories.join("、") : "—";
+function buyerCategoryLabel(
+  categories: string[],
+  taxonomyLabels: Map<string, string>,
+): string {
+  return categories.length > 0
+    ? categories
+        .map((category) => taxonomyLabels.get(category) ?? category)
+        .join("、")
+    : "—";
 }
 
 function buyerSourceSummary(member: CandidateMember): string {
@@ -301,6 +309,17 @@ function buyerSourceSummary(member: CandidateMember): string {
 }
 
 function BuyerRelationEvidence({ member }: { member: CandidateMember }) {
+  const buyerOptionsQuery = useBuyerProspectRuleOptions();
+  const taxonomyLabels = useMemo(
+    () =>
+      new Map(
+        (buyerOptionsQuery.data?.taxonomy_categories ?? []).map((category) => [
+          category.id,
+          category.label,
+        ]),
+      ),
+    [buyerOptionsQuery.data],
+  );
   const original = buyerOriginalCategories(member);
   const current = buyerCurrentCategories(member);
   const pairs = buyerRelationPairs(member);
@@ -312,11 +331,11 @@ function BuyerRelationEvidence({ member }: { member: CandidateMember }) {
     >
       <div className="candidate-evidence-row">
         <Text type="secondary">原采集类目</Text>
-        <span>{buyerCategoryLabel(original)}</span>
+        <span>{buyerCategoryLabel(original, taxonomyLabels)}</span>
       </div>
       <div className="candidate-evidence-row">
         <Text type="secondary">当前达人类目</Text>
-        <span>{buyerCategoryLabel(current)}</span>
+        <span>{buyerCategoryLabel(current, taxonomyLabels)}</span>
       </div>
       <div>
         <Text type="secondary">类目关系</Text>
@@ -326,8 +345,12 @@ function BuyerRelationEvidence({ member }: { member: CandidateMember }) {
               <li
                 key={`${pair.client_category_id}-${pair.creator_category_id}-${index}`}
               >
-                {pair.client_category_id} → {pair.creator_category_id}：
-                {buyerRelationLabel(pair.relation)}
+                {taxonomyLabels.get(pair.client_category_id) ??
+                  pair.client_category_id}{" "}
+                →{" "}
+                {taxonomyLabels.get(pair.creator_category_id) ??
+                  pair.creator_category_id}
+                ：{buyerRelationLabel(pair.relation)}
               </li>
             ))}
           </ul>
@@ -693,6 +716,17 @@ export function CandidateRunDetailView({
     policy?.definition.schema_version === 1 &&
     (policy.definition.policy_type === "BUYER_V1" ||
       policy.definition.policy_type === "BUYER_PROSPECT_RULE_V1");
+  const buyerOptionsQuery = useBuyerProspectRuleOptions(isBuyerRun);
+  const taxonomyLabels = useMemo(
+    () =>
+      new Map(
+        (buyerOptionsQuery.data?.taxonomy_categories ?? []).map((category) => [
+          category.id,
+          category.label,
+        ]),
+      ),
+    [buyerOptionsQuery.data],
+  );
   const [filter, setFilter] = useState<CandidateMemberFilter>("all");
   const [pageSize, setPageSize] = useState<CandidateMemberPageSize>(
     CANDIDATE_MEMBER_PAGE_LIMIT,
@@ -1102,13 +1136,13 @@ export function CandidateRunDetailView({
           title: "原采集类目",
           key: "original-category",
           render: (_: unknown, member: CandidateMember) =>
-            buyerCategoryLabel(buyerOriginalCategories(member)),
+            buyerCategoryLabel(buyerOriginalCategories(member), taxonomyLabels),
         },
         {
           title: "当前达人类目",
           key: "current-category",
           render: (_: unknown, member: CandidateMember) =>
-            buyerCategoryLabel(buyerCurrentCategories(member)),
+            buyerCategoryLabel(buyerCurrentCategories(member), taxonomyLabels),
         },
         {
           title: "潜客等级",
