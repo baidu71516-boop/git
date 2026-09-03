@@ -297,10 +297,20 @@ function buyerSourceSummary(member: CandidateMember): string {
     !Array.isArray(evidence.collection_context)
       ? (evidence.collection_context as Record<string, unknown>)
       : {};
+  const marketProspectRule =
+    evidence.market_prospect_rule &&
+    typeof evidence.market_prospect_rule === "object" &&
+    !Array.isArray(evidence.market_prospect_rule)
+      ? (evidence.market_prospect_rule as Record<string, unknown>)
+      : {};
   const source = safeString(
-    collection.source ?? collection.source_name ?? evidence.source,
+    collection.source ??
+      collection.source_name ??
+      evidence.source ??
+      marketProspectRule.source_type,
   );
   const sourceLabels: Record<string, string> = {
+    manual_huitun_export: "灰豚",
     GREY_DOLPHIN: "灰豚采集",
     HUITUN: "灰豚采集",
     DOUYIN: "抖音采集",
