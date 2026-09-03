@@ -437,7 +437,8 @@ function EvidenceContent({
   const type =
     evidence.schema_version === 1 &&
     (evidence.policy_type === "SELLER_V1" ||
-      evidence.policy_type === "BUYER_V1")
+      evidence.policy_type === "BUYER_V1" ||
+      evidence.policy_type === "BUYER_PROSPECT_RULE_V1")
       ? evidence.policy_type
       : policy
         ? policyType(policy.definition)
