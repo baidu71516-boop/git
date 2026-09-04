@@ -27,7 +27,7 @@ ALEMBIC_INI = PROJECT_ROOT / "infrastructure" / "migrations" / "alembic.ini"
 MIGRATIONS = PROJECT_ROOT / "infrastructure" / "migrations"
 DOUYIN_REVISION = "0009_douyin_runtime_capture_v1"
 PERMISSIONS_REVISION = "0010_permissions_v1_persistence"
-BUYER_REVISION = "0012_buyer_lead_tiers_v1"
+CURRENT_HEAD_REVISION = "0013_market_prospect_rules_v1_provisional"
 NON_ADMIN_MODULES = (
     "today_outreach",
     "campaigns",
@@ -210,9 +210,9 @@ def test_upgrade_backfill_constraints_audit_and_single_head(
     migration_database.upgrade("head")
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == BUYER_REVISION
+        assert _revision(connection) == CURRENT_HEAD_REVISION
         assert ScriptDirectory.from_config(migration_database.config).get_heads() == [
-            BUYER_REVISION
+            CURRENT_HEAD_REVISION
         ]
         assert inspect(connection).has_table("operator_module_permissions")
         non_super_admin_department, non_super_admin = seeded["non_super_admin"]

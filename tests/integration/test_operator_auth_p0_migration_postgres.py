@@ -44,7 +44,7 @@ ALEMBIC_INI = PROJECT_ROOT / "infrastructure" / "migrations" / "alembic.ini"
 MIGRATIONS = PROJECT_ROOT / "infrastructure" / "migrations"
 PERMISSIONS_REVISION = "0010_permissions_v1_persistence"
 OPERATOR_AUTH_REVISION = "0011_operator_auth_p0"
-BUYER_REVISION = "0012_buyer_lead_tiers_v1"
+CURRENT_HEAD_REVISION = "0013_market_prospect_rules_v1_provisional"
 OPERATOR_AUTH_AUDIT_ACTIONS = (
     "OPERATOR_AUTHENTICATED",
     "OPERATOR_AUTH_FAILED",
@@ -511,9 +511,9 @@ def test_upgrade_preserves_legacy_rows_and_marks_credentials_uninitialized(
     migration_database.upgrade("head")
     with migration_database.engine.connect() as connection:
         _assert_postgresql_16(connection)
-        assert _revision(connection) == BUYER_REVISION
+        assert _revision(connection) == CURRENT_HEAD_REVISION
         assert ScriptDirectory.from_config(migration_database.config).get_heads() == [
-            BUYER_REVISION
+            CURRENT_HEAD_REVISION
         ]
         operator_columns = {
             column["name"]: column for column in inspect(connection).get_columns("operators")
