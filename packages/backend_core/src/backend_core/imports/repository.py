@@ -574,16 +574,21 @@ class ImportRepository:
         )
 
     async def get_current_metrics(
-        self, platform_account_id: UUID, source: DataSource
+        self,
+        platform_account_id: UUID,
+        source: DataSource,
+        *,
+        for_update: bool = False,
     ) -> InfluencerCurrentMetrics | None:
+        statement = select(InfluencerCurrentMetrics).where(
+            InfluencerCurrentMetrics.platform_account_id == platform_account_id,
+            InfluencerCurrentMetrics.source == source,
+        )
+        if for_update:
+            statement = statement.with_for_update()
         return cast(
             InfluencerCurrentMetrics | None,
-            await self.session.scalar(
-                select(InfluencerCurrentMetrics).where(
-                    InfluencerCurrentMetrics.platform_account_id == platform_account_id,
-                    InfluencerCurrentMetrics.source == source,
-                )
-            ),
+            await self.session.scalar(statement),
         )
 
     async def source_contacts(

@@ -410,13 +410,22 @@ class _HuitunDouyinAdapter(_MappedAdapter):
         output: dict[str, Any],
         warnings: list[RowIssue],
     ) -> None:
+        for field in ("followers_count", "works_count", "likes_count"):
+            self._parse_metric(
+                values,
+                output,
+                warnings,
+                field,
+                parse_huitun_integer,
+                "INVALID_INTEGER",
+            )
         self._parse_metric(
             values,
             output,
             warnings,
-            "followers_count",
-            parse_huitun_integer,
-            "INVALID_INTEGER",
+            "avg_likes",
+            parse_decimal,
+            "INVALID_DECIMAL",
         )
 
     def validate_table(self, rows: list[RawTabularRecord]) -> None:

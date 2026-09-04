@@ -8,6 +8,7 @@ import { useState } from "react";
 import { AppLoading } from "@/components/ui/app-loading";
 import { ApiClientError } from "@/lib/api/client";
 
+import { CurrentMetricsSection } from "./components/current-metrics-section";
 import { InfluencerAvatar } from "./components/influencer-avatar";
 import { InfluencerDetail } from "./components/influencer-detail";
 import { MetricSnapshotList } from "./components/metric-snapshot-list";
@@ -105,6 +106,10 @@ export function InfluencerDetailView({
   ) : (
     <>
       <InfluencerDetail detail={detailQuery.data} showTitle={!isDrawer} />
+      <CurrentMetricsSection
+        accounts={detailQuery.data.platform_accounts}
+        metrics={detailQuery.data.current_metrics}
+      />
       <MetricSnapshotList
         accounts={detailQuery.data.platform_accounts}
         page={snapshotPage}

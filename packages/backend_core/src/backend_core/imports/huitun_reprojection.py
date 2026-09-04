@@ -17,6 +17,7 @@ from backend_core.imports.enums import (
     ImportSourceType,
 )
 from backend_core.imports.errors import ImportDomainError
+from backend_core.imports.hashing import hash_document
 from backend_core.imports.merge_applier import ImportMergeApplier
 from backend_core.imports.models import ImportJob, ImportRow
 from backend_core.imports.parsers import RawTabularRecord
@@ -24,6 +25,8 @@ from backend_core.imports.planner import ImportPlanner, identity_lock_keys
 from backend_core.imports.repository import ImportRepository
 from backend_core.influencers.enums import DataSource
 from backend_core.influencers.models import InfluencerPlatformAccount
+
+CURRENT_METRIC_ENRICHMENT_FIELDS = ("works_count", "likes_count", "avg_likes")
 
 
 class HuitunReprojectionService:
@@ -105,6 +108,133 @@ class HuitunReprojectionService:
                 "source_states_noop": len(rows) - source_states_repaired,
                 "metric_snapshots_inserted": metric_snapshots_inserted,
                 "metric_snapshots_noop": len(rows) - metric_snapshots_inserted,
+                "conflicts": 0,
+                "errors": 0,
+            }
+        except BaseException:
+            await self.session.rollback()
+            raise
+
+    async def enrich_current_metrics_missing_only(
+        self,
+        *,
+        department_id: UUID,
+        import_job_id: UUID,
+        import_row_ids: tuple[UUID, ...] | None = None,
+    ) -> dict[str, Any]:
+        """Add newly supported metrics from immutable raw Huitun provenance only."""
+
+        try:
+            await self.repository.acquire_identity_locks(
+                [f"phase2:huitun-current-metrics-enrichment-job:{import_job_id}"]
+            )
+            job = await self.repository.get_import_job(import_job_id, for_update=True)
+            self._require_repairable_job(job, department_id)
+            assert job is not None
+            assert job.confirmed_revision is not None
+
+            rows = await self.repository.list_committed_huitun_reprojection_rows(
+                department_id=department_id,
+                import_job_id=job.id,
+                confirmed_revision=job.confirmed_revision,
+                for_update=True,
+            )
+
+            if import_row_ids is not None:
+                requested = set(import_row_ids)
+                rows = [row for row in rows if row.id in requested]
+                found = {row.id for row in rows}
+                if found != requested:
+                    raise ImportDomainError(
+                        "HUITUN_CURRENT_METRICS_ENRICHMENT_ROW_NOT_FOUND",
+                        "Requested committed Huitun row was not found",
+                        status_code=404,
+                    )
+
+            normalized = [(row, self._normalize_stored_row(row)) for row in rows]
+            self._require_persisted_row_targets(normalized)
+
+            updated = 0
+            noop = 0
+            fields_added = 0
+
+            for row, record in normalized:
+                account = await self._require_original_account(row, record)
+                current = await self.repository.get_current_metrics(
+                    account.id,
+                    record.source,
+                    for_update=True,
+                )
+                if current is None:
+                    raise ImportDomainError(
+                        "HUITUN_CURRENT_METRICS_ENRICHMENT_MISSING",
+                        "Current metrics projection is missing",
+                        status_code=409,
+                    )
+
+                if (
+                    current.influencer_id != account.influencer_id
+                    or current.platform_account_id != account.id
+                    or current.source is not record.source
+                    or current.last_import_job_id != row.import_job_id
+                    or current.last_import_row_id != row.id
+                ):
+                    raise ImportDomainError(
+                        "HUITUN_CURRENT_METRICS_ENRICHMENT_LINEAGE_CONFLICT",
+                        "Current metrics no longer has the original Huitun row lineage",
+                        status_code=409,
+                    )
+
+                incoming = record.as_dict()["metrics"]
+                existing = dict(current.metrics)
+
+                incoming_followers = incoming.get("followers_count")
+                existing_followers = existing.get("followers_count")
+                if (
+                    incoming_followers is not None
+                    and existing_followers is not None
+                    and incoming_followers != existing_followers
+                ):
+                    raise ImportDomainError(
+                        "HUITUN_CURRENT_METRICS_ENRICHMENT_VALUE_CONFLICT",
+                        "Existing followers metric differs from immutable Huitun evidence",
+                        status_code=409,
+                    )
+
+                merged = dict(existing)
+                added_for_row = 0
+
+                for field in CURRENT_METRIC_ENRICHMENT_FIELDS:
+                    if field not in incoming:
+                        continue
+                    incoming_value = incoming[field]
+                    if field not in merged or merged[field] is None:
+                        merged[field] = incoming_value
+                        added_for_row += 1
+                    elif merged[field] != incoming_value:
+                        raise ImportDomainError(
+                            "HUITUN_CURRENT_METRICS_ENRICHMENT_VALUE_CONFLICT",
+                            f"Existing {field} differs from immutable Huitun evidence",
+                            status_code=409,
+                        )
+
+                if added_for_row:
+                    current.metrics = merged
+                    current.metrics_hash = hash_document(merged)
+                    updated += 1
+                    fields_added += added_for_row
+                else:
+                    noop += 1
+
+            await self.session.commit()
+            return {
+                "department_id": str(department_id),
+                "import_job_id": str(job.id),
+                "selected_committed_rows": len(rows),
+                "processed": len(rows),
+                "current_metrics_updated": updated,
+                "current_metrics_noop": noop,
+                "fields_added": fields_added,
                 "conflicts": 0,
                 "errors": 0,
             }

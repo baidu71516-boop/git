@@ -445,7 +445,17 @@ def test_huitun_douyin_confirm_projects_metrics_with_source_state_and_replays() 
             row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
             assert row is not None
             assert row.normalized_data["public_profile"]["creator_classification_tags"] == ["舞蹈"]
-            assert row.normalized_data["metrics"] == {"followers_count": 871798}
+            metrics = row.normalized_data["metrics"]
+            assert set(metrics) == {
+                "followers_count",
+                "works_count",
+                "likes_count",
+                "avg_likes",
+            }
+            assert metrics["followers_count"] == 871798
+            assert metrics["works_count"] == 53
+            assert metrics["likes_count"] == 6228903
+            assert str(metrics["avg_likes"]) == "99269"
 
             await queue_confirm(session, job.id, 1)
             result = await processor.confirm(job.id, 1)
@@ -479,7 +489,7 @@ def test_huitun_douyin_confirm_projects_metrics_with_source_state_and_replays() 
             assert snapshot.import_job_id == job.id
             assert snapshot.import_row_id == row.id
             assert snapshot.captured_at.replace(tzinfo=UTC) == job.completed_at
-            assert snapshot.metrics == {"followers_count": 871798}
+            assert snapshot.metrics == metrics
             assert snapshot.metrics_hash == hash_document(snapshot.metrics)
             assert snapshot.snapshot_key == metric_snapshot_key(record)
 
@@ -512,7 +522,11 @@ def test_huitun_douyin_confirm_does_not_project_invalid_metrics(raw_followers: s
             )
             row = await session.scalar(select(ImportRow).where(ImportRow.import_job_id == job.id))
             assert row is not None
-            assert row.normalized_data["metrics"] == {}
+            assert row.normalized_data["metrics"] == {
+                "works_count": 53,
+                "likes_count": 6228903,
+                "avg_likes": "99269",
+            }
             assert any(
                 warning["code"] == "INVALID_INTEGER" and warning["field"] == "followers_count"
                 for warning in row.warnings
@@ -520,10 +534,14 @@ def test_huitun_douyin_confirm_does_not_project_invalid_metrics(raw_followers: s
 
             await queue_confirm(session, job.id, 1)
             assert (await processor.confirm(job.id, 1))["created_rows"] == 1
-            assert (
-                await session.scalar(select(func.count()).select_from(InfluencerMetricSnapshot))
-                == 0
-            )
+
+            snapshot = await session.scalar(select(InfluencerMetricSnapshot))
+            assert snapshot is not None
+            assert snapshot.metrics == {
+                "works_count": 53,
+                "likes_count": 6228903,
+                "avg_likes": "99269",
+            }
 
     asyncio.run(scenario())
 
@@ -597,7 +615,11 @@ def test_douyin_csv_and_xlsx_share_preview_confirm_and_token_dedupe() -> None:
             processor = ImportProcessor(session, storage, parser_limits=limits())
             first_preview = await processor.parse_and_preview(first_job.id)
             assert first_preview["status"] == ImportJobStatus.PREVIEW_READY.value
-            assert first_job.field_mapping == dict(HUITUN_DOUYIN_FIELD_MAPPING)
+            assert first_job.field_mapping == {
+                field: canonical
+                for field, canonical in HUITUN_DOUYIN_FIELD_MAPPING.items()
+                if field in (first_job.detected_fields or [])
+            }
             first_row = await session.scalar(
                 select(ImportRow).where(ImportRow.import_job_id == first_job.id)
             )
@@ -608,7 +630,11 @@ def test_douyin_csv_and_xlsx_share_preview_confirm_and_token_dedupe() -> None:
                 first_row.normalized_data["platform_identity"]["platform_account_id"]
                 == profile_token
             )
-            assert first_row.normalized_data["metrics"] == {"followers_count": 4567}
+            assert first_row.normalized_data["metrics"] == {
+                "followers_count": 4567,
+                "works_count": 88,
+                "likes_count": 9999,
+            }
             await queue_confirm(session, first_job.id, 1)
             assert (await processor.confirm(first_job.id, 1))["created_rows"] == 1
 
@@ -628,7 +654,11 @@ def test_douyin_csv_and_xlsx_share_preview_confirm_and_token_dedupe() -> None:
             )
             second_preview = await processor.parse_and_preview(second_job.id)
             assert second_preview["status"] == ImportJobStatus.PREVIEW_READY.value
-            assert second_job.field_mapping == dict(HUITUN_DOUYIN_FIELD_MAPPING)
+            assert second_job.field_mapping == {
+                field: canonical
+                for field, canonical in HUITUN_DOUYIN_FIELD_MAPPING.items()
+                if field in (second_job.detected_fields or [])
+            }
             await queue_confirm(session, second_job.id, 1)
             second_result = await processor.confirm(second_job.id, 1)
             assert second_result["updated_rows"] + second_result["no_change_rows"] == 1

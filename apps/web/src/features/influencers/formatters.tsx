@@ -310,6 +310,9 @@ export function renderJsonValue(value: JsonValue, path = "metric"): ReactNode {
 
 const metricLabels: Record<string, string> = {
   followers_count: "粉丝数",
+  works_count: "作品数",
+  likes_count: "点赞总数",
+  avg_likes: "平均点赞",
   notes_count: "笔记数",
   likes_collects_total: "获赞与收藏总数",
   commercial_notes_count: "商业笔记数",

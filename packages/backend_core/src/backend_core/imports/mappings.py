@@ -62,6 +62,9 @@ HUITUN_DOUYIN_FIELD_MAPPING: Mapping[str, str] = MappingProxyType(
         "内容标签": "creator_tags",
         "分类": "creator_classification_tags",
         "粉丝数": "followers_count",
+        "作品数": "works_count",
+        "点赞数": "likes_count",
+        "平均点赞": "avg_likes",
         "达人主页链接": "profile_url",
     }
 )
@@ -70,6 +73,7 @@ HUITUN_DOUYIN_REQUIRED_HEADERS = frozenset({"播主昵称", "抖音号", "达人
 CANONICAL_FIELDS = frozenset(
     {
         *HUITUN_FIELD_MAPPING.values(),
+        *HUITUN_DOUYIN_FIELD_MAPPING.values(),
         "creator_classification_tags",
         "external_source_id",
         "platform_account_id",
@@ -79,6 +83,8 @@ CANONICAL_FIELDS = frozenset(
 HUITUN_INTEGER_FIELDS = frozenset(
     {
         "followers_count",
+        "works_count",
+        "likes_count",
         "notes_count",
         "likes_collects_total",
         "commercial_notes_count",
@@ -92,6 +98,7 @@ HUITUN_INTEGER_FIELDS = frozenset(
 )
 HUITUN_DECIMAL_FIELDS = frozenset(
     {
+        "avg_likes",
         "huitun_score",
         "image_note_price",
         "image_cpe",

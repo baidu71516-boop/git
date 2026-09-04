@@ -876,3 +876,167 @@ def test_reprojection_cli_requires_exact_ids_and_propagates_conflicts(
             main(["--department-id", str(department_id), "--import-job-id", str(job_id)])
     assert conflict.value.code == 1
     assert "HUITUN_REPROJECTION_SNAPSHOT_CONFLICT" in capsys.readouterr().err
+
+
+def test_current_metrics_enrichment_is_missing_only_and_preserves_history() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            fixture = await seed_reprojection_fixture(session)
+            row = await session.get(ImportRow, fixture.row_id)
+            assert row is not None
+
+            row.raw_data = {
+                **row.raw_data,
+                "作品数": "53.0",
+                "点赞数": "6228903.0",
+                "平均点赞": "99269.0",
+            }
+
+            legacy_metrics = {"followers_count": 871798}
+            current = InfluencerCurrentMetrics(
+                influencer_id=fixture.influencer_id,
+                platform_account_id=fixture.account_id,
+                source=DataSource.HUITUN,
+                source_updated_at=None,
+                metrics=legacy_metrics,
+                metrics_hash=hash_document(legacy_metrics),
+                last_import_job_id=fixture.import_job_id,
+                last_import_row_id=fixture.row_id,
+            )
+            snapshot = InfluencerMetricSnapshot(
+                influencer_id=fixture.influencer_id,
+                platform_account_id=fixture.account_id,
+                source=DataSource.HUITUN,
+                source_updated_at=None,
+                import_job_id=fixture.import_job_id,
+                import_row_id=fixture.row_id,
+                captured_at=COMMITTED_AT,
+                metrics=legacy_metrics,
+                metrics_hash=hash_document(legacy_metrics),
+                snapshot_key=hash_document(
+                    {"legacy_row": str(fixture.row_id), "metrics": legacy_metrics}
+                ),
+            )
+            session.add_all((current, snapshot))
+            await session.commit()
+
+            state_before = await source_state_for(session, fixture)
+            state_before_values = (
+                state_before.source_updated_at,
+                dict(state_before.source_data),
+                state_before.source_data_hash,
+                state_before.state_version,
+                state_before.last_import_job_id,
+                state_before.last_import_row_id,
+            )
+            snapshot_before = (
+                snapshot.id,
+                snapshot.source_updated_at,
+                snapshot.captured_at,
+                dict(snapshot.metrics),
+                snapshot.metrics_hash,
+                snapshot.snapshot_key,
+            )
+
+            result = await HuitunReprojectionService(session).enrich_current_metrics_missing_only(
+                department_id=fixture.department_id,
+                import_job_id=fixture.import_job_id,
+                import_row_ids=(fixture.row_id,),
+            )
+
+            assert result["selected_committed_rows"] == 1
+            assert result["processed"] == 1
+            assert result["current_metrics_updated"] == 1
+            assert result["current_metrics_noop"] == 0
+            assert result["fields_added"] == 3
+
+            refreshed = await session.get(InfluencerCurrentMetrics, current.id)
+            assert refreshed is not None
+            assert refreshed.metrics == {
+                "followers_count": 871798,
+                "works_count": 53,
+                "likes_count": 6228903,
+                "avg_likes": "99269",
+            }
+            assert refreshed.metrics_hash == hash_document(refreshed.metrics)
+            assert refreshed.source_updated_at is None
+            assert refreshed.last_import_job_id == fixture.import_job_id
+            assert refreshed.last_import_row_id == fixture.row_id
+
+            state_after = await source_state_for(session, fixture)
+            assert (
+                state_after.source_updated_at,
+                dict(state_after.source_data),
+                state_after.source_data_hash,
+                state_after.state_version,
+                state_after.last_import_job_id,
+                state_after.last_import_row_id,
+            ) == state_before_values
+
+            snapshot_after = await session.get(InfluencerMetricSnapshot, snapshot.id)
+            assert snapshot_after is not None
+            assert (
+                snapshot_after.id,
+                snapshot_after.source_updated_at,
+                snapshot_after.captured_at,
+                dict(snapshot_after.metrics),
+                snapshot_after.metrics_hash,
+                snapshot_after.snapshot_key,
+            ) == snapshot_before
+
+    asyncio.run(scenario())
+
+
+def test_current_metrics_enrichment_conflict_rolls_back_without_partial_write() -> None:
+    async def scenario() -> None:
+        async with database_session() as session:
+            fixture = await seed_reprojection_fixture(session)
+            row = await session.get(ImportRow, fixture.row_id)
+            assert row is not None
+
+            row.raw_data = {
+                **row.raw_data,
+                "作品数": "53.0",
+                "点赞数": "6228903.0",
+                "平均点赞": "99269.0",
+            }
+
+            existing_metrics = {
+                "followers_count": 871798,
+                "likes_count": 1,
+            }
+            current = InfluencerCurrentMetrics(
+                influencer_id=fixture.influencer_id,
+                platform_account_id=fixture.account_id,
+                source=DataSource.HUITUN,
+                source_updated_at=None,
+                metrics=existing_metrics,
+                metrics_hash=hash_document(existing_metrics),
+                last_import_job_id=fixture.import_job_id,
+                last_import_row_id=fixture.row_id,
+            )
+            session.add(current)
+            await session.commit()
+
+            current_id = current.id
+            before_hash = current.metrics_hash
+
+            with pytest.raises(ImportDomainError) as caught:
+                await HuitunReprojectionService(session).enrich_current_metrics_missing_only(
+                    department_id=fixture.department_id,
+                    import_job_id=fixture.import_job_id,
+                    import_row_ids=(fixture.row_id,),
+                )
+
+            assert caught.value.code == "HUITUN_CURRENT_METRICS_ENRICHMENT_VALUE_CONFLICT"
+
+            refreshed = await session.get(InfluencerCurrentMetrics, current_id)
+            assert refreshed is not None
+            assert refreshed.metrics == existing_metrics
+            assert refreshed.metrics_hash == before_hash
+            assert refreshed.source_updated_at is None
+            assert refreshed.last_import_job_id == fixture.import_job_id
+            assert refreshed.last_import_row_id == fixture.row_id
+            assert await count(session, InfluencerMetricSnapshot) == 0
+
+    asyncio.run(scenario())
