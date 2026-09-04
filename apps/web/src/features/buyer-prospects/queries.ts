@@ -110,9 +110,9 @@ export function useBuyerProspectRuleLifecycleMutation() {
       payload: BuyerProspectRuleLifecycleRequest;
     }) => setBuyerProspectRuleLifecycle(ruleId, payload),
     retry: false,
-    onSuccess: (rule) => {
+    onSuccess: async (rule) => {
       client.setQueryData(buyerProspectQueryKeys.detail(rule.id), rule);
-      void client.invalidateQueries({ queryKey: buyerProspectQueryKeys.list });
+      await client.invalidateQueries({ queryKey: buyerProspectQueryKeys.list });
     },
   });
 }

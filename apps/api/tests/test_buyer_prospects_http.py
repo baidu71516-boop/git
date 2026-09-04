@@ -173,6 +173,7 @@ def _rule(
         follower_max=10_000,
         buyer_lead_tiers=(BuyerLeadTier.HIGH,),
         source_type=HUITUN_SOURCE,
+        source_label="灰豚",
         recent_collection_window=BuyerProspectRecentCollectionWindow.DAYS_30,
         prospect_owner_filter=BuyerProspectOwnerFilter.ANY,
         prospect_owner_operator_id=None,

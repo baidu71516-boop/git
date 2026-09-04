@@ -1,9 +1,20 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import type { Key, ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { BuyerProspectWorkspace } from "../src/features/buyer-prospects/buyer-prospect-workspace";
+import {
+  useBuyerProspectRuleLifecycleMutation,
+  useBuyerProspectRuleList,
+} from "../src/features/buyer-prospects/queries";
 import type { BuyerProspectRuleCreateRequest } from "../src/features/buyer-prospects/types";
 
 type TestTableColumn = {
@@ -298,5 +309,84 @@ describe("Buyer prospect workspace", () => {
     expect(
       screen.queryByRole("button", { name: "归档" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("Buyer prospect lifecycle query refresh", () => {
+  it("waits for the lifecycle list refresh before resolving", async () => {
+    let listCalls = 0;
+    let resolveRefresh: ((value: Response) => void) | undefined;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+
+      if (url.includes("/buyer-prospects?") && !init?.method) {
+        listCalls += 1;
+        if (listCalls === 1) {
+          return response({ items: [rule], next_cursor: null });
+        }
+        return new Promise<Response>((resolve) => {
+          resolveRefresh = resolve;
+        });
+      }
+
+      if (
+        url.endsWith("/buyer-prospects/buyer-rule-1/lifecycle") &&
+        init?.method === "POST"
+      ) {
+        return response({ ...rule, status: "ARCHIVED", version: 4 });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+        mutations: { retry: false },
+      },
+    });
+
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+
+    const { result } = renderHook(
+      () => ({
+        list: useBuyerProspectRuleList(false),
+        lifecycle: useBuyerProspectRuleLifecycleMutation(),
+      }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.list.isSuccess).toBe(true));
+
+    let mutationPromise: Promise<unknown> | undefined;
+
+    act(() => {
+      mutationPromise = result.current.lifecycle.mutateAsync({
+        ruleId: rule.id,
+        payload: {
+          expected_pool_version: rule.version,
+          status: "ARCHIVED",
+        },
+      });
+    });
+
+    await waitFor(() => expect(listCalls).toBe(2));
+
+    expect(result.current.lifecycle.isPending).toBe(true);
+    expect(resolveRefresh).toBeTypeOf("function");
+
+    await act(async () => {
+      resolveRefresh?.(response({ items: [], next_cursor: null }));
+      if (!mutationPromise) throw new Error("Lifecycle mutation did not start");
+      await mutationPromise;
+    });
+
+    await waitFor(() => expect(result.current.lifecycle.isPending).toBe(false));
+    await waitFor(() =>
+      expect(result.current.list.data?.pages[0]?.items).toEqual([]),
+    );
   });
 });

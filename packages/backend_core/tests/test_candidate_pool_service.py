@@ -3282,3 +3282,47 @@ def test_huitun_creator_classification_accepts_pre_fix_raw_provenance() -> None:
     row.raw_data = {"分类": "舞蹈"}
     row.normalized_data = {"public_profile": {"creator_classification_tags": ["汽车"]}}
     assert extract(account, state, row, job, import_file) == (None, ())
+
+
+def test_buyer_prospect_for_update_locks_candidate_pool_only() -> None:
+    import asyncio
+    from uuid import uuid4
+
+    from backend_core.growth.repository import CandidatePoolRepository
+    from sqlalchemy.dialects import postgresql
+
+    class FakeResult:
+        def first(self):
+            return None
+
+    class FakeSession:
+        statement = None
+
+        async def execute(self, statement):
+            self.statement = statement
+            return FakeResult()
+
+    async def scenario() -> None:
+        session = FakeSession()
+        repository = CandidatePoolRepository(session)  # type: ignore[arg-type]
+
+        result = await repository.get_buyer_prospect_rule(
+            pool_id=uuid4(),
+            department_id=uuid4(),
+            for_update=True,
+        )
+
+        assert result is None
+        assert session.statement is not None
+
+        sql = str(
+            session.statement.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": False},
+            )
+        )
+
+        assert "LEFT OUTER JOIN collection_jobs" in sql
+        assert "FOR UPDATE OF candidate_pools" in sql
+
+    asyncio.run(scenario())

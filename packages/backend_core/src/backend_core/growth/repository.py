@@ -407,7 +407,9 @@ class CandidatePoolRepository:
             )
         )
         if for_update:
-            statement = statement.execution_options(populate_existing=True).with_for_update()
+            statement = statement.execution_options(populate_existing=True).with_for_update(
+                of=CandidatePool
+            )
         row = (await self.session.execute(statement)).first()
         if row is None:
             return None
